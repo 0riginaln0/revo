@@ -147,7 +147,7 @@ fn parseScheme(uri: *const Uri, root_id: usize, vm: *VM) !void {
 
 fn parseParam(param: []const u8, query_id: usize, vm: *VM) !void {
     var query = try vm.tables.get(query_id);
-    if (std.mem.indexOfScalar(u8, param, '=')) |i| {
+    if (std.mem.findScalar(u8, param, '=')) |i| {
         const raw_key = param[0..i];
         const key = try vm.internAtom(raw_key);
         const val = param[i + 1 ..];

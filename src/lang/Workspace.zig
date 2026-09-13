@@ -779,7 +779,7 @@ pub fn sourceLine(text: []const u8, line: u32) []const u8 {
         if (text[pos] == '\n') cur += 1;
         pos += 1;
     }
-    const end = std.mem.indexOfScalarPos(u8, text, pos, '\n') orelse text.len;
+    const end = std.mem.findScalarPos(u8, text, pos, '\n') orelse text.len;
     return text[pos..end];
 }
 
@@ -820,7 +820,7 @@ fn renderBindingLine(
     var line = sourceLine(text, def_range.start.line);
     line = std.mem.trim(u8, line, " \t\r");
     line = stripPub(line);
-    if (type_name.len > 0 and std.mem.indexOf(u8, line, type_name) == null)
+    if (type_name.len > 0 and std.mem.find(u8, line, type_name) == null)
         return std.fmt.allocPrint(alloc, "{s}\n(type = {s})", .{ line, type_name });
     return alloc.dupe(u8, line);
 }
@@ -1211,8 +1211,8 @@ pub fn inlayHints(
         if (ti.tag == .function) {
             const decl_needle = try std.fmt.allocPrint(alloc, "fn {s}(", .{sym.name});
             defer alloc.free(decl_needle);
-            if (std.mem.indexOf(u8, line, decl_needle) != null) {
-                if (std.mem.indexOf(u8, line, "->") != null or ti.tag.function.return_type.tag == .any) continue;
+            if (std.mem.find(u8, line, decl_needle) != null) {
+                if (std.mem.find(u8, line, "->") != null or ti.tag.function.return_type.tag == .any) continue;
                 const ret = try type_serde.formatType(alloc, ti.tag.function.return_type);
                 defer alloc.free(ret);
 
@@ -1233,7 +1233,7 @@ pub fn inlayHints(
         defer alloc.free(tn);
         const needle = try std.fmt.allocPrint(alloc, ": {s}", .{tn});
         defer alloc.free(needle);
-        if (std.mem.indexOf(u8, line, needle) != null) continue;
+        if (std.mem.find(u8, line, needle) != null) continue;
 
         try hints.append(alloc, .{
             .position = sym.range.end,
@@ -1500,15 +1500,15 @@ fn resolveImportPath(
     source_name: []const u8,
     raw_path: []const u8,
 ) ?[]const u8 {
-    const base_dir = std.fs.path.dirname(source_name) orelse ".";
+    const base_dir = std.Io.Dir.path.dirname(source_name) orelse ".";
     // strip leading ./ from relative paths so join produces a clean path
     var clean = raw_path;
     while (clean.len >= 2 and clean[0] == '.' and clean[1] == '/') clean = clean[2..];
-    const joined = if (std.fs.path.isAbsolute(clean))
+    const joined = if (std.Io.Dir.path.isAbsolute(clean))
         self.alloc.dupe(u8, clean) catch return null
     else
-        std.fs.path.join(self.alloc, &.{ base_dir, clean }) catch return null;
-    const ext = std.fs.path.extension(joined);
+        std.Io.Dir.path.join(self.alloc, &.{ base_dir, clean }) catch return null;
+    const ext = std.Io.Dir.path.extension(joined);
     if (ext.len != 0 and isLibExtension(ext)) {
         // a shared library import is described by its sibling manifest
         const manifest = revo.extensionManifestPath(self.alloc, joined) catch {
@@ -1597,7 +1597,7 @@ fn findImportPathForBinding(self: *Workspace, alloc: std.mem.Allocator, file_id:
 ///   , so dep lookups during completion ignore it
 fn stripLastLine(text: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, text, "\r\n");
-    const idx = std.mem.lastIndexOfScalar(u8, trimmed, '\n') orelse return "";
+    const idx = std.mem.findScalarLast(u8, trimmed, '\n') orelse return "";
     return trimmed[0..idx];
 }
 
@@ -1638,7 +1638,7 @@ const FindImportVisitor = struct {
 /// auto-bound name for a bare `import "path"`, mirroring Parser
 fn autoImportName(path: []const u8) []const u8 {
     if (std.mem.endsWith(u8, path, ".d.rv")) return path[0 .. path.len - ".d.rv".len];
-    return std.fs.path.stem(path);
+    return std.Io.Dir.path.stem(path);
 }
 
 fn resolveDepId(
@@ -2566,7 +2566,7 @@ const SymbolVisitor = struct {
                 const span = entry.value.span;
                 if (span.end > self.text.len or span.start > span.end) continue;
                 const slice = self.text[span.start..span.end];
-                if (slice.len == 0 or std.mem.indexOfScalar(u8, slice, '\n') != null) continue;
+                if (slice.len == 0 or std.mem.findScalar(u8, slice, '\n') != null) continue;
 
                 out.append(self.alloc, .{
                     .name = self.alloc.dupe(u8, n) catch return null,
@@ -2579,7 +2579,7 @@ const SymbolVisitor = struct {
 
                 if (span.end > self.text.len or span.start > span.end) continue;
                 const slice = self.text[span.start..span.end];
-                if (slice.len == 0 or std.mem.indexOfScalar(u8, slice, '\n') != null) continue;
+                if (slice.len == 0 or std.mem.findScalar(u8, slice, '\n') != null) continue;
 
                 out.append(self.alloc, .{
                     .name = std.fmt.allocPrint(self.alloc, "{d}", .{idx}) catch return null,
@@ -2641,9 +2641,9 @@ fn containsId(items: []const FileId, id: FileId) bool {
 /// does a dep file serve as the module named `name`? plain modules match by
 /// stem (`foo.rv` -> `foo`), lib manifests by `<name>.d.rv`
 fn moduleFileNameMatches(snap_name: []const u8, name: []const u8) bool {
-    const base = std.fs.path.basename(snap_name);
-    const ext = std.fs.path.extension(snap_name);
-    if (std.mem.eql(u8, std.fs.path.stem(snap_name), name)) return true;
+    const base = std.Io.Dir.path.basename(snap_name);
+    const ext = std.Io.Dir.path.extension(snap_name);
+    if (std.mem.eql(u8, std.Io.Dir.path.stem(snap_name), name)) return true;
     if (ext.len > 0 and std.mem.endsWith(u8, base, ".d.rv") and
         std.mem.eql(u8, base[0 .. base.len - 5], name)) return true;
     return false;
@@ -3093,7 +3093,7 @@ fn addGeneralCompletions(
     // . dotted names stay scoped
     //   : only bare macros complete bare
     for (self.stdlibMacroNames(arena)) |name| {
-        if (std.mem.indexOfScalar(u8, name, '.') != null) continue;
+        if (std.mem.findScalar(u8, name, '.') != null) continue;
         if (!std.mem.startsWith(u8, name, prefix)) continue;
         items.append(arena, .{ .label = name, .kind = .function }) catch return;
     }
@@ -3436,7 +3436,7 @@ test "workspace hover over lib import manifest" {
         \\pub declare add = fn(a: number, b: number) -> number
         \\pub declare concat = fn(parts: table, sep: string) -> string
     });
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_n = try tmp.dir.realPath(std.testing.io, &dir_buf);
     const dir_path = dir_buf[0..dir_n];
 
@@ -3743,7 +3743,7 @@ test "imported manifest members complete by bare name" {
         \\pub type geo.Point = num
         \\pub macro geo.macc! `(%w:expr)` `%w`
     });
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_n = try tmp.dir.realPath(std.testing.io, &dir_buf);
     const dir_path = dir_buf[0..dir_n];
 

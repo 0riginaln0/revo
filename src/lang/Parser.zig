@@ -1211,7 +1211,7 @@ fn parseImport(self: *Parser, start: Token) anyerror!*Node {
             if (self.peek().type == .string) {
                 // "path", auto-bind
                 const path_token = try self.expect(.string);
-                const name = try self.alloc.dupe(u8, std.fs.path.stem(path_token.text));
+                const name = try self.alloc.dupe(u8, std.Io.Dir.path.stem(path_token.text));
                 try import_nodes.append(self.alloc, try self.allocExpr(
                     Span.merge(start.span(), path_token.span()),
                     .{ .import_stmt = .{ .name = name, .path = path_token.text } },
@@ -1243,7 +1243,7 @@ fn parseImport(self: *Parser, start: Token) anyerror!*Node {
             if (std.mem.endsWith(u8, path_token.text, ".d.rv"))
                 path_token.text[0 .. path_token.text.len - ".d.rv".len]
             else
-                std.fs.path.stem(path_token.text),
+                std.Io.Dir.path.stem(path_token.text),
         );
         return self.allocExpr(
             Span.merge(start.span(), path_token.span()),

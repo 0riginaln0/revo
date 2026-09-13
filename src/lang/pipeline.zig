@@ -400,7 +400,7 @@ pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
     const prev_module_dir = vm.module_dir;
     defer vm.module_dir = prev_module_dir;
     if (source.name) |name| {
-        if (std.fs.path.dirname(name)) |dir| {
+        if (std.Io.Dir.path.dirname(name)) |dir| {
             vm.module_dir = dir;
         }
     }

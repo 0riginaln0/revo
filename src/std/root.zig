@@ -187,7 +187,7 @@ pub fn Args(comptime specs: []const TypeSpec) type {
         }
         break :blk result;
     };
-    return std.meta.Tuple(&types);
+    return @Tuple(&types);
 }
 
 pub fn specToType(comptime spec: TypeSpec) type {
@@ -758,7 +758,7 @@ pub fn input(args: []const Data, vm: *VM) !HostResult {
 
     // drain leftover from previous call first
     if (input_buf_len > 0 and !read_eof) {
-        if (std.mem.indexOfScalar(u8, input_buf[0..input_buf_len], delim)) |di| {
+        if (std.mem.findScalar(u8, input_buf[0..input_buf_len], delim)) |di| {
             try result.appendSlice(vm.runtime.alloc, input_buf[0..di]);
             const rest = input_buf[di + 1 .. input_buf_len];
             std.mem.copyForwards(u8, input_buf[0..rest.len], rest);
@@ -781,7 +781,7 @@ pub fn input(args: []const Data, vm: *VM) !HostResult {
         };
         const total = input_buf_len + n;
         if (!read_eof) {
-            if (std.mem.indexOfScalar(u8, input_buf[0..total], delim)) |di| {
+            if (std.mem.findScalar(u8, input_buf[0..total], delim)) |di| {
                 try result.appendSlice(vm.runtime.alloc, input_buf[0..di]);
                 const rest = input_buf[di + 1 .. total];
                 std.mem.copyForwards(u8, input_buf[0..rest.len], rest);
@@ -1293,7 +1293,7 @@ pub fn def(comptime impl: anytype) HostFunc {
             }
             break :blk result;
         };
-        pub const FullArgs = std.meta.Tuple(&all_types);
+        pub const FullArgs = @Tuple(&all_types);
     };
 
     const has_optionals = Storage.required_count < count;

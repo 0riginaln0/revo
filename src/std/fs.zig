@@ -74,7 +74,7 @@ pub const Impl = struct {
             else => return err,
         }
 
-        const file = if (std.fs.path.isAbsolute(expanded))
+        const file = if (std.Io.Dir.path.isAbsolute(expanded))
             Dir.createFileAbsolute(vm.runtime.io, expanded, .{ .truncate = false })
         else
             Dir.cwd().createFile(vm.runtime.io, expanded, .{ .truncate = false });
@@ -280,7 +280,7 @@ fn numPermissions(n: f64) !File.Permissions {
 }
 
 fn probe(vm: *VM, path: []const u8) !void {
-    const file = if (std.fs.path.isAbsolute(path))
+    const file = if (std.Io.Dir.path.isAbsolute(path))
         Dir.openFileAbsolute(vm.runtime.io, path, .{ .allow_directory = true, .path_only = true })
     else
         Dir.cwd().openFile(vm.runtime.io, path, .{ .allow_directory = true, .path_only = true });
@@ -374,7 +374,7 @@ test "fs.open/read reads file contents" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "a.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "a.txt" });
     defer alloc.free(file_path);
 
     const source = try sourceForPath(
@@ -392,7 +392,7 @@ test "fs.write overwrites file" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "w.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "w.txt" });
     defer alloc.free(file_path);
 
     const source = try sourceForPath(
@@ -412,7 +412,7 @@ test "fs.write appends with flag" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "app.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "app.txt" });
     defer alloc.free(file_path);
 
     const source = try sourceForPath(
@@ -498,7 +498,7 @@ test "fs.open w creates missing file" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "new.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "new.txt" });
     defer alloc.free(file_path);
 
     const source = try sourceForPath(
@@ -518,7 +518,7 @@ test "fs.open w truncates existing file" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "t.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "t.txt" });
     defer alloc.free(file_path);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -537,9 +537,9 @@ test "fs.open a creates missing file and keeps existing content" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const kept = try std.fs.path.join(alloc, &.{ dir_path, "k.txt" });
+    const kept = try std.Io.Dir.path.join(alloc, &.{ dir_path, "k.txt" });
     defer alloc.free(kept);
-    const made = try std.fs.path.join(alloc, &.{ dir_path, "made.txt" });
+    const made = try std.Io.Dir.path.join(alloc, &.{ dir_path, "made.txt" });
     defer alloc.free(made);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -580,9 +580,9 @@ test "fs.touch creates missing file and leaves existing content" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const kept = try std.fs.path.join(alloc, &.{ dir_path, "e.txt" });
+    const kept = try std.Io.Dir.path.join(alloc, &.{ dir_path, "e.txt" });
     defer alloc.free(kept);
-    const made = try std.fs.path.join(alloc, &.{ dir_path, "touched.txt" });
+    const made = try std.Io.Dir.path.join(alloc, &.{ dir_path, "touched.txt" });
     defer alloc.free(made);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -601,7 +601,7 @@ test "fs.mkdir parents flag creates nested parents" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const nested = try std.fs.path.join(alloc, &.{ dir_path, "a", "b", "c" });
+    const nested = try std.Io.Dir.path.join(alloc, &.{ dir_path, "a", "b", "c" });
     defer alloc.free(nested);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -620,9 +620,9 @@ test "fs.copy roundtrips contents" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const src = try std.fs.path.join(alloc, &.{ dir_path, "src.txt" });
+    const src = try std.Io.Dir.path.join(alloc, &.{ dir_path, "src.txt" });
     defer alloc.free(src);
-    const dst = try std.fs.path.join(alloc, &.{ dir_path, "dst.txt" });
+    const dst = try std.Io.Dir.path.join(alloc, &.{ dir_path, "dst.txt" });
     defer alloc.free(dst);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -640,9 +640,9 @@ test "fs.remove recursive deletes tree" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const tree = try std.fs.path.join(alloc, &.{ dir_path, "tree" });
+    const tree = try std.Io.Dir.path.join(alloc, &.{ dir_path, "tree" });
     defer alloc.free(tree);
-    const deep = try std.fs.path.join(alloc, &.{ dir_path, "tree", "sub", "deep.txt" });
+    const deep = try std.Io.Dir.path.join(alloc, &.{ dir_path, "tree", "sub", "deep.txt" });
     defer alloc.free(deep);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -722,7 +722,7 @@ test "fs.stat reads size from path" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "s.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "s.txt" });
     defer alloc.free(file_path);
 
     const source = try sourceForPath(
@@ -741,7 +741,7 @@ test "fs.stat follow flag sees through symlinks" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const link_path = try std.fs.path.join(alloc, &.{ dir_path, "link.txt" });
+    const link_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "link.txt" });
     defer alloc.free(link_path);
 
     const source = try std.fmt.allocPrint(alloc,
@@ -759,7 +759,7 @@ test "file.stat follow flag reads metadata from handle" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(io, ".", alloc);
     defer alloc.free(dir_path);
-    const file_path = try std.fs.path.join(alloc, &.{ dir_path, "h.txt" });
+    const file_path = try std.Io.Dir.path.join(alloc, &.{ dir_path, "h.txt" });
     defer alloc.free(file_path);
 
     const source = try std.fmt.allocPrint(alloc,

@@ -166,11 +166,11 @@ pub fn asIndex(n: f64) error{TypeError}!usize {
 }
 
 pub fn resolve(raw_path: []const u8, base_dir: ?[]const u8, io: std.Io, alloc: std.mem.Allocator) error{ OutOfMemory, IoError }![]u8 {
-    if (std.fs.path.isAbsolute(raw_path)) return alloc.dupe(u8, raw_path) catch return error.OutOfMemory;
+    if (std.Io.Dir.path.isAbsolute(raw_path)) return alloc.dupe(u8, raw_path) catch return error.OutOfMemory;
 
     const root_dir = std.Io.Dir.cwd().realPathFileAlloc(io, base_dir orelse ".", alloc) catch return error.IoError;
     defer alloc.free(root_dir);
-    return std.fs.path.resolve(alloc, &.{ root_dir, raw_path }) catch return error.OutOfMemory;
+    return std.Io.Dir.path.resolve(alloc, &.{ root_dir, raw_path }) catch return error.OutOfMemory;
 }
 
 /// resolve an import path the same way compile-time preload and the runtime
@@ -198,7 +198,7 @@ pub fn resolveImportFile(
     }
 
     // absolute paths
-    if (std.fs.path.isAbsolute(raw_path)) {
+    if (std.Io.Dir.path.isAbsolute(raw_path)) {
         return probeImportFile(io, alloc, null, raw_path);
     }
 
@@ -250,15 +250,15 @@ fn probeImportFile(
     name: []const u8,
 ) !?[]const u8 {
     const joined = if (dir) |d|
-        std.fs.path.resolve(alloc, &.{ d, name }) catch |err| switch (err) {
+        std.Io.Dir.path.resolve(alloc, &.{ d, name }) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
         }
     else
-        std.fs.path.resolve(alloc, &.{name}) catch |err| switch (err) {
+        std.Io.Dir.path.resolve(alloc, &.{name}) catch |err| switch (err) {
             error.OutOfMemory => |e| return e,
         };
     defer alloc.free(joined);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const n = std.Io.Dir.cwd().realPathFile(io, joined, &buf) catch |err| switch (err) {
         error.FileNotFound, error.IsDir => return null,
         else => |e| return e,
@@ -276,11 +276,11 @@ fn probeImportFile(
 /// existence; shared by the pipeline resolver and the workspace (which has
 /// no io to probe with)
 pub fn extensionManifestPath(alloc: std.mem.Allocator, resolved_lib: []const u8) ![]const u8 {
-    const dir = std.fs.path.dirname(resolved_lib) orelse return error.NoDirname;
-    const stem = std.fs.path.stem(resolved_lib);
+    const dir = std.Io.Dir.path.dirname(resolved_lib) orelse return error.NoDirname;
+    const stem = std.Io.Dir.path.stem(resolved_lib);
     const name = try std.fmt.allocPrint(alloc, "{s}.d.rv", .{stem});
     defer alloc.free(name);
-    return try std.fs.path.join(alloc, &.{ dir, name });
+    return try std.Io.Dir.path.join(alloc, &.{ dir, name });
 }
 
 /// if a `<stem>.d.rv` manifest sits next to a resolved extension lib,

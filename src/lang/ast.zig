@@ -313,7 +313,7 @@ pub const TypeAlias = struct {
 
 /// bare member of a possibly-dotted macro name: `uri.asdf!` -> `asdf!`
 pub fn bareMacroName(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, name, '.')) |i| return name[i + 1 ..];
+    if (std.mem.findScalarLast(u8, name, '.')) |i| return name[i + 1 ..];
     return name;
 }
 

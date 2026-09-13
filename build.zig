@@ -150,7 +150,7 @@ pub fn build(b: *Build) !void {
 
     // windows missing features: isocline (no libc), async (no posix threads)
     if (builtin.os.tag == .windows) {
-        if (std.mem.indexOf(u8, features_str, "isocline") != null) {
+        if (std.mem.find(u8, features_str, "isocline") != null) {
             logger.warn("isocline is not available on windows, disabling", .{});
         }
     }
@@ -271,7 +271,7 @@ pub fn build(b: *Build) !void {
         c_mod,   revolt_mod,
         exe_mod, erevo_mod.?,
     };
-    var import_list: std.ArrayListUnmanaged(Module.Import) = .empty;
+    var import_list: std.ArrayList(Module.Import) = .empty;
     defer import_list.deinit(b.allocator);
     try import_list.append(b.allocator, .{ .name = "revo", .module = revo_mod });
     try import_list.append(b.allocator, .{ .name = "vm", .module = vm_mod });

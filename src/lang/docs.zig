@@ -88,8 +88,8 @@ const docgen_start_marker = "<!-- docgen:start -->";
 const docgen_end_marker = "<!-- docgen:end -->";
 
 pub fn spliceMarkdown(alloc: std.mem.Allocator, old: []const u8, body: []const u8) ![]const u8 {
-    const s = std.mem.indexOf(u8, old, docgen_start_marker) orelse return error.MissingDocgenMarker;
-    const e = std.mem.indexOfPos(u8, old, s + docgen_start_marker.len, docgen_end_marker) orelse return error.MissingDocgenMarker;
+    const s = std.mem.find(u8, old, docgen_start_marker) orelse return error.MissingDocgenMarker;
+    const e = std.mem.findPos(u8, old, s + docgen_start_marker.len, docgen_end_marker) orelse return error.MissingDocgenMarker;
 
     return std.mem.concat(alloc, u8, &.{
         old[0..s],
@@ -378,7 +378,7 @@ fn renderTextFn(alloc: std.mem.Allocator, w: *Writer, spec: *const FnSpec, strip
         try w.writeAll("fn");
         try style(w, reset);
         try w.writeByte(' ');
-        const name_end = std.mem.indexOf(u8, sig, "(") orelse sig.len;
+        const name_end = std.mem.find(u8, sig, "(") orelse sig.len;
         try style(w, cyan);
         try w.writeAll(sig[0..name_end]);
         try style(w, reset);
@@ -679,7 +679,7 @@ fn renderHtmlDoc(w: *Writer, doc: []const u8, indent: usize) !void {
 
     var prose: []const u8 = trimmed;
     var code: []const u8 = "";
-    if (std.mem.indexOf(u8, trimmed, "\n\n")) |idx| {
+    if (std.mem.find(u8, trimmed, "\n\n")) |idx| {
         prose = trimmed[0..idx];
         code = std.mem.trim(u8, trimmed[idx + 2 ..], "\n");
     }
@@ -861,12 +861,12 @@ pub const Cli = struct {
                 .directory => {
                     if (entry.name.len > 0 and entry.name[0] == '.') continue;
                     if (std.mem.eql(u8, entry.name, "zig-out")) continue;
-                    const sub = try std.fs.path.join(arena, &.{ dir, entry.name });
+                    const sub = try std.Io.Dir.path.join(arena, &.{ dir, entry.name });
                     try collectSourceFiles(init, arena, sub, out);
                 },
                 .file => {
                     if (!std.mem.endsWith(u8, entry.name, ".rv")) continue;
-                    try out.append(arena, try std.fs.path.join(arena, &.{ dir, entry.name }));
+                    try out.append(arena, try std.Io.Dir.path.join(arena, &.{ dir, entry.name }));
                 },
                 else => {},
             }
