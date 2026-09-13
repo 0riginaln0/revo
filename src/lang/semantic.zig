@@ -796,6 +796,11 @@ const SemanticChecker = struct {
                     self.popScope();
                     unified = types_mod.unifyBranchType(unified, arm_type);
                 }
+                // miss falls through to nil at runtime
+                // so a non-exhaustive match always carries :nil in its type
+                if (!type_serde.matchCovers(self, subject_type, v.arms)) {
+                    unified = types_mod.withNilMiss(self.alloc, unified);
+                }
                 break :blk unified;
             },
             .loop_expr => |v| blk: {

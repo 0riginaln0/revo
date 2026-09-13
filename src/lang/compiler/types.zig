@@ -1,6 +1,7 @@
 const ast = @import("../ast.zig");
 const revo = @import("revo");
 const std = @import("std");
+const type_serde = @import("../type_serde.zig");
 
 pub const UnionVariant = struct {
     name: []const u8,
@@ -456,10 +457,16 @@ pub fn unifyBranchType(acc: TypeInfo, branch: TypeInfo) TypeInfo {
 }
 
 pub fn inferMatchType(ctx: anytype, subject: *const ast.Node, arms: []const ast.MatchArm) TypeInfo {
-    _ = subject;
+    const subject_type = inferExprType(ctx, subject);
     var result: TypeInfo = .{ .tag = .never };
     for (arms) |arm| {
         result = unifyBranchType(result, inferExprType(ctx, arm.then));
+    }
+
+    // miss falls through to nil at runtime
+    // so a non-exhaustive match always carries :nil in its type
+    if (!type_serde.matchCovers(ctx, subject_type, arms)) {
+        result = withNilMiss(ctx.alloc, result);
     }
     return result;
 }
@@ -912,6 +919,28 @@ pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
         },
         else => return false,
     }
+}
+
+/// union result with a :nil miss arm
+///
+/// non-exhaustive match falls through to nil at runtime, so :nil is part of the type
+/// `any` absorbs it and `never` (all arms diverge) becomes just :nil
+/// oom degrades to result
+pub fn withNilMiss(alloc: std.mem.Allocator, result: TypeInfo) TypeInfo {
+    if (result.tag == .any) return result;
+    if (result.tag == .never) return .{ .tag = .{ .atom = ":nil" } };
+
+    var variants = std.ArrayList(UnionVariant).initCapacity(alloc, 4) catch return result;
+    errdefer variants.deinit(alloc);
+
+    collectVariants(alloc, result, &variants) catch return result;
+    const nil_types = alloc.alloc(TypeInfo, 1) catch return result;
+
+    nil_types[0] = .{ .tag = .{ .atom = ":nil" } };
+    variants.append(alloc, .{ .name = "", .types = nil_types }) catch return result;
+
+    const owned = variants.toOwnedSlice(alloc) catch return result;
+    return .{ .tag = .{ .@"union" = owned } };
 }
 
 test matchCoversAll {
@@ -2043,6 +2072,111 @@ test "match ascriptions narrow to the annotated type" {
         if (inst.op == .add_imm) saw_add_imm = true;
     }
     try std.testing.expect(saw_add_imm);
+}
+
+test "non-exhaustive match" {
+    try t.expectCompileError(
+        \\ let n: num = 1
+        \\ let x: num = match n
+        \\ | 1 => 2
+        \\ | 2 => 3
+    , .ParseError);
+
+    // partial result match carries :nil in its type
+    try t.expectCompileError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+    , .ParseError);
+
+    // wildcard match has no :nil
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | 1 => 10
+        \\ | _ => 20
+        \\ x
+    , 20);
+
+    // exhaustive bool match has no :nil
+    try t.topNumber(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ x
+    , 10);
+
+    // exhaustive result match has no :nil
+    try t.topNumber(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ y
+    , 42);
+
+    // ascribed arm can cover the subject
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | v: num => v
+        \\ x
+    , 5);
+
+    // exhaustive bool match is precise, not any
+    // `let s: string` only fails when x is exactly num; any would compile
+    try t.expectCompileError(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ let s: string = x
+    , .ParseError);
+
+    // exhaustive result match is precise, not any
+    try t.expectCompileError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ let s: string = y
+    , .ParseError);
+
+    // never arm does not widen match to any
+    try t.expectCompileError(
+        \\ type R = {:ok, num} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ let s: string = a
+    , .ParseError);
+
+    // any payload propagates through match
+    // annotation wins over the literal:
+    // x may later hold {:ok, "str"},
+    //   so v is any and the match is any
+    //
+    // narrowing to num would be unsound
+    try t.topNumber(
+        \\ type R = {:ok, any} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ a
+    , 1);
+
+    // non-exhaustive match still yields nil at runtime
+    try t.topNil(
+        \\ match 99
+        \\ | 1 => 2
+        \\ | 2 => 3
+    );
 }
 
 test "return type propagation: const binding with annotated fn" {
