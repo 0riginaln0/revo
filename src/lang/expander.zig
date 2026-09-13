@@ -1,6 +1,6 @@
 // zlint-disable line-length -- yeah
-const std = @import("std");
 const lang = @import("./root.zig");
+const std = @import("std");
 
 const ast = lang.ast;
 const Node = ast.Node;

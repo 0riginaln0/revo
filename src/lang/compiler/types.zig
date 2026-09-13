@@ -1,6 +1,6 @@
-const std = @import("std");
-const revo = @import("revo");
 const ast = @import("../ast.zig");
+const revo = @import("revo");
+const std = @import("std");
 
 pub const UnionVariant = struct {
     name: []const u8,

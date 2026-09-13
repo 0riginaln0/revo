@@ -273,6 +273,5 @@ const revo = @import("../root.zig");
 const testing = revo.lang.testing;
 const Data = revo.Data;
 const VM = revo.VM;
-const api = @import("api.zig");
 const root = @import("root.zig");
 const HostResult = root.HostResult;

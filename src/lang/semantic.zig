@@ -1,13 +1,13 @@
 // zlint-disable line-length
 const std = @import("std");
 
-const lang = @import("./root.zig");
 const ast = @import("./ast.zig");
 const diagnostic = @import("diagnostic.zig");
-const types_mod = @import("compiler/types.zig");
-const type_serde = @import("type_serde.zig");
+const lang = @import("./root.zig");
 const module_iface = @import("module_iface.zig");
 const revo = @import("revo");
+const type_serde = @import("type_serde.zig");
+const types_mod = @import("compiler/types.zig");
 
 pub const ModuleResolver = struct {
     ptr: *anyopaque,

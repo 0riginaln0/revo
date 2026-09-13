@@ -24,8 +24,8 @@
 
 const std = @import("std");
 
-const revo = @import("../root.zig");
 const ast = @import("../lang/ast.zig");
+const revo = @import("../root.zig");
 const Data = revo.Data;
 const root = @import("root.zig");
 const TypeSpec = root.TypeSpec;

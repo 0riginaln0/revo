@@ -13,9 +13,9 @@
 //! same shape as the revo <-> vm cycle
 //!
 
-const std = @import("std");
 const ast = @import("ast.zig");
 const Lexer = @import("Lexer.zig");
+const std = @import("std");
 const types = @import("compiler/types.zig");
 const TypeInfo = types.TypeInfo;
 const UnionVariant = types.UnionVariant;

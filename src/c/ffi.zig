@@ -1,8 +1,8 @@
 //
 // callable functions for revo runtime interop
 //
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
 const revo = @import("revo");
 const vm = @import("vm");
@@ -12,8 +12,6 @@ const Data = memory.Data;
 const functions = vm.functions;
 const RevoBinding = functions.RevoBinding;
 const HostBinding = functions.HostBinding;
-const CFnPtr = functions.CFnPtr;
-const HostFn = functions.HostFn;
 const HostFunc = revo.std_lib.HostFunc;
 
 // for error/missing returns

@@ -1,5 +1,5 @@
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
 const lsp = @import("lsp");
 const T = lsp.types;

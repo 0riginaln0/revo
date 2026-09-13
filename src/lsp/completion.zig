@@ -1,6 +1,6 @@
-const std = @import("std");
 const lsp = @import("lsp");
 const revo = @import("revo");
+const std = @import("std");
 
 const T = lsp.types;
 const Workspace = revo.lang.Workspace;

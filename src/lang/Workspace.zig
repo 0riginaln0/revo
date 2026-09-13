@@ -5,8 +5,8 @@ const VM = revo.VM;
 
 const lang = @import("./root.zig");
 const types = lang.types;
-const type_serde = @import("type_serde.zig");
 const semantic = @import("semantic.zig");
+const type_serde = @import("type_serde.zig");
 
 //
 // types

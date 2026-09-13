@@ -1,6 +1,6 @@
-const std = @import("std");
-const revo = @import("../root.zig");
 const async_backend = @import("./async_backend.zig");
+const revo = @import("../root.zig");
+const std = @import("std");
 
 // default async backend
 //   worker threads + completion pipe

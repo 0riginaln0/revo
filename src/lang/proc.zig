@@ -1,8 +1,8 @@
 const std = @import("std");
 
-const revo = @import("revo");
-const lang = @import("./root.zig");
 const diagnostic = @import("./diagnostic.zig");
+const lang = @import("./root.zig");
+const revo = @import("revo");
 const Data = revo.Data;
 
 const ast = lang.ast;

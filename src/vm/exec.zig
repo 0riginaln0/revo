@@ -1292,25 +1292,6 @@ noinline fn execPow(self: *VM, regs: []Data, base: usize, instr: Instruction) VM
     );
 }
 
-noinline fn execPowFloat(self: *VM, regs: []Data, base: usize, instr: Instruction) VM.EvalError!?VM.EvalFailure {
-    const lhs = regRead(regs, base, instr.b);
-    const rhs = regRead(regs, base, instr.c);
-    if (debug_assert_types) {
-        std.debug.assert(lhs.isNumber());
-        std.debug.assert(rhs.isNumber());
-    }
-    const ln: f64 = @bitCast(lhs.bits);
-    const rn: f64 = @bitCast(rhs.bits);
-    const result = std.math.pow(f64, ln, rn);
-    if (std.math.isNan(result)) return self.fail(
-        error.IncompatibleTypes,
-        "cannot exponentiate {s} by {s}",
-        .{ revo.std_lib.typeof(lhs, self), revo.std_lib.typeof(rhs, self) },
-    );
-
-    regWrite(regs, base, instr.a, Data.new.num(result));
-    return null;
-}
 
 /// string * n fallback for .mul (numeric fast path stays inline)
 noinline fn execStringRepeat(
@@ -1353,8 +1334,8 @@ noinline fn execStringRepeat(
     );
 }
 
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
 const revo = @import("revo");
 

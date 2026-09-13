@@ -1,5 +1,5 @@
-const std = @import("std");
 const revo = @import("revo");
+const std = @import("std");
 const VM = @import("VM.zig");
 
 pub inline fn noteGCPressure(self: *VM, bytes: usize) void {

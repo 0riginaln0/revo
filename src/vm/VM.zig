@@ -1860,8 +1860,8 @@ test {
     _ = @import("gc.zig");
 }
 
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
 const revo = @import("revo");
 const lang = revo.lang;

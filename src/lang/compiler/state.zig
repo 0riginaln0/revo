@@ -7,8 +7,8 @@ const Register = revo.opcode.Register;
 const UpvalueSpec = revo.functions.UpvalueSpec;
 const types = @import("types.zig");
 
-const type_serde = @import("../type_serde.zig");
 const ast = @import("../ast.zig");
+const type_serde = @import("../type_serde.zig");
 const Node = ast.Node;
 
 pub const LocalVar = struct {

@@ -1,6 +1,6 @@
-const std = @import("std");
-const builtin = @import("builtin");
 const bindings = @import("src/c/bindings.zig");
+const builtin = @import("builtin");
+const std = @import("std");
 
 const Build = std.Build;
 const Module = Build.Module;
@@ -579,6 +579,29 @@ pub fn build(b: *Build) !void {
             release_step.dependOn(&b.addInstallArtifact(release_exe, install_options).step);
         }
     }
+    //
+    // lint
+    //
+    const zlinter = @import("zlinter");
+    const lint_cmd = b.step("lint", "lint with zlinter");
+    lint_cmd.dependOn(step: {
+        // ref:
+        // https://github.com/KurtWagner/zlinter/blob/master/RULES.md
+        var builder = zlinter.builder(b, .{});
+        builder.addRule(.{ .builtin = .field_naming }, .{});
+        builder.addRule(.{ .builtin = .declaration_naming }, .{});
+        builder.addRule(.{ .builtin = .function_naming }, .{});
+        builder.addRule(.{ .builtin = .file_naming }, .{});
+        builder.addRule(.{ .builtin = .switch_case_ordering }, .{});
+        builder.addRule(.{ .builtin = .no_deprecated }, .{});
+        builder.addRule(.{ .builtin = .no_orelse_unreachable }, .{});
+        // autofixable
+        builder.addRule(.{ .builtin = .no_unused }, .{});
+        // fucks with comments and layouts as of [git blame to check date] dont use
+        // builder.addRule(.{ .builtin = .field_ordering }, .{});
+        builder.addRule(.{ .builtin = .import_ordering }, .{});
+        break :step builder.build();
+    });
 }
 const builds = struct {
     fn mvzr(

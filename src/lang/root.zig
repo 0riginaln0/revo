@@ -1,13 +1,13 @@
 pub const ast = @import("ast.zig");
-pub const pipeline = @import("pipeline.zig");
+pub const diagnostic = @import("diagnostic.zig");
 pub const expander = @import("expander.zig");
-pub const proc = @import("proc.zig");
 pub const Lexer = @import("Lexer.zig");
 pub const parser = @import("Parser.zig");
-pub const type_serde = @import("type_serde.zig");
-pub const diagnostic = @import("diagnostic.zig");
+pub const pipeline = @import("pipeline.zig");
+pub const proc = @import("proc.zig");
 pub const testing = @import("testing.zig");
 pub const tests = @import("tests.zig");
+pub const type_serde = @import("type_serde.zig");
 pub const Workspace = @import("Workspace.zig");
 
 pub const parse = pipeline.parse;
@@ -63,8 +63,8 @@ pub const TraceFrame = diagnostic.TraceFrame;
 pub const Label = diagnostic.Label;
 pub const Note = diagnostic.Note;
 pub const Severity = diagnostic.Severity;
-pub const semantic = @import("semantic.zig");
 pub const docs = @import("docs.zig");
+pub const semantic = @import("semantic.zig");
 pub const Token = Lexer.Token;
 pub const TokenType = Lexer.TokenType;
 pub const InterpOpen = Lexer.InterpOpen;

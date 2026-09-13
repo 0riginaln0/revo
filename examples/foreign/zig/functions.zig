@@ -1,5 +1,5 @@
-const std = @import("std");
 const revo = @import("revo");
+const std = @import("std");
 
 const HostBinding = revo.HostBinding;
 const HostResult = revo.std_lib.HostResult;

@@ -1,7 +1,7 @@
-const std = @import("std");
-const revo = @import("revo");
-const builtin = @import("builtin");
 const build_options = @import("build_options");
+const builtin = @import("builtin");
+const revo = @import("revo");
+const std = @import("std");
 const Allocator = std.mem.Allocator;
 const VM = revo.VM;
 

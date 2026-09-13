@@ -1,5 +1,5 @@
-const std = @import("std");
 const revo = @import("revo");
+const std = @import("std");
 
 const VM = revo.VM;
 const print = revo.vm.print;

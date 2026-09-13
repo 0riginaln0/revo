@@ -1,5 +1,5 @@
-const std = @import("std");
 const revo = @import("revo");
+const std = @import("std");
 
 pub var supports_color: bool = !revo.is_freestanding;
 

@@ -1,9 +1,9 @@
 //
 // embedding api for embedding revo from c
 //
-const std = @import("std");
-const revo = @import("revo");
 const build_opts = @import("build_options");
+const revo = @import("revo");
+const std = @import("std");
 const Data = revo.Data;
 
 /// opaque handle to a vm instance

@@ -1,7 +1,7 @@
 //! doc extraction, docgen rendering for terminal text + html, collection for cli
 
-const std = @import("std");
 const revo = @import("../root.zig");
+const std = @import("std");
 const api = revo.std_lib.api;
 const Writer = std.Io.Writer;
 const pretty = revo.pretty;

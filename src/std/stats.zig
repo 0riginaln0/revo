@@ -1,7 +1,7 @@
-const std = @import("std");
-const revo = @import("revo");
 const api = @import("api.zig");
+const revo = @import("revo");
 const root = @import("root.zig");
+const std = @import("std");
 const table_std = @import("table.zig");
 // const pool = @import("pool.zig");
 const Ts = root.T;
@@ -12,7 +12,6 @@ const memory = revo.memory;
 const Data = memory.Data;
 const VM = revo.VM;
 const HostResult = root.HostResult;
-const Table = revo.table.Table;
 const testing = revo.lang.testing;
 const table_methods = table_std.Impl;
 

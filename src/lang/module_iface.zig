@@ -1,5 +1,5 @@
-const std = @import("std");
 const ast = @import("ast.zig");
+const std = @import("std");
 const types = @import("compiler/types.zig");
 const TypeInfo = types.TypeInfo;
 

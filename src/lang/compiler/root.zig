@@ -14,20 +14,20 @@ const ProgramCounter = revo.ProgramCounter;
 const ast = @import("../ast.zig");
 const Node = ast.Node;
 const Binding = ast.Binding;
+const dce = @import("../ir/dce.zig");
 const expander = @import("../expander.zig");
 const flow = @import("flow.zig");
 const fold = @import("../ir/fold.zig");
-const dce = @import("../ir/dce.zig");
+pub const ir = @import("../ir/root.zig");
 const peephole = @import("../ir/peephole.zig");
 const promote = @import("../ir/promote.zig");
-pub const ir = @import("../ir/root.zig");
 const state_mod = @import("state.zig");
 
-pub const types = @import("types.zig");
+const diagnostic = @import("../diagnostic.zig");
 pub const type_check = @import("type_check.zig");
 const type_serde = @import("../type_serde.zig");
+pub const types = @import("types.zig");
 const values = @import("values.zig");
-const diagnostic = @import("../diagnostic.zig");
 
 const toRegister = state_mod.toRegister;
 

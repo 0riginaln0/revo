@@ -23,6 +23,10 @@
             .url = "git+https://github.com/mnemnion/mvzr.git?ref=HEAD#3efcfe339bd32e122c36b8f1db25b237f93a7ec2",
             .hash = "mvzr-0.3.9-ZSOky6t2AQCA7efmm5EYbPb5sOdbXa4EFsUgYbQ6hZv9",
         },
+        .zlinter = .{
+            .url = "git+https://github.com/kurtwagner/zlinter?ref=0.16.x#8b10b45d33c684be4f869baf95a37c282e9db750",
+            .hash = "zlinter-0.0.1-OjQ08doQDADkvkcRq2ONICvDheGl2onZzS5upWDxFNnA",
+        },
     },
     .paths = .{
         "src/",

@@ -26,8 +26,8 @@ const Compiler = revo.lang.compiler.Compiler;
 const Opcode = revo.opcode.Opcode;
 const Operand = revo.Operand;
 const Register = revo.opcode.Register;
-const ir = @import("root.zig");
 const dce = @import("dce.zig");
+const ir = @import("root.zig");
 
 pub fn peepholeIr(self: *Compiler) !void {
     const insts = self.ir_builder.instructions.items;

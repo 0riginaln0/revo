@@ -4,8 +4,8 @@
 //! this is the public interface and the collection of top-level globals
 //!
 
-const std = @import("std");
 const builtin = @import("builtin");
+const std = @import("std");
 
 const revo = @import("../root.zig");
 const mem = revo.memory;

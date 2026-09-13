@@ -212,6 +212,5 @@ const revo = @import("../root.zig");
 const mem = revo.memory;
 const Data = revo.Data;
 const VM = revo.VM;
-const api = @import("api.zig");
 const root = @import("root.zig");
 const HostResult = root.HostResult;
