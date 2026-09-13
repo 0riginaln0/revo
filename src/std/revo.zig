@@ -118,7 +118,7 @@ test "revo.dofile returns the file's value" {
 
     const dir_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(dir_path);
-    const file_path = try std.fs.path.join(std.testing.allocator, &.{ dir_path, "hi.rv" });
+    const file_path = try std.Io.Dir.path.join(std.testing.allocator, &.{ dir_path, "hi.rv" });
     defer std.testing.allocator.free(file_path);
 
     const source = try std.fmt.allocPrint(std.testing.allocator,

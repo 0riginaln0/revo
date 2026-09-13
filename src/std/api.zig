@@ -180,8 +180,8 @@ pub fn macroSources(caller_alloc: std.mem.Allocator) ![]const []const u8 {
         // happy path
         //   macro decls need their keyword spelled out, so most
         //   groups skip the parse entirely (prose mentions still parse)
-        if (std.mem.indexOf(u8, g.src, "macro") == null and
-            std.mem.indexOf(u8, g.src, "proc") == null) continue;
+        if (std.mem.find(u8, g.src, "macro") == null and
+            std.mem.find(u8, g.src, "proc") == null) continue;
         const spans = try collectMacroSpans(pa, g.src);
         defer pa.free(spans);
         for (spans) |span| try out.append(pa, g.src[span.start..span.end]);
@@ -597,11 +597,11 @@ pub fn skippableForDocs(err: anyerror) bool {
 fn docFromMarkdown(alloc: std.mem.Allocator, doc: *std.ArrayList(u8)) !void {
     const raw = try alloc.dupe(u8, doc.items);
     defer alloc.free(raw);
-    const fence = std.mem.indexOf(u8, raw, "```") orelse return;
+    const fence = std.mem.find(u8, raw, "```") orelse return;
     const code_rest = raw[fence + 3 ..];
     const code_start: usize = if (code_rest.len > 0 and code_rest[0] == '\n') 1 else 0;
     const code_body = code_rest[code_start..];
-    const close = std.mem.indexOf(u8, code_body, "```") orelse return error.BadDoc;
+    const close = std.mem.find(u8, code_body, "```") orelse return error.BadDoc;
     const code = code_body[0..close];
     const prose = std.mem.trimEnd(u8, raw[0..fence], "\n");
 
@@ -920,8 +920,8 @@ test "collectMacroSpans finds pub macros and procs only" {
     const spans = try collectMacroSpans(testing.allocator, src);
     defer testing.allocator.free(spans);
     try testing.expectEqual(@as(usize, 2), spans.len);
-    try testing.expect(std.mem.indexOf(u8, src[spans[0].start..spans[0].end], "ok?!") != null);
-    try testing.expect(std.mem.indexOf(u8, src[spans[1].start..spans[1].end], "uri.asdf!") != null);
+    try testing.expect(std.mem.find(u8, src[spans[0].start..spans[0].end], "ok?!") != null);
+    try testing.expect(std.mem.find(u8, src[spans[1].start..spans[1].end], "uri.asdf!") != null);
 }
 
 test "loadAllSpecs pairs every spec with its impl" {

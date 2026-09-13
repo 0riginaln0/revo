@@ -33,7 +33,7 @@ fn swapFiberAndRun(
 ) !struct { result: revo.EvalResult, prev: revo.VM.Fiber } {
     try vm.setProgramSourceName(source_path);
 
-    const module_dir = std.fs.path.dirname(source_path) orelse ".";
+    const module_dir = std.Io.Dir.path.dirname(source_path) orelse ".";
     const prev_module_dir = vm.module_dir;
     vm.module_dir = module_dir;
     defer vm.module_dir = prev_module_dir;

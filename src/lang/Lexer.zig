@@ -793,7 +793,7 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
                 var line_end: usize = 1;
                 var removed: usize = 1 + dedent.losses[0];
                 for (interp_opens.items) |*open| {
-                    while (std.mem.indexOfScalar(u8, raw[line_end..open.idx], '\n')) |nl_pos| {
+                    while (std.mem.findScalar(u8, raw[line_end..open.idx], '\n')) |nl_pos| {
                         line_end += nl_pos + 1;
                         nl += 1;
                         removed += dedent.losses[nl];

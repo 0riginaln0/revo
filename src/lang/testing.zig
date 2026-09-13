@@ -69,7 +69,7 @@ pub fn topResult(source: []const u8, module_dir: ?[]const u8) !TopResult {
     errdefer vm.deinit();
     const src_name: []const u8 = if (module_dir) |dir| blk: {
         vm.module_dir = dir;
-        const joined = try std.fs.path.join(alloc, &.{ dir, "<source>" });
+        const joined = try std.Io.Dir.path.join(alloc, &.{ dir, "<source>" });
         break :blk joined;
     } else "<source>";
     defer if (module_dir != null) alloc.free(src_name);
@@ -194,7 +194,7 @@ pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void
     defer vm.deinit();
     vm.module_dir = module_dir;
 
-    const source_name = try std.fs.path.join(alloc, &.{ module_dir, "<source>" });
+    const source_name = try std.Io.Dir.path.join(alloc, &.{ module_dir, "<source>" });
     defer alloc.free(source_name);
 
     const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{
@@ -252,7 +252,7 @@ pub fn expectExpandErrorInDir(module_dir: []const u8, source: []const u8, expect
     defer vm.deinit();
     vm.module_dir = module_dir;
 
-    const source_name = try std.fs.path.join(alloc, &.{ module_dir, "<source>" });
+    const source_name = try std.Io.Dir.path.join(alloc, &.{ module_dir, "<source>" });
     defer alloc.free(source_name);
 
     const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{
@@ -317,7 +317,7 @@ pub fn expectRuntimeErrorInDir(module_dir: []const u8, source: []const u8, expec
     defer vm.deinit();
     vm.module_dir = module_dir;
 
-    const source_name = try std.fs.path.join(alloc, &.{ module_dir, "<source>" });
+    const source_name = try std.Io.Dir.path.join(alloc, &.{ module_dir, "<source>" });
     defer alloc.free(source_name);
 
     const result = try revo.module.runModule(&vm, source_name, source, false);

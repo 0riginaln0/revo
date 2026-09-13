@@ -673,7 +673,7 @@ const SemanticChecker = struct {
                         types_mod.inferExprType(self, call.callee);
                     if (resolved) |r| {
                         if (r.tag == .function and
-                            std.mem.indexOfScalar(*const types_mod.FunctionSignature, self.stdlib_sig_ptrs.items, r.tag.function) != null)
+                            std.mem.findScalar(*const types_mod.FunctionSignature, self.stdlib_sig_ptrs.items, r.tag.function) != null)
                         {
                             map.put(node, t) catch {};
                         }

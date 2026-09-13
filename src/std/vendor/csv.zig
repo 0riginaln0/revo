@@ -271,7 +271,7 @@ pub const Reader = struct {
     /// - `.{ data, null }` otherwise.
     fn peekUntil(self: *Reader, delimiters: []const u8) error{ ReadFailed, EndOfStream }!struct { []const u8, ?u8 } {
         const b = try self.peek();
-        if (std.mem.indexOfAny(u8, b, delimiters)) |delim_idx| {
+        if (std.mem.findAny(u8, b, delimiters)) |delim_idx| {
             return .{ b[0..delim_idx], b[delim_idx] };
         }
         return .{ b, null };
@@ -405,7 +405,7 @@ pub const Writer = struct {
 
             var offset: usize = 0;
             try self.w.writeByte(quote);
-            while (std.mem.indexOfScalarPos(u8, field, offset, quote)) |i| {
+            while (std.mem.findScalarPos(u8, field, offset, quote)) |i| {
                 try self.w.writeAll(field[offset..i]);
                 try self.w.writeAll(&.{ quote, quote });
                 offset = i + 1;
@@ -427,7 +427,7 @@ pub const Writer = struct {
     }
 
     fn needsEscaping(self: Writer, field: []const u8) bool {
-        return std.mem.indexOfAny(u8, field, &self.bytes_to_escape) != null;
+        return std.mem.findAny(u8, field, &self.bytes_to_escape) != null;
     }
 };
 

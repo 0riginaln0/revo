@@ -2529,7 +2529,7 @@ test "manifest .d.rv types .so imports, sig fallback without one" {
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fake.d.rv", .data = "pub declare open = fn(path: string) -> string\n" });
     const module_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
     defer std.testing.allocator.free(module_dir);
-    const source_name = try std.fs.path.join(std.testing.allocator, &.{ module_dir, "<source>" });
+    const source_name = try std.Io.Dir.path.join(std.testing.allocator, &.{ module_dir, "<source>" });
     defer std.testing.allocator.free(source_name);
 
     const source = "import \"fake.so\"\nfake.open(5)\n";

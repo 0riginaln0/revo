@@ -193,7 +193,7 @@ pub fn parse(allocator: Allocator, args: []const [:0]const u8, res: *Result) !vo
         // branch --arg | --arg=value
         if (str[1] == '-') {
             const body = str[2..];
-            const eq = std.mem.indexOfScalar(u8, body, '=');
+            const eq = std.mem.findScalar(u8, body, '=');
             const name = if (eq) |e| body[0..e] else body;
 
             const arg = res.findLong(name) orelse {

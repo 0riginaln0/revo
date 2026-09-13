@@ -22,7 +22,7 @@ pub fn deinit(self: *Project, allocator: std.mem.Allocator) void {
 
 /// detect project mode by walking ancestors of name for lib.json / exe.json
 pub fn detect(name: []const u8, io: std.Io, alloc: std.mem.Allocator) Project {
-    const dir = std.fs.path.dirname(name) orelse return .{ .mode = .script, .root = "" };
+    const dir = std.Io.Dir.path.dirname(name) orelse return .{ .mode = .script, .root = "" };
     const abs_dir = std.Io.Dir.realPathFileAlloc(
         std.Io.Dir.cwd(),
         io,
@@ -51,13 +51,13 @@ fn walkForManifest(start: []const u8, io: std.Io, alloc: std.mem.Allocator) Proj
     var cur: []const u8 = start;
     while (true) {
         for (&[_][]const u8{ "lib.json", "exe.json" }) |manifest| {
-            const joined = std.fs.path.join(alloc, &.{ cur, manifest }) catch continue;
+            const joined = std.Io.Dir.path.join(alloc, &.{ cur, manifest }) catch continue;
             defer alloc.free(joined);
             _ = std.Io.Dir.statFile(std.Io.Dir.cwd(), io, joined, .{}) catch continue;
             const root = alloc.dupe(u8, cur) catch return .{ .mode = .project, .root = "" };
             return .{ .mode = .project, .root = root };
         }
-        const parent = std.fs.path.dirname(cur) orelse break;
+        const parent = std.Io.Dir.path.dirname(cur) orelse break;
         if (std.mem.eql(u8, parent, cur)) break;
         cur = parent;
     }
@@ -81,7 +81,7 @@ test "detect on project file" {
 
     const abs_dir = try dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(abs_dir);
-    const source_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "main.rv" });
+    const source_path = try std.Io.Dir.path.join(testing.allocator, &.{ abs_dir, "main.rv" });
     defer testing.allocator.free(source_path);
 
     var p = Project.detect(source_path, testing.io, testing.allocator);
@@ -100,7 +100,7 @@ test "detect finds project manifest in ancestor and returns that dir" {
 
     const abs_dir = try dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(abs_dir);
-    const source_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "apps", "nested", "main.rv" });
+    const source_path = try std.Io.Dir.path.join(testing.allocator, &.{ abs_dir, "apps", "nested", "main.rv" });
     defer testing.allocator.free(source_path);
 
     var p = Project.detect(source_path, testing.io, testing.allocator);
@@ -119,7 +119,7 @@ test "detect ignores manifests outside source ancestors" {
 
     const abs_dir = try dir.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
     defer testing.allocator.free(abs_dir);
-    const source_path = try std.fs.path.join(testing.allocator, &.{ abs_dir, "scripts", "main.rv" });
+    const source_path = try std.Io.Dir.path.join(testing.allocator, &.{ abs_dir, "scripts", "main.rv" });
     defer testing.allocator.free(source_path);
 
     var p = Project.detect(source_path, testing.io, testing.allocator);
