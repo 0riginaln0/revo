@@ -247,7 +247,8 @@ fn parseExpression(self: *Parser, min_bp: u8) anyerror!*Node {
         }
 
         // postfix: method call `obj:method(args)`; sugar for `obj.field(args)` with implicit self
-        if (self.peek().type == .hash and self.peekAt(1).type == .lparen) {
+        // `:foo(` must hug, so `"hi":split\n(" ")` is two stmts, not a call
+        if (self.peek().type == .hash and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) {
             const method = self.advance();
             _ = try self.expect(.lparen);
             const call_args = try self.parseDelimitedExprList(.rparen);
@@ -299,8 +300,9 @@ fn parseExpression(self: *Parser, min_bp: u8) anyerror!*Node {
             continue;
         }
 
-        // postfix: paren call `f(args)`; only if f allows it (ident, field, call, fn, index)
-        if (self.peek().type == .lparen and (exprAllowsParenCall(left) or self.tokenAdjacent(left.span.end))) {
+        // postfix: paren call `f(args)`; callee and `(` must hug (no whitespace)
+        // so `print\n("hi")` is two stmts `print; ("hi")`, not `print("hi")`
+        if (self.peek().type == .lparen and self.pos > 0 and self.tokens[self.pos - 1].span().end == self.peek().span().start) {
             _ = try self.expect(.lparen);
             const args = try self.parseDelimitedExprList(.rparen);
             const close = try self.expect(.rparen);
@@ -1772,8 +1774,8 @@ fn canContinueExpression(self: *Parser, left: *const Node) bool {
 
     if (logical_binding_table.get(t) != null) return true;
     if (infix_binding_table.get(t) != null) return true;
-    if (t == .lparen and (exprAllowsParenCall(left) or self.tokenAdjacent(left.span.end))) return true;
-    if (t == .hash and self.peekAt(1).type == .lparen) return true;
+    if (t == .lparen and self.pos > 0 and self.tokens[self.pos - 1].span().end == self.peek().span().start) return true;
+    if (t == .hash and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) return true;
     if (self.allow_bare_calls and exprAllowsBareCall(left)) return bare_call_arg_start_tokens.get(t);
     return false;
 }
@@ -2114,13 +2116,6 @@ const expr_start_tokens = makeTokenSet(&.{
 fn exprAllowsBareCall(expr: *const Node) bool {
     return switch (expr.expr) {
         .ident, .field, .call, .fn_expr => true,
-        else => false,
-    };
-}
-
-fn exprAllowsParenCall(expr: *const Node) bool {
-    return switch (expr.expr) {
-        .ident, .field, .call, .fn_expr, .index => true,
         else => false,
     };
 }
@@ -2490,6 +2485,16 @@ test "parses repeated paren calls" {
     try testing.expectPrinted("f()()", "(call (call f))");
     try testing.expectPrinted("f()()()", "(call (call (call f)))");
     try testing.expectPrinted("f()()()()", "(call (call (call (call f))))");
+}
+
+test "paren calls require a hug" {
+    try testing.expectPrinted("print(\"hi\")", "(call print \"hi\")");
+    try testing.expectPrinted("print\n(\"hi\")", "(block print \"hi\")");
+    try testing.expectPrinted("print (\"hi\")", "(block print \"hi\")");
+    try testing.expectPrinted("(f)(1)", "(call f 1)");
+    try testing.expectPrinted("(f) (1)", "(block f 1)");
+    try testing.expectPrinted("t:foo(1)", "(call (field t foo) 1)");
+    try testing.expectPrinted("t:foo (1)", "(block t :foo 1)");
 }
 
 test "dotted heads" {
