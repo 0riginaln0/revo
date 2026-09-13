@@ -855,6 +855,7 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: 
     var cur_text: []const u8 = "";
     var have_cur = false;
     var cur_range: ?T.Range = null;
+    var cur_tag: ?T.Diagnostic.Tag = null;
     var cur_related = try std.ArrayList(T.Diagnostic.RelatedInformation).initCapacity(arena, 2);
     var cur_tips = try std.ArrayList([]const u8).initCapacity(arena, 2);
 
@@ -864,6 +865,7 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: 
                 cur_text = text;
                 have_cur = true;
                 cur_range = null;
+                cur_tag = null;
                 cur_related = try std.ArrayList(T.Diagnostic.RelatedInformation).initCapacity(arena, 2);
                 cur_tips = try std.ArrayList([]const u8).initCapacity(arena, 2);
             },
@@ -886,6 +888,12 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: 
 
                 if (cur_range == null and sp.role == .primary) {
                     cur_range = r;
+                    // dead arms fade in the editor instead of squiggling
+                    cur_tag = if (std.mem.eql(u8, sp.message, "unreachable") or
+                        std.mem.eql(u8, sp.message, "never matches"))
+                        .Unnecessary
+                    else
+                        null;
                 } else {
                     try cur_related.append(arena, .{
                         .location = .{ .uri = uri, .range = r },
@@ -933,7 +941,7 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: 
                 .code = code,
                 .message = message,
                 .source = "revo",
-                .tags = &.{},
+                .tags = if (cur_tag) |t| try arena.dupe(T.Diagnostic.Tag, &.{t}) else &.{},
                 .relatedInformation = try cur_related.toOwnedSlice(arena),
             });
             have_cur = false;

@@ -127,6 +127,8 @@ tuples and structs are gone now, most breaking change yet
   # help: add an explicit nil arm
   #   + | {:err, _} => :nil
   ```
+
+- dead match arms look dead
   named when the shape is known, `_` otherwise\
   cli prints it as help output,\
   lsp offers it as a quickfix anywhere inside the match
