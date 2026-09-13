@@ -841,6 +841,136 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
     };
 }
 
+//
+// match cov prover
+//
+
+/// one guardless arm's contribution to exhaustiveness
+///
+/// callers map ast matchers to these
+/// guards excluded since a guard can always fail through
+pub const MatchCover = union(enum) {
+    wildcard, // `_`, binder `v`,, etc. anything matching every value
+    atom: []const u8, // `:ok` literal
+    tag: []const u8, // `{:ok, ...}` table pat leading tag
+    ascribed: TypeInfo, // `x: T` covers subject iff subject coerces to T
+    other, // numbers, strings, shapes proving nothing;; ignored
+};
+
+/// true when covers hit every value of subject
+/// pure, no ast, no eval
+pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
+    if (subject.tag == .never) return true;
+    for (covers) |c| switch (c) {
+        .wildcard => return true,
+        .ascribed => |ti| {
+            if (canCoerce(subject, ti)) return true;
+        },
+        else => {},
+    };
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                var hit = false;
+                for (covers) |c| switch (c) {
+                    .atom => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .tag => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .ascribed => |ti| {
+                        if (targetAcceptsVariant(v, ti)) hit = true;
+                    },
+                    else => {},
+                };
+                if (!hit) return false;
+            }
+            return true;
+        },
+        .bool => {
+            var saw_true = false;
+            var saw_false = false;
+            for (covers) |c| switch (c) {
+                .atom => |name| {
+                    const bare = ast.atomName(name);
+                    if (std.mem.eql(u8, bare, "true")) saw_true = true;
+                    if (std.mem.eql(u8, bare, "false")) saw_false = true;
+                },
+                else => {},
+            };
+            return saw_true and saw_false;
+        },
+        .atom => |name| {
+            for (covers) |c| switch (c) {
+                .atom => |cover| {
+                    if (std.mem.eql(u8, ast.atomName(cover), ast.atomName(name))) return true;
+                },
+                else => {},
+            };
+            return false;
+        },
+        else => return false,
+    }
+}
+
+test matchCoversAll {
+    // wildcard n never
+    const types = revo.lang.compiler.types;
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .never }, &.{}));
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .number }, &.{.wildcard}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .number }, &.{}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .number }, &.{.other}));
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .any }, &.{.wildcard}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .any }, &.{.other}));
+
+    // atom union needs every tag
+    const ok: types.TypeInfo = .{ .tag = .{ .atom = ":ok" } };
+    const err: types.TypeInfo = .{ .tag = .{ .atom = ":err" } };
+    const ok_types = [_]types.TypeInfo{ok};
+    const err_types = [_]types.TypeInfo{err};
+    const variants = [_]types.UnionVariant{
+        .{ .name = "", .types = &ok_types },
+        .{ .name = "", .types = &err_types },
+    };
+    const subject: types.TypeInfo = .{ .tag = .{ .@"union" = &variants } };
+    try std.testing.expect(types.matchCoversAll(subject, &.{
+        .{ .atom = ":ok" },
+        .{ .atom = ":err" },
+    }));
+    try std.testing.expect(!types.matchCoversAll(subject, &.{.{ .atom = ":ok" }}));
+    try std.testing.expect(types.matchCoversAll(subject, &.{.wildcard}));
+    //
+    // bool n single atom
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .bool }, &.{
+        .{ .atom = ":true" },
+        .{ .atom = ":false" },
+    }));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .bool }, &.{.{ .atom = ":true" }}));
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .{ .atom = ":ok" } },
+        &.{.{ .atom = ":ok" }},
+    ));
+    try std.testing.expect(!types.matchCoversAll(
+        .{ .tag = .{ .atom = ":ok" } },
+        &.{.{ .atom = ":err" }},
+    ));
+    //
+    // ascribed covers when subject coerces
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .number } }},
+    ));
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .any } }},
+    ));
+    try std.testing.expect(!types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .string } }},
+    ));
+}
+
 test "types: TypeInfo equality" {
     const int_type: revo.lang.compiler.types.TypeInfo = .{ .tag = .number };
     const any_type: revo.lang.compiler.types.TypeInfo = .{ .tag = .any };
