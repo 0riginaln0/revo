@@ -100,6 +100,28 @@ tuples and structs are gone now, most breaking change yet
   # => 11
   ```
 
+- match arms take comma alternatives now:
+
+    ```ruby
+    match 1
+    | 3, 3 => :wrong
+    | 1, 2 => :right
+    ```
+
+    it tries each pattern in order, firsr hit wins\
+    bindings share one slot per name across the alternatives
+
+- a match miss falls through to nil, and the type knows it;\
+  partial matches union `:nil` into the result type
+
+- match warnings!
+  non-exhaustive matches warn with the uncovered tags,
+  dead arms warn as unreachable,
+  patterns the subject can't meet warn as never-matching
+
+- diagnostics have severity (err, warning, note, help) and slug codes. works for lsp as well
+
+
 - std:
   - `stats` module -- build a table for statistics
   - `frame` module -- dataframe-like structure

@@ -863,6 +863,46 @@ match safe_div(10, 0)
     | {:err, e} => print(fmt("error: %v", e))
 ```
 
+comma arms try each pattern in order, first hit wins:
+
+```revo
+const r = match 2
+    | 1, 2 => "low"
+    | _    => "high"
+# r == "low"
+```
+
+a miss falls through to :nil, and the type knows it
+cover every variant and the :nil is gone:
+
+```revo
+type Res = {:ok, num} | {:err, string}
+let x: Res = {:ok, 42}
+const r = match x
+    | {:ok, v}  => v
+    | {:err, _} => 0
+# r == 42, typed num
+```
+
+the checker warns when an arm can't fire
+covered tags first:
+
+```revo
+match x
+    | {:ok, _} => 1
+    | {:ok, v} => v # warning: unreachable match arm
+    | {:err, _} => 0
+```
+
+same for patterns the subject can't meet:
+
+```revo
+let n: num = 1
+match n
+    | :ok => 1 # warning: match pattern never matches number
+    | _   => 2
+```
+
 ## pipe operator
 
 pipe passes a value as the first argument to the next expression:

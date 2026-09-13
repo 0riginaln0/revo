@@ -401,20 +401,50 @@ pub fn compileMatch(
         try state.pushScope(self);
         errdefer state.popScope(self);
 
-        const matcher_expr: ?*const Node = switch (arm.matchers[0]) {
-            .wildcard => null,
-            .expr => |e| e,
-        };
+        // one slot per bound name, shared by every matcher in the arm
+        //   ; nil until the winning matcher binds
+        var bound_names = try std.ArrayList([]const u8).initCapacity(self.alloc, 4);
+        defer bound_names.deinit(self.alloc);
+        for (arm.matchers) |m| {
+            if (m == .expr) try collectBindNames(self.alloc, m.expr, &bound_names);
+        }
 
-        const fail_jumps = try compilePatternChecks(self, subject_storage, matcher_expr);
-        var fail_list = try std.ArrayList(usize).initCapacity(self.alloc, fail_jumps.len + 1);
+        for (bound_names.items) |name| {
+            const slot = try state.declareLocal(self, name, true);
+            try self.pushNil();
+            try self.emit(.bind_local, slot);
+
+            state.reserveLocalSlots(self);
+        }
+
+        // capture subject type before patternTypeInfo overwrites the hint
+        const pre_narrow_subject_type = type_check.inferExprType(self, subject);
+
+        //
+        // matchers are alternatives:
+        //
+        // each one checks, binds, and jumps to the shared body
+        // ; a miss falls through to the next matcher
+        var body_jumps = try std.ArrayList(usize).initCapacity(self.alloc, arm.matchers.len);
+        defer body_jumps.deinit(self.alloc);
+        var fail_list = try std.ArrayList(usize).initCapacity(self.alloc, 4);
         defer fail_list.deinit(self.alloc);
-        try fail_list.appendSlice(self.alloc, fail_jumps);
-        self.alloc.free(fail_jumps);
 
-        if (matcher_expr) |me| {
-            // capture subject type before patternTypeInfo overwrites the hint
-            const pre_narrow_subject_type = type_check.inferExprType(self, subject);
+        for (arm.matchers, 0..) |matcher, mi| {
+            self.active_registers = arm_base_registers;
+            const matcher_expr: ?*const Node = switch (matcher) {
+                .wildcard => null,
+                .expr => |e| e,
+            };
+            if (matcher_expr == null) {
+                // wildcard matches everything after it
+                // ; later matchers are dead
+                try body_jumps.append(self.alloc, try self.jump(.jump));
+                break;
+            }
+
+            const fail_jumps = try compilePatternChecks(self, subject_storage, matcher_expr);
+            const me = matcher_expr.?;
             if (subject.expr == .ident) {
                 if (patternTypeInfo(self, me)) |ti| {
                     try state.setLocalTypeHint(self, subject.expr.ident, ti);
@@ -422,7 +452,20 @@ pub fn compileMatch(
             }
             try bindMatchPattern(self, me, subject_storage);
             try narrowMatchPattern(self, me, pre_narrow_subject_type);
+            try body_jumps.append(self.alloc, try self.jump(.jump));
+
+            if (mi + 1 < arm.matchers.len) {
+                const next_matcher = self.irLen();
+                for (fail_jumps) |jump_idx| self.patchJumpToLabel(jump_idx, next_matcher);
+            } else {
+                try fail_list.appendSlice(self.alloc, fail_jumps);
+            }
+            self.alloc.free(fail_jumps);
         }
+
+        self.active_registers = arm_base_registers;
+        const body = self.irLen();
+        for (body_jumps.items) |jump_idx| self.patchJumpToLabel(jump_idx, body);
 
         if (arm.guard) |guard| {
             try self.compile(guard, true);
@@ -473,6 +516,21 @@ pub fn reserveRegisters(self: *Compiler, min_register: Register) void {
     if (self.max_registers < min_slot) self.max_registers = min_slot;
 }
 
+// bound idents in a pattern, deduped;
+// arm slots are hoisted from these
+fn collectBindNames(alloc: std.mem.Allocator, pattern: *const Node, out: *std.ArrayList([]const u8)) !void {
+    switch (pattern.expr) {
+        .ident => |name| {
+            if (ast.isDiscardName(name)) return;
+            for (out.items) |have| if (std.mem.eql(u8, have, name)) return;
+            try out.append(alloc, name);
+        },
+        .table_pattern => |items| for (items) |item| try collectBindNames(alloc, item, out),
+        .ascribed => |a| try collectBindNames(alloc, a.expr, out),
+        else => {},
+    }
+}
+
 pub fn bindMatchPattern(
     self: *Compiler,
     matcher: *const Node,
@@ -482,9 +540,12 @@ pub fn bindMatchPattern(
         .ident => |name| {
             if (ast.isDiscardName(name)) return;
             try emitStorageLoad(self, subject);
-            const slot = try state.declareLocal(self, name, true);
+
+            // hoisted arm slot when present, so every matcher binds the same one
+            const slot = if (state.findLocalInCurrentScope(self, name)) |l| l.slot else try state.declareLocal(self, name, true);
             state.markLocalInitialized(self, slot);
             try self.emit(.bind_local, slot);
+
             state.reserveLocalSlots(self);
         },
         .table_pattern => |items| {
@@ -496,7 +557,11 @@ pub fn bindMatchPattern(
                         try self.emit(.load_small_int, idx);
                         try self.emit(.table_get, 0);
 
-                        const slot = try state.declareLocal(self, name, true);
+                        const slot = if (state.findLocalInCurrentScope(self, name)) |l|
+                            l.slot
+                        else
+                            try state.declareLocal(self, name, true);
+
                         state.markLocalInitialized(self, slot);
                         try self.emit(.bind_local, slot);
 

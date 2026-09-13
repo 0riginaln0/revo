@@ -861,7 +861,9 @@ pub const MatchCover = union(enum) {
     atom: []const u8, // `:ok` literal
     tag: []const u8, // `{:ok, ...}` table pat leading tag
     ascribed: TypeInfo, // `x: T` covers subject iff subject coerces to T
-    other, // numbers, strings, shapes proving nothing;; ignored
+    number, // numeric literal, one value of an infinite domain
+    string, // string literal, one value of an infinite domain
+    other, // shapes proving nothing;; ignored
 };
 
 /// true when covers hit every value of subject
@@ -918,6 +920,65 @@ pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
             return false;
         },
         else => return false,
+    }
+}
+
+/// true when some subject value could meet the pattern
+///   ; unknown shapes (.other) assume reachable, never proven dead
+pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
+    switch (cover) {
+        .wildcard => return true,
+        .other => return true,
+        .ascribed => |ti| switch (subject.tag) {
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, ti)) return true;
+                return false;
+            },
+            .any, .type_var => return true,
+            else => return canCoerce(subject, ti),
+        },
+        .atom => |name| switch (subject.tag) {
+            .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (unionVariantTagEql(v, name)) return true;
+                return false;
+            },
+            .bool => {
+                const bare = ast.atomName(name);
+                return std.mem.eql(u8, bare, "true") or std.mem.eql(u8, bare, "false");
+            },
+            .atom => |s| return std.mem.eql(u8, ast.atomName(s), ast.atomName(name)),
+            else => return false,
+        },
+        .tag => |name| switch (subject.tag) {
+            .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (unionVariantTagEql(v, name)) return true;
+                return false;
+            },
+            .table => |tbl| {
+                const fields = tbl.fields orelse return true;
+                if (fields.len == 0 or fields[0].field_type.tag != .atom) return true;
+                return std.mem.eql(u8, ast.atomName(fields[0].field_type.tag.atom), ast.atomName(name));
+            },
+            else => return false,
+        },
+        .number => switch (subject.tag) {
+            .number, .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, .{ .tag = .number })) return true;
+                return false;
+            },
+            else => return false,
+        },
+        .string => switch (subject.tag) {
+            .string, .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, .{ .tag = .string })) return true;
+                return false;
+            },
+            else => return false,
+        },
     }
 }
 
@@ -2228,7 +2289,7 @@ test "non-exhaustive match" {
         \\ a
     , 1);
 
-    // non-exhaustive match still yields nil at runtime
+    // non-exhaustive match still yields :nil at runtime
     try t.topNil(
         \\ match 99
         \\ | 1 => 2
@@ -2268,6 +2329,103 @@ test "non exhaustiveness warnings" {
         \\ | 1 => 2
         \\ | _ => 3
     );
+}
+
+test "dead match arms" {
+    // wildcard first cuts later arms off
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable");
+
+    // duplicate literal
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 10
+        \\ | 1 => 20
+        \\ | _ => 0
+    , "unreachable");
+
+    // covered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, _} => 1
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    , "unreachable");
+
+    // bool-exhaustive arms kill the wildcard
+    try t.expectWarning(
+        \\ let b = 1 == 1
+        \\ match b
+        \\ | :true => 1
+        \\ | :false => 2
+        \\ | _ => 3
+    , "unreachable");
+
+    // disjoint pattern never fires
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "never matches");
+}
+
+test "comma arms" {
+    try t.topString(
+        \\ match 2
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "hit");
+    try t.topString(
+        \\ match 3
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "miss");
+    // share bindings
+    try t.topString(
+        \\ type R = {:ok, string} | {:err, string}
+        \\ let x: R = {:err, "boom"}
+        \\ match x
+        \\ | {:ok, v}, {:err, v} => v
+        \\ | _ => "none"
+    , "boom");
+    // comma arm with guard
+    try t.topString(
+        \\ match 7
+        \\ | 1, 2 => "low"
+        \\ | v when v > 5 => "high"
+        \\ | _ => "mid"
+    , "high");
+}
+
+test "match warning codes" {
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable-match-arm");
+
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "impossible-match-arm");
+
+    try t.expectWarningCode(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "non-exhaustive-match");
 }
 
 test "error codes" {

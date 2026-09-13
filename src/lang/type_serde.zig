@@ -352,31 +352,45 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
 ///
 /// maps matchers to MatchCover descriptors
 /// guards excluded since a guard can always fail
+fn matcherCover(ctx: anytype, m: ast.MatchMatcher) types.MatchCover {
+    return switch (m) {
+        .wildcard => .wildcard,
+        .expr => |e| switch (e.expr) {
+            .ident => .wildcard, // binder hits every value
+            .hash => |name| .{ .atom = name },
+            .nil => .{ .atom = ":nil" },
+            .number => .number,
+            .string, .multiline_string => .string,
+            .ascribed => |a| .{ .ascribed = evalTypeExpr(ctx, a.type_name) catch types.TypeInfo{ .tag = .any } },
+            .table_pattern => |items| blk: {
+                if (items.len == 0) break :blk .other;
+
+                const tag = if (items[0].expr == .hash) items[0].expr.hash else break :blk .other;
+                break :blk .{ .tag = tag };
+            },
+            else => .other,
+        },
+    };
+}
+
+/// covers for one arm, guards included; callers decide what guards mean
+pub fn buildArmCovers(ctx: anytype, arm: ast.MatchArm) ![]types.MatchCover {
+    var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arm.matchers.len * 2) catch return &.{};
+    errdefer covers.deinit(ctx.alloc);
+
+    for (arm.matchers) |m| try covers.append(ctx.alloc, matcherCover(ctx, m));
+    return covers.toOwnedSlice(ctx.alloc);
+}
+
 pub fn buildCovers(ctx: anytype, arms: []const ast.MatchArm) ![]types.MatchCover {
     var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arms.len * 2) catch return &.{};
     errdefer covers.deinit(ctx.alloc);
 
     for (arms) |arm| {
         if (arm.guard != null) continue;
-        for (arm.matchers) |m| {
-            const c: types.MatchCover = switch (m) {
-                .wildcard => .wildcard,
-                .expr => |e| switch (e.expr) {
-                    .ident => .wildcard, // binder hits every value
-                    .hash => |name| .{ .atom = name },
-                    .nil => .{ .atom = ":nil" },
-                    .ascribed => |a| .{ .ascribed = evalTypeExpr(ctx, a.type_name) catch types.TypeInfo{ .tag = .any } },
-                    .table_pattern => |items| blk: {
-                        if (items.len == 0) break :blk .other;
-
-                        const tag = if (items[0].expr == .hash) items[0].expr.hash else break :blk .other;
-                        break :blk .{ .tag = tag };
-                    },
-                    else => .other,
-                },
-            };
-            try covers.append(ctx.alloc, c);
-        }
+        const one = try buildArmCovers(ctx, arm);
+        defer ctx.alloc.free(one);
+        try covers.appendSlice(ctx.alloc, one);
     }
     return covers.toOwnedSlice(ctx.alloc);
 }

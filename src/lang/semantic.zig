@@ -61,6 +61,51 @@ pub fn analyze(
     return .{ .semantic = .{ .kind = .ParseError, .report = copied } };
 }
 
+/// type of a literal pattern
+/// , or null when the pattern is not one
+fn patternLitType(pattern: *const ast.Node) ?types_mod.TypeInfo {
+    return switch (pattern.expr) {
+        .hash => |name| .{ .tag = .{ .atom = name } },
+        .nil => .{ .tag = .{ .atom = ":nil" } },
+        .number => .{ .tag = .number },
+        .string, .multiline_string => .{ .tag = .string },
+        else => null,
+    };
+}
+
+///
+/// prior pattern fires on every value cur could match
+/// prior ascriptions prove nothing here, so those do nathan
+fn patternSubsumes(prior: *const ast.Node, cur: *const ast.Node) bool {
+    if (prior.expr == .ident) return true;
+    switch (prior.expr) {
+        .hash => |name| return cur.expr == .hash and std.mem.eql(u8, ast.atomName(cur.expr.hash), ast.atomName(name)),
+        .nil => return cur.expr == .nil,
+        .number => |n| return cur.expr == .number and cur.expr.number.value == n.value,
+        .string, .multiline_string => |s| {
+            const cs = if (cur.expr == .string)
+                cur.expr.string
+            else if (cur.expr == .multiline_string)
+                cur.expr.multiline_string
+            else
+                return false;
+            return std.mem.eql(u8, cs, s);
+        },
+        .table_pattern => |pitems| {
+            if (cur.expr != .table_pattern) return false;
+            const citems = cur.expr.table_pattern;
+            if (pitems.len != citems.len) return false;
+
+            // heads are just element zero, no special case
+            for (pitems, citems) |pi, ci|
+                if (!patternSubsumes(pi, ci)) return false;
+
+            return true;
+        },
+        else => return false,
+    }
+}
+
 fn reparentMap(comptime K: type, comptime Map: type, map: *Map, alloc: std.mem.Allocator) !void {
     var keys = try std.ArrayList(K).initCapacity(alloc, map.count());
     defer keys.deinit(alloc);
@@ -126,6 +171,8 @@ const SemanticChecker = struct {
     /// reports carry one code like they carry one message,
     /// for per-error codes u need to refactor the Diagnostic struct
     first_code: ?[]const u8 = null,
+    /// code of the first warning, same first-wins as abve
+    first_warn_code: ?[]const u8 = null,
     /// non-failing diagnostics; emitted alongside success, dropped on error
     warn_parts: std.ArrayList(diagnostic.Part),
     scopes: std.ArrayList(Scope),
@@ -305,7 +352,7 @@ const SemanticChecker = struct {
             .parts = parts,
             .message = if (first_msg.len > 0) try self.alloc.dupe(u8, first_msg) else "",
             .severity = .warning,
-            .code = "non-exhaustive-match",
+            .code = self.first_warn_code,
             .source_name = try self.alloc.dupe(u8, self.source_name),
             .source = try self.alloc.dupe(u8, self.source),
         };
@@ -816,6 +863,13 @@ const SemanticChecker = struct {
             .match_expr => |v| blk: {
                 const subject_type = try self.analyzeNode(v.subject);
                 var unified: types_mod.TypeInfo = .{ .tag = .never };
+
+                // guardless prior covers + matchers, for dead-arm detection
+                var covered = std.ArrayList(types_mod.MatchCover).initCapacity(self.alloc, 8) catch break :blk unified;
+                defer covered.deinit(self.alloc);
+                var prior = std.ArrayList(ast.MatchMatcher).initCapacity(self.alloc, 8) catch break :blk unified;
+                defer prior.deinit(self.alloc);
+
                 for (v.arms) |arm| {
                     try self.pushScope();
                     for (arm.matchers) |matcher| {
@@ -828,36 +882,101 @@ const SemanticChecker = struct {
                     const arm_type = try self.analyzeNode(arm.then);
                     self.popScope();
                     unified = types_mod.unifyBranchType(unified, arm_type);
+
+                    var arm_span = node.span;
+                    for (arm.matchers) |matcher| {
+                        if (matcher == .expr) {
+                            arm_span = matcher.expr.span;
+                            break;
+                        }
+                    }
+
+                    const arm_covers = try type_serde.buildArmCovers(self, arm);
+                    defer self.alloc.free(arm_covers);
+
+                    // degenerate subject, every arm is trivially dead; do notih
+                    if (subject_type.tag != .never and arm_covers.len > 0) {
+                        var overlaps = false;
+                        for (arm_covers) |c| {
+                            if (types_mod.matchOverlaps(subject_type, c)) {
+                                overlaps = true;
+                                break;
+                            }
+                        }
+                        if (!overlaps) {
+                            const subject_str = try type_serde.formatType(self.alloc, subject_type);
+
+                            try self.appendWarn(
+                                try std.fmt.allocPrint(self.alloc, "match pattern never matches {s}", .{subject_str}),
+                                arm_span,
+                                "never matches",
+                                "impossible-match-arm",
+                            );
+                        } else {
+                            var dead = arm.matchers.len > 0;
+                            for (arm.matchers) |m| {
+                                if (!switch (m) {
+                                    .wildcard => types_mod.matchCoversAll(subject_type, covered.items),
+                                    .expr => |e| sub: {
+                                        if (e.expr == .ident)
+                                            break :sub types_mod.matchCoversAll(subject_type, covered.items);
+
+                                        for (prior.items) |p| {
+                                            const sub = switch (p) {
+                                                .wildcard => true,
+                                                .expr => |pe| patternSubsumes(pe, e),
+                                            };
+                                            if (sub) break :sub true;
+                                            // wow we have a lot of nesting... 11 levels........
+                                            // but what can i even do
+                                        }
+                                        if (e.expr == .ascribed) {
+                                            const ti = type_serde.evalTypeExpr(self, e.expr.ascribed.type_name) catch break :sub false;
+                                            break :sub types_mod.matchCoversAll(ti, covered.items);
+                                        }
+                                        if (patternLitType(e)) |lt| break :sub types_mod.matchCoversAll(lt, covered.items);
+                                        break :sub false;
+                                    },
+                                }) {
+                                    dead = false;
+                                    break;
+                                }
+                            }
+                            if (dead) try self.appendWarn("unreachable match arm", arm_span, "unreachable", "unreachable-match-arm");
+                        }
+                    }
+                    // guarded arms never contribute coverage, a guard can fail
+                    if (arm.guard == null) {
+                        try covered.appendSlice(self.alloc, arm_covers);
+                        try prior.appendSlice(self.alloc, arm.matchers);
+                    }
                 }
                 // miss falls through to nil at runtime
                 // so a non-exhaustive match always carries :nil in its type
-                const covers = try type_serde.buildCovers(self, v.arms);
-                defer self.alloc.free(covers);
-
-                if (!types_mod.matchCoversAll(subject_type, covers)) {
+                if (!types_mod.matchCoversAll(subject_type, covered.items)) {
                     unified = types_mod.withNilMiss(self.alloc, unified);
                     var tags = std.ArrayList([]const u8).initCapacity(self.alloc, 4) catch break :blk unified;
 
                     defer tags.deinit(self.alloc);
-                    try types_mod.uncoveredTags(self.alloc, subject_type, covers, &tags);
+                    try types_mod.uncoveredTags(self.alloc, subject_type, covered.items, &tags);
 
                     const msg = if (tags.items.len > 0) blk_msg: {
                         const listed = try std.mem.join(self.alloc, ", :", tags.items);
                         defer self.alloc.free(listed);
                         break :blk_msg try std.fmt.allocPrint(
                             self.alloc,
-                            "match is not exhaustive: :{s} not covered, miss yields nil",
+                            "match is not exhaustive: :{s} not covered, miss yields :nil",
                             .{listed},
                         );
                     } else blk_msg: {
                         const subject_str = try type_serde.formatType(self.alloc, subject_type);
                         break :blk_msg try std.fmt.allocPrint(
                             self.alloc,
-                            "match is not exhaustive for {s}, miss yields nil",
+                            "match is not exhaustive for {s}, miss yields :nil",
                             .{subject_str},
                         );
                     };
-                    try self.appendWarn(msg, node.span, "non-exhaustive match");
+                    try self.appendWarn(msg, node.span, "non-exhaustive match", "non-exhaustive-match");
                 }
                 break :blk unified;
             },
@@ -1795,7 +1914,8 @@ const SemanticChecker = struct {
         } });
     }
 
-    fn appendWarn(self: *SemanticChecker, message: []const u8, span: ast.Span, label: []const u8) !void {
+    fn appendWarn(self: *SemanticChecker, message: []const u8, span: ast.Span, label: []const u8, code: []const u8) !void {
+        if (self.first_warn_code == null) self.first_warn_code = code;
         try self.warn_parts.append(self.alloc, .{ .warn = message });
         try self.warn_parts.append(self.alloc, .{ .span = .{
             .span = span,

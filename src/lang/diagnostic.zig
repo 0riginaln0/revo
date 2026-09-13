@@ -873,11 +873,11 @@ test "warnings report renders severity and code" {
     const report: Report = .{
         .severity = .warning,
         .code = "non-exhaustive-match",
-        .message = "match is not exhaustive: :err not covered, miss yields nil",
+        .message = "match is not exhaustive: :err not covered, miss yields :nil",
         .source_name = "<source>",
         .source = "match x\n",
         .parts = &.{
-            .{ .warn = "match is not exhaustive: :err not covered, miss yields nil" },
+            .{ .warn = "match is not exhaustive: :err not covered, miss yields :nil" },
             .{ .span = .{
                 .span = .{ .start = 0, .end = 7, .line = 1, .column = 1 },
                 .role = .primary,
