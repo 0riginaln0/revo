@@ -28,6 +28,16 @@ pub fn printError(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytyp
     try writer.flush();
 }
 
+pub fn printWarning(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
+    try style(writer, "\x1b[1m\x1b[33m");
+    try writer.writeAll("warning: ");
+    try style(writer, "\x1b[0m");
+    try style(writer, "\x1b[1m");
+    try writer.print(fmt ++ "\n", args);
+    try style(writer, "\x1b[0m");
+    try writer.flush();
+}
+
 pub fn printSuccess(writer: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
     try style(writer, "\x1b[32m");
     try writer.print(fmt ++ "\n", args);

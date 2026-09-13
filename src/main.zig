@@ -297,6 +297,10 @@ fn compileSource(
         return error.CompilationError;
     }
 
+    if (analysis.warnings) |w| {
+        revo.printBuildWarning(gpa, .{ .name = source_name, .text = source_text }, w);
+    }
+
     const artifact = analysis.artifact.?;
     analysis.artifact = null;
     return artifact;

@@ -352,9 +352,9 @@ pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
 ///
 /// maps matchers to MatchCover descriptors
 /// guards excluded since a guard can always fail
-pub fn matchCovers(ctx: anytype, subject: types.TypeInfo, arms: []const ast.MatchArm) bool {
-    var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arms.len * 2) catch return false;
-    defer covers.deinit(ctx.alloc);
+pub fn buildCovers(ctx: anytype, arms: []const ast.MatchArm) ![]types.MatchCover {
+    var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arms.len * 2) catch return &.{};
+    errdefer covers.deinit(ctx.alloc);
 
     for (arms) |arm| {
         if (arm.guard != null) continue;
@@ -375,10 +375,16 @@ pub fn matchCovers(ctx: anytype, subject: types.TypeInfo, arms: []const ast.Matc
                     else => .other,
                 },
             };
-            covers.append(ctx.alloc, c) catch return false;
+            try covers.append(ctx.alloc, c);
         }
     }
-    return types.matchCoversAll(subject, covers.items);
+    return covers.toOwnedSlice(ctx.alloc);
+}
+
+pub fn matchCovers(ctx: anytype, subject: types.TypeInfo, arms: []const ast.MatchArm) bool {
+    const covers = buildCovers(ctx, arms) catch return false;
+    defer ctx.alloc.free(covers);
+    return types.matchCoversAll(subject, covers);
 }
 
 /// render a TypeInfo straight to the writer

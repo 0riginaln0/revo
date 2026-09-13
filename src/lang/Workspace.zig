@@ -72,6 +72,9 @@ pub const Analysis = struct {
     snapshot: Snapshot,
     artifact: ?lang.Artifact = null,
     diagnostics: ?lang.Error = null,
+    /// non-failing warnings
+    /// only set on success, dropped on err or cachehit
+    warnings: ?lang.diagnostic.Report = null,
     cached: bool = false,
     symbols: []Symbol = &.{},
     dependencies: []FileId = &.{},
@@ -83,6 +86,9 @@ pub const Analysis = struct {
         }
         if (self.diagnostics) |err| {
             lang.deinitError(alloc, err);
+        }
+        if (self.warnings) |*w| {
+            w.deinit(alloc);
         }
         freeSymbols(alloc, self.symbols);
         alloc.free(self.dependencies);
@@ -477,35 +483,59 @@ pub fn analyzeDetailed(
     errdefer self.alloc.free(deps);
     try self.updateDeps(id, deps);
 
-    const build_result = try lang.build(vm, .{
+    var warn_report: ?lang.diagnostic.Report = null;
+    const build_result = try lang.buildWithWarnings(vm, .{
         .name = snap.name,
         .text = snap.text,
-    }, opts);
+    }, opts, &warn_report);
 
     return switch (build_result) {
         .ok => |artifact| blk: {
             defer deinitArtifact(vm.runtime.alloc, artifact);
             const cache_artifact = try copyArtifact(self.alloc, artifact);
             errdefer deinitArtifact(self.alloc, cache_artifact);
+
             const cache_symbols = try copySymbols(self.alloc, symbols);
             errdefer freeSymbols(self.alloc, cache_symbols);
             try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols);
+
             const copy = try copyArtifact(alloc, artifact);
             errdefer deinitArtifact(alloc, copy);
+
+            // warnings are owned by vm.runtime.alloc
+            // re-own for the caller
+            var warnings = if (warn_report) |wr| blk_w: {
+                var owned = try wr.copy(alloc);
+                owned.source_name = try alloc.dupe(u8, snap.name);
+                owned.source = try alloc.dupe(u8, snap.text);
+
+                var mutable = wr;
+                mutable.deinit(vm.runtime.alloc);
+
+                break :blk_w owned;
+            } else null;
+
+            errdefer if (warnings) |*w| w.deinit(alloc);
             break :blk .{
                 .snapshot = snap,
                 .artifact = copy,
+                .warnings = warnings,
                 .cached = false,
                 .symbols = try copySymbols(alloc, symbols),
                 .dependencies = try self.copyDeps(alloc, id),
             };
         },
-        .err => |err| .{
-            .snapshot = snap,
-            .diagnostics = try copyError(alloc, err, snap.name, snap.text),
-            .cached = false,
-            .symbols = try copySymbols(alloc, symbols),
-            .dependencies = try self.copyDeps(alloc, id),
+        .err => |err| blk: {
+            // errors dominate
+            // warnings drop with them
+            if (warn_report) |*wr| wr.deinit(vm.runtime.alloc);
+            break :blk .{
+                .snapshot = snap,
+                .diagnostics = try copyError(alloc, err, snap.name, snap.text),
+                .cached = false,
+                .symbols = try copySymbols(alloc, symbols),
+                .dependencies = try self.copyDeps(alloc, id),
+            };
         },
     };
 }
@@ -1088,6 +1118,7 @@ pub fn inspectDetailed(
         docs.deinit();
     }
 
+    var dropped_warn: ?lang.diagnostic.Report = null;
     const semantic_error = try semantic.analyze(
         alloc,
         root,
@@ -1098,7 +1129,10 @@ pub fn inspectDetailed(
         &type_annotations,
         &docs,
         .{ .ptr = &ws_resolver, .resolveFn = WorkspaceResolver.resolve },
+        &dropped_warn,
     );
+
+    if (dropped_warn) |*wr| wr.deinit(alloc);
 
     const cache_diag = if (semantic_error) |err|
         try copyError(self.alloc, err, snap.name, snap.text)
@@ -2948,13 +2982,17 @@ fn completionTargetType(
         .ok => |ok| ok.root,
         .err => return null,
     };
+
     const known_globals = getKnownGlobals(self, arena) catch return null;
     var type_map = std.StringHashMap(lang.types.TypeInfo).init(arena);
     var anchor: u8 = 0;
+    var dropped_warn: ?lang.diagnostic.Report = null;
+
     _ = semantic.analyze(arena, root, snap.name, truncated, known_globals, &type_map, null, null, .{
         .ptr = @ptrCast(&anchor),
         .resolveFn = nullResolve,
-    }) catch return null;
+    }, &dropped_warn) catch return null;
+
     return type_map.get(target);
 }
 

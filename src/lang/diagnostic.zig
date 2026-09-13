@@ -62,10 +62,18 @@ pub const Part = union(enum) {
     trace: TraceFrame,
 };
 
-/// arena-backed payload
+/// arena-backed
+///
+/// codes are lowercase kebab slugs naming the problem instead of phase
+/// : `non-exhaustive-match`, `type-mismatch`
+///
+/// codes are always static strings, borrowed never freed
+///
 pub const Report = struct {
     parts: []const Part = &.{},
     message: []const u8 = "",
+    severity: Severity = .err,
+    code: ?[]const u8 = null,
     source_name: ?[]const u8 = null,
     source: ?[]const u8 = null,
 
@@ -73,6 +81,7 @@ pub const Report = struct {
         if (self.message.len != 0) alloc.free(self.message);
         if (self.source_name) |sn| alloc.free(sn);
         if (self.source) |src| alloc.free(src);
+
         for (self.parts) |part| switch (part) {
             .@"error" => |err| alloc.free(err),
             .tip => |tip| alloc.free(tip),
@@ -123,6 +132,8 @@ pub const Report = struct {
         return .{
             .parts = parts,
             .message = message,
+            .severity = report.severity,
+            .code = report.code,
             .source_name = null,
             .source = null,
         };
@@ -157,6 +168,14 @@ pub fn firstError(report: Report) ?[]const u8 {
     return null;
 }
 
+/// first warning message if the report has one
+pub fn firstWarn(report: Report) ?[]const u8 {
+    for (report.parts) |part| {
+        if (part == .warn) return part.warn;
+    }
+    return null;
+}
+
 /// render a full report to the writer
 pub fn renderReport(
     alloc: std.mem.Allocator,
@@ -166,7 +185,11 @@ pub fn renderReport(
     const source_name = report.source_name orelse "<source>";
     const source = report.source orelse "";
     if (report.parts.len == 0 and report.message.len != 0) {
-        try pretty.printError(writer, "{s}", .{report.message});
+        if (report.severity == .warning) {
+            if (report.code) |c| try pretty.printWarning(writer, "[{s}] {s}", .{ c, report.message }) else try pretty.printWarning(writer, "{s}", .{report.message});
+        } else {
+            if (report.code) |c| try pretty.printError(writer, "[{s}] {s}", .{ c, report.message }) else try pretty.printError(writer, "{s}", .{report.message});
+        }
         return;
     }
 
@@ -177,7 +200,7 @@ pub fn renderReport(
         switch (part) {
             .@"error" => |message| {
                 if (error_seen) try writer.writeByte('\n');
-                try pretty.printError(writer, "{s}", .{message});
+                if (report.code) |c| try pretty.printError(writer, "[{s}] {s}", .{ c, message }) else try pretty.printError(writer, "{s}", .{message});
                 error_seen = true;
             },
             .span => |span| {
@@ -189,7 +212,9 @@ pub fn renderReport(
                 }
             },
             .tip => |tip| try writer.print("  = tip: {s}\n", .{tip}),
-            .warn => |warn| try writer.print("  = warning: {s}\n", .{warn}),
+            .warn => |warn| {
+                if (report.code) |c| try writer.print("  = warning[{s}]: {s}\n", .{ c, warn }) else try writer.print("  = warning: {s}\n", .{warn});
+            },
             .note => |note| try writer.print("  = note: {s}\n", .{note}),
             .trace => |frame| {
                 if (!trace_seen) {
@@ -798,4 +823,36 @@ test "render report prints multiple error blocks" {
     try renderReport(alloc, &buf.writer, report);
     try std.testing.expect(std.mem.find(u8, buf.written(), "first problem") != null);
     try std.testing.expect(std.mem.find(u8, buf.written(), "second problem") != null);
+}
+
+test "warnings report renders severity and code" {
+    const alloc = std.testing.allocator;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    defer buf.deinit();
+
+    const report: Report = .{
+        .severity = .warning,
+        .code = "non-exhaustive-match",
+        .message = "match is not exhaustive: :err not covered, miss yields nil",
+        .source_name = "<source>",
+        .source = "match x\n",
+        .parts = &.{
+            .{ .warn = "match is not exhaustive: :err not covered, miss yields nil" },
+            .{ .span = .{
+                .span = .{ .start = 0, .end = 7, .line = 1, .column = 1 },
+                .role = .primary,
+                .message = "non-exhaustive match",
+            } },
+        },
+    };
+
+    try renderReport(alloc, &buf.writer, report);
+    const output = buf.written();
+    try std.testing.expect(std.mem.find(u8, output, "warning[non-exhaustive-match]") != null);
+    try std.testing.expect(std.mem.find(u8, output, "match x") != null);
+
+    var copied = try report.copy(alloc);
+    defer copied.deinit(alloc);
+    try std.testing.expect(copied.severity == .warning);
+    try std.testing.expectEqualStrings("non-exhaustive-match", copied.code.?);
 }

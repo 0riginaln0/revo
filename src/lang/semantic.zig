@@ -31,6 +31,7 @@ pub fn analyze(
     type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
     docs: ?*std.StringHashMap([]const u8),
     module_resolver: ModuleResolver,
+    warnings: *?diagnostic.Report,
 ) !?lang.Error {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -46,7 +47,14 @@ pub fn analyze(
     }
     if (type_annotations) |ta| try reparentMap(*const ast.Node, std.AutoHashMap(*const ast.Node, types_mod.TypeInfo), ta, alloc);
     if (docs) |dm| try reparentDocs(dm, alloc);
-    if (checker.errors.items.len == 0) return null;
+    if (checker.errors.items.len == 0) {
+        // warnings never fail the build; errors dominate so these drop with them
+        if (checker.warn_parts.items.len > 0) {
+            const wrep = try checker.finishWarnings();
+            warnings.* = try wrep.copy(alloc);
+        }
+        return null;
+    }
 
     const report = try checker.finishReport();
     const copied = try report.copy(alloc);
@@ -113,6 +121,8 @@ const SemanticChecker = struct {
     source_name: []const u8,
     source: []const u8,
     errors: std.ArrayList(diagnostic.Part),
+    /// non-failing diagnostics; emitted alongside success, dropped on error
+    warn_parts: std.ArrayList(diagnostic.Part),
     scopes: std.ArrayList(Scope),
     type_aliases: std.StringHashMap(Entry),
     /// caller-owned out-map: declared name -> doc text, last declare wins
@@ -162,6 +172,7 @@ const SemanticChecker = struct {
             .source_name = source_name,
             .source = source,
             .errors = try .initCapacity(alloc, 8),
+            .warn_parts = try .initCapacity(alloc, 4),
             .scopes = try .initCapacity(alloc, 4),
             .type_aliases = .init(alloc),
             .docs = docs,
@@ -273,6 +284,22 @@ const SemanticChecker = struct {
         return .{
             .parts = parts,
             .message = if (first_msg.len > 0) try self.alloc.dupe(u8, first_msg) else "",
+            .source_name = try self.alloc.dupe(u8, self.source_name),
+            .source = try self.alloc.dupe(u8, self.source),
+        };
+    }
+
+    fn finishWarnings(self: *SemanticChecker) !diagnostic.Report {
+        const parts = try self.warn_parts.toOwnedSlice(self.alloc);
+        const first_msg = for (parts) |p| {
+            if (p == .warn) break p.warn;
+        } else "";
+
+        return .{
+            .parts = parts,
+            .message = if (first_msg.len > 0) try self.alloc.dupe(u8, first_msg) else "",
+            .severity = .warning,
+            .code = "non-exhaustive-match",
             .source_name = try self.alloc.dupe(u8, self.source_name),
             .source = try self.alloc.dupe(u8, self.source),
         };
@@ -798,8 +825,33 @@ const SemanticChecker = struct {
                 }
                 // miss falls through to nil at runtime
                 // so a non-exhaustive match always carries :nil in its type
-                if (!type_serde.matchCovers(self, subject_type, v.arms)) {
+                const covers = try type_serde.buildCovers(self, v.arms);
+                defer self.alloc.free(covers);
+
+                if (!types_mod.matchCoversAll(subject_type, covers)) {
                     unified = types_mod.withNilMiss(self.alloc, unified);
+                    var tags = std.ArrayList([]const u8).initCapacity(self.alloc, 4) catch break :blk unified;
+
+                    defer tags.deinit(self.alloc);
+                    try types_mod.uncoveredTags(self.alloc, subject_type, covers, &tags);
+
+                    const msg = if (tags.items.len > 0) blk_msg: {
+                        const listed = try std.mem.join(self.alloc, ", :", tags.items);
+                        defer self.alloc.free(listed);
+                        break :blk_msg try std.fmt.allocPrint(
+                            self.alloc,
+                            "match is not exhaustive: :{s} not covered, miss yields nil",
+                            .{listed},
+                        );
+                    } else blk_msg: {
+                        const subject_str = try type_serde.formatType(self.alloc, subject_type);
+                        break :blk_msg try std.fmt.allocPrint(
+                            self.alloc,
+                            "match is not exhaustive for {s}, miss yields nil",
+                            .{subject_str},
+                        );
+                    };
+                    try self.appendWarn(msg, node.span, "non-exhaustive match");
                 }
                 break :blk unified;
             },
@@ -1729,6 +1781,15 @@ const SemanticChecker = struct {
     fn appendError(self: *SemanticChecker, message: []const u8, span: ast.Span, label: []const u8) !void {
         try self.errors.append(self.alloc, .{ .@"error" = message });
         try self.errors.append(self.alloc, .{ .span = .{
+            .span = span,
+            .role = .primary,
+            .message = try self.alloc.dupe(u8, label),
+        } });
+    }
+
+    fn appendWarn(self: *SemanticChecker, message: []const u8, span: ast.Span, label: []const u8) !void {
+        try self.warn_parts.append(self.alloc, .{ .warn = message });
+        try self.warn_parts.append(self.alloc, .{ .span = .{
             .span = span,
             .role = .primary,
             .message = try self.alloc.dupe(u8, label),

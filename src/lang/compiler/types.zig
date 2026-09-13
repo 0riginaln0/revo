@@ -943,6 +943,63 @@ pub fn withNilMiss(alloc: std.mem.Allocator, result: TypeInfo) TypeInfo {
     return .{ .tag = .{ .@"union" = owned } };
 }
 
+//
+// bare names of union/bool/atom variants no cover hits, for warning messages
+//   ; slices borrow subject storage, empty whn nothing nameable
+pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []const MatchCover, out: *std.ArrayList([]const u8)) !void {
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                var hit = false;
+                for (covers) |c| switch (c) {
+                    .atom => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .tag => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .ascribed => |ti| {
+                        if (targetAcceptsVariant(v, ti)) hit = true;
+                    },
+                    else => {},
+                };
+                if (hit or v.types.len == 0) continue;
+                if (v.types[0].tag == .atom) {
+                    try out.append(alloc, ast.atomName(v.types[0].tag.atom));
+                } else if (v.types[0].tag == .table) {
+                    const fields = v.types[0].tag.table.fields orelse continue;
+                    if (fields.len == 0 or fields[0].field_type.tag != .atom) continue;
+                    try out.append(alloc, ast.atomName(fields[0].field_type.tag.atom));
+                }
+            }
+        },
+        .bool => {
+            var saw_true = false;
+            var saw_false = false;
+            for (covers) |c| switch (c) {
+                .atom => |name| {
+                    const bare = ast.atomName(name);
+                    if (std.mem.eql(u8, bare, "true")) saw_true = true;
+                    if (std.mem.eql(u8, bare, "false")) saw_false = true;
+                },
+                else => {},
+            };
+            if (!saw_true) try out.append(alloc, "true");
+            if (!saw_false) try out.append(alloc, "false");
+        },
+        .atom => |name| {
+            for (covers) |c| switch (c) {
+                .atom => |cover| {
+                    if (std.mem.eql(u8, ast.atomName(cover), ast.atomName(name))) return;
+                },
+                else => {},
+            };
+            try out.append(alloc, ast.atomName(name));
+        },
+        else => {},
+    }
+}
+
 test matchCoversAll {
     // wildcard n never
     const types = revo.lang.compiler.types;
@@ -2176,6 +2233,40 @@ test "non-exhaustive match" {
         \\ match 99
         \\ | 1 => 2
         \\ | 2 => 3
+    );
+}
+
+test "non exhaustiveness warnings" {
+    // non-exhaustive match warns w uncovered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , ":err");
+
+    // partial literal match warns for subject type
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "number");
+
+    // exhaustive match warns nothing
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
+
+    // wildcard match warns nothing"
+    try t.expectNoWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+        \\ | _ => 3
     );
 }
 
