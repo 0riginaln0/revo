@@ -176,6 +176,28 @@ pub fn firstWarn(report: Report) ?[]const u8 {
     return null;
 }
 
+///
+/// the one grand old big gorgeous magnificent beautiful severity header line
+///
+/// : `error: text [slug]`
+/// , color by severity
+///   codes print after the text
+///   ; tips and notes never carry one
+///
+fn printHeader(writer: *std.Io.Writer, severity: Severity, code: ?[]const u8, text: []const u8) !void {
+    if (code) |c| switch (severity) {
+        .err => try pretty.printError(writer, "{s} [{s}]", .{ text, c }),
+        .warning => try pretty.printWarning(writer, "{s} [{s}]", .{ text, c }),
+        .note => try pretty.printNote(writer, "{s} [{s}]", .{ text, c }),
+        .help => try pretty.printHelp(writer, "{s} [{s}]", .{ text, c }),
+    } else switch (severity) {
+        .err => try pretty.printError(writer, "{s}", .{text}),
+        .warning => try pretty.printWarning(writer, "{s}", .{text}),
+        .note => try pretty.printNote(writer, "{s}", .{text}),
+        .help => try pretty.printHelp(writer, "{s}", .{text}),
+    }
+}
+
 /// render a full report to the writer
 pub fn renderReport(
     alloc: std.mem.Allocator,
@@ -185,37 +207,55 @@ pub fn renderReport(
     const source_name = report.source_name orelse "<source>";
     const source = report.source orelse "";
     if (report.parts.len == 0 and report.message.len != 0) {
-        if (report.severity == .warning) {
-            if (report.code) |c| try pretty.printWarning(writer, "[{s}] {s}", .{ c, report.message }) else try pretty.printWarning(writer, "{s}", .{report.message});
-        } else {
-            if (report.code) |c| try pretty.printError(writer, "[{s}] {s}", .{ c, report.message }) else try pretty.printError(writer, "{s}", .{report.message});
-        }
+        try printHeader(writer, report.severity, report.code, report.message);
         return;
     }
 
-    var error_seen = false;
+    var header_seen = false;
     var trace_seen = false;
     var trace_idx: usize = 0;
     for (report.parts) |part| {
         switch (part) {
             .@"error" => |message| {
-                if (error_seen) try writer.writeByte('\n');
-                if (report.code) |c| try pretty.printError(writer, "[{s}] {s}", .{ c, message }) else try pretty.printError(writer, "{s}", .{message});
-                error_seen = true;
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .err, report.code, message);
+                header_seen = true;
             },
             .span => |span| {
                 const msg = if (span.message.len == 0) null else span.message;
                 switch (span.role) {
-                    .primary => try renderSpanBlock(alloc, writer, span.source_name orelse source_name, span.source orelse source, span.span, msg),
-                    .secondary => try renderSecondarySpan(writer, span.source_name orelse source_name, span.span, msg),
+                    .primary => try renderSpanBlock(
+                        alloc,
+                        writer,
+                        span.source_name orelse source_name,
+                        span.source orelse source,
+                        span.span,
+                        msg,
+                    ),
+                    .secondary => try renderSecondarySpan(
+                        writer,
+                        span.source_name orelse source_name,
+                        span.span,
+                        msg,
+                    ),
                     else => {},
                 }
             },
-            .tip => |tip| try writer.print("  = tip: {s}\n", .{tip}),
-            .warn => |warn| {
-                if (report.code) |c| try writer.print("  = warning[{s}]: {s}\n", .{ c, warn }) else try writer.print("  = warning: {s}\n", .{warn});
+            .tip => |tip| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .help, null, tip);
+                header_seen = true;
             },
-            .note => |note| try writer.print("  = note: {s}\n", .{note}),
+            .warn => |warn| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .warning, report.code, warn);
+                header_seen = true;
+            },
+            .note => |note| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .note, null, note);
+                header_seen = true;
+            },
             .trace => |frame| {
                 if (!trace_seen) {
                     try writer.writeAll("\nstack trace:\n");
@@ -848,7 +888,8 @@ test "warnings report renders severity and code" {
 
     try renderReport(alloc, &buf.writer, report);
     const output = buf.written();
-    try std.testing.expect(std.mem.find(u8, output, "warning[non-exhaustive-match]") != null);
+    try std.testing.expect(std.mem.find(u8, output, "warning:") != null);
+    try std.testing.expect(std.mem.find(u8, output, "[non-exhaustive-match]") != null);
     try std.testing.expect(std.mem.find(u8, output, "match x") != null);
 
     var copied = try report.copy(alloc);

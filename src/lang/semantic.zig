@@ -121,6 +121,11 @@ const SemanticChecker = struct {
     source_name: []const u8,
     source: []const u8,
     errors: std.ArrayList(diagnostic.Part),
+    /// code of the first error
+    ///
+    /// reports carry one code like they carry one message,
+    /// for per-error codes u need to refactor the Diagnostic struct
+    first_code: ?[]const u8 = null,
     /// non-failing diagnostics; emitted alongside success, dropped on error
     warn_parts: std.ArrayList(diagnostic.Part),
     scopes: std.ArrayList(Scope),
@@ -284,6 +289,7 @@ const SemanticChecker = struct {
         return .{
             .parts = parts,
             .message = if (first_msg.len > 0) try self.alloc.dupe(u8, first_msg) else "",
+            .code = self.first_code,
             .source_name = try self.alloc.dupe(u8, self.source_name),
             .source = try self.alloc.dupe(u8, self.source),
         };
@@ -924,6 +930,7 @@ const SemanticChecker = struct {
             !(self.fn_nesting > 0 and self.predeclared.contains(name)) and revo.std_lib.api.findFn(name) == null)
         {
             const msg = try std.fmt.allocPrint(self.alloc, "name `{s}` is not defined", .{name});
+            if (self.first_code == null) self.first_code = "unknown-name";
             try self.appendError(msg, span, "unknown name");
         }
         return self.inferIdentType(name);
@@ -1762,6 +1769,7 @@ const SemanticChecker = struct {
             "wants {s}, got {s}",
             .{ expected_str, actual_str },
         );
+        if (self.first_code == null) self.first_code = "type-mismatch";
         try self.appendError(msg, span, label);
     }
 

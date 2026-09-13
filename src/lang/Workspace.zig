@@ -548,15 +548,33 @@ pub fn diagnostics(
     id: FileId,
     opts: lang.BuildOptions,
 ) !?lang.Error {
+    var bundle = try self.diagnosticsWithWarnings(alloc, id, opts);
+    if (bundle.warnings) |*w| w.deinit(alloc);
+    return bundle.err;
+}
+
+pub const DiagnosticsBundle = struct {
+    err: ?lang.Error = null,
+    warnings: ?lang.diagnostic.Report = null,
+};
+
+/// same as diagnostics,
+/// but also lifts non-failing warnings from th full build
+pub fn diagnosticsWithWarnings(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: lang.BuildOptions,
+) !DiagnosticsBundle {
     var sem = try self.inspectDetailed(alloc, id, opts);
     errdefer sem.deinit(alloc);
     var full = self.analyzeDetailed(alloc, id, opts) catch |err| switch (err) {
         error.VmUnavailable => {
             if (sem.diagnostics) |diag| {
                 sem.diagnostics = null;
-                return diag;
+                return .{ .err = diag };
             }
-            return null;
+            return .{};
         },
         else => |e| return e,
     };
@@ -570,18 +588,26 @@ pub fn diagnostics(
             // errorKind doesn't matter much for diagnostics display
             full.diagnostics = null;
             sem.diagnostics = null;
-            return lang.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } };
+            const warnings = full.warnings;
+            full.warnings = null;
+            return .{ .err = lang.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
         }
         full.diagnostics = null;
-        return full_diag;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = full_diag, .warnings = warnings };
     }
 
     if (sem.diagnostics) |diag| {
         sem.diagnostics = null;
-        return diag;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = diag, .warnings = warnings };
     }
 
-    return null;
+    const warnings = full.warnings;
+    full.warnings = null;
+    return .{ .warnings = warnings };
 }
 
 /// returns syms defined in a file
@@ -2256,6 +2282,14 @@ fn mergeReports(alloc: std.mem.Allocator, a: lang.Error, b: lang.Error) !lang.di
                 }
             }
         }
+        if (p == .@"error") {
+            for (a_report.parts) |ap| {
+                if (ap == .@"error" and std.mem.eql(u8, ap.@"error", p.@"error")) {
+                    dup = true;
+                    break;
+                }
+            }
+        }
         if (!dup) all_parts.appendAssumeCapacity(p);
     }
     const message = if (a_report.message.len > 0)
@@ -2267,6 +2301,7 @@ fn mergeReports(alloc: std.mem.Allocator, a: lang.Error, b: lang.Error) !lang.di
     return .{
         .parts = try all_parts.toOwnedSlice(alloc),
         .message = message,
+        .code = a_report.code orelse b_report.code,
         .source_name = try alloc.dupe(u8, a_report.source_name orelse b_report.source_name orelse ""),
         .source = try alloc.dupe(u8, a_report.source orelse b_report.source orelse ""),
     };

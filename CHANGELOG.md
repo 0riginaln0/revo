@@ -32,6 +32,8 @@ tuples and structs are gone now, most breaking change yet
 
       tables with unknown shapes are still ok though
 
+    - non-exhaustive match is now detected and will give you a warning
+
     - lsp dot-completion for locals: `t.` completes record fields with types
       (analyzed from the buffer minus the incomplete access, which never parses)
 
@@ -41,6 +43,8 @@ tuples and structs are gone now, most breaking change yet
     - lsp module hover lists macros: `pub proc`/`macro` decls show up
       in `a.` hover and completions; prelude macros no longer leak
       into dependency members with bogus lines
+
+    - now carry severity of either err, warning, note, or help
 
 - just match
   sugar for `match :true`

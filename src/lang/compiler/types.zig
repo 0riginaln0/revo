@@ -2270,6 +2270,16 @@ test "non exhaustiveness warnings" {
     );
 }
 
+test "error codes" {
+    // type mismatch carries its code
+    try t.expectErrorCode(
+        \\ let x: num = "hi"
+    , "type-mismatch");
+
+    // unknown name carries its code
+    try t.expectErrorCode("aaa\n", "unknown-name");
+}
+
 test "return type propagation: const binding with annotated fn" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();

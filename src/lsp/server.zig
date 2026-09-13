@@ -442,42 +442,38 @@ const Handler = struct {
         uri: []const u8,
         file_id: Workspace.FileId,
     ) !void {
-        const diag = try h.ws.diagnostics(arena, file_id, .{});
-        if (diag) |err| {
-            defer lang.deinitError(arena, err);
-            // extract the report from whichever phase produced it
+        var bundle = try h.ws.diagnosticsWithWarnings(arena, file_id, .{});
+        defer {
+            if (bundle.err) |e| lang.deinitError(arena, e);
+            if (bundle.warnings) |*w| w.deinit(arena);
+        }
+        var all = try std.ArrayList(T.Diagnostic).initCapacity(arena, 4);
+
+        if (bundle.err) |err| {
+            // extract from whichever phase did it
             const report = switch (err) {
                 .parse => |f| f.report,
                 .expand => |f| f.report,
                 .lower => |f| f.report,
                 .semantic => |f| f.report,
             };
-            const lsp_diags = try reportToDiags(arena, report, h.enc);
-            try h.transport.writeNotification(
-                h.io,
-                arena,
-                "textDocument/publishDiagnostics",
-                T.publish_diagnostics.Params,
-                .{
-                    .uri = uri,
-                    .diagnostics = lsp_diags,
-                },
-                .{},
-            );
-        } else {
-            // clear previous diags
-            try h.transport.writeNotification(
-                h.io,
-                arena,
-                "textDocument/publishDiagnostics",
-                T.publish_diagnostics.Params,
-                .{
-                    .uri = uri,
-                    .diagnostics = &.{},
-                },
-                .{},
-            );
+            try all.appendSlice(arena, try reportToDiags(arena, report, uri, h.enc));
         }
+
+        if (bundle.warnings) |w| {
+            try all.appendSlice(arena, try reportToDiags(arena, w, uri, h.enc));
+        }
+        try h.transport.writeNotification(
+            h.io,
+            arena,
+            "textDocument/publishDiagnostics",
+            T.publish_diagnostics.Params,
+            .{
+                .uri = uri,
+                .diagnostics = all.items,
+            },
+            .{},
+        );
     }
 
     /// check rename validity
@@ -784,57 +780,108 @@ fn emitSubTokens(
 }
 
 /// convert a diag report into lsp diag objects
-fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, enc: lsp.offsets.Encoding) ![]T.Diagnostic {
+fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: []const u8, enc: lsp.offsets.Encoding) ![]T.Diagnostic {
     const source = report.source orelse "";
     if (report.parts.len == 0) return arena.alloc(T.Diagnostic, 0);
+    const sev: T.Diagnostic.Severity = switch (report.severity) {
+        .err => .Error,
+        .warning => .Warning,
+        .note => .Information,
+        .help => .Hint,
+    };
+    const code: ?T.ID = if (report.code) |c| .{ .string = c } else null;
+
     var out = try std.ArrayList(T.Diagnostic).initCapacity(arena, report.parts.len);
 
-    // only span parts carry position info; each span shows its nearest
-    // preceding error text, falling back through report and span labels
-    var last_error: []const u8 = "";
-    for (report.parts) |part| {
-        if (part == .@"error") {
-            last_error = part.@"error";
-            continue;
-        }
-        if (part != .span) continue;
-        const sp = part.span;
-        const message = if (last_error.len > 0)
-            last_error
-        else if (report.message.len > 0)
-            report.message
-        else if (sp.message.len > 0)
-            sp.message
-        else
-            "error";
-        out.appendAssumeCapacity(.{
-            .range = .{
-                .start = offsetToLspPos(source, sp.span.start, enc),
-                .end = offsetToLspPos(source, sp.span.end, enc),
-            },
-            .severity = switch (sp.role) {
-                .primary => T.Diagnostic.Severity.Error,
-                .secondary => T.Diagnostic.Severity.Warning,
-                .context => T.Diagnostic.Severity.Information,
-                .trace => T.Diagnostic.Severity.Hint,
-            },
-            .message = message,
-            .source = "revo",
-            .tags = &.{},
-            .relatedInformation = &.{},
-        });
-    }
+    // group flat parts into diags:
+    //
+    // a text part starts a group
+    // , following spans attach (first primary = range, rest = related)
+    // , tips and notes join the message
+    //
+    var cur_text: []const u8 = "";
+    var have_cur = false;
+    var cur_range: ?T.Range = null;
+    var cur_related = try std.ArrayList(T.Diagnostic.RelatedInformation).initCapacity(arena, 2);
+    var cur_tips = try std.ArrayList([]const u8).initCapacity(arena, 2);
 
-    // no span parts with position; so emit a file-level diagnostic instead
-    if (out.items.len == 0) {
-        out.appendAssumeCapacity(.{
-            .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 0 } },
-            .severity = T.Diagnostic.Severity.Error,
-            .message = if (report.message.len > 0) report.message else "error",
-            .source = "revo",
-            .tags = &.{},
-            .relatedInformation = &.{},
-        });
+    for (report.parts, 0..) |part, i| {
+        switch (part) {
+            .@"error", .warn => |text| {
+                cur_text = text;
+                have_cur = true;
+                cur_range = null;
+                cur_related = try std.ArrayList(T.Diagnostic.RelatedInformation).initCapacity(arena, 2);
+                cur_tips = try std.ArrayList([]const u8).initCapacity(arena, 2);
+            },
+            .span => |sp| {
+                if (!have_cur) {
+                    cur_text =
+                        if (report.message.len > 0)
+                            report.message
+                        else if (sp.message.len > 0)
+                            sp.message
+                        else
+                            "error";
+
+                    have_cur = true;
+                }
+                const r = T.Range{
+                    .start = offsetToLspPos(source, sp.span.start, enc),
+                    .end = offsetToLspPos(source, sp.span.end, enc),
+                };
+
+                if (cur_range == null and sp.role == .primary) {
+                    cur_range = r;
+                } else {
+                    try cur_related.append(arena, .{
+                        .location = .{ .uri = uri, .range = r },
+                        .message = if (sp.message.len > 0) sp.message else "related location",
+                    });
+                }
+            },
+            .tip, .note => |text| {
+                if (!have_cur) {
+                    cur_text = if (report.message.len > 0) report.message else text;
+                    have_cur = true;
+                }
+                try cur_tips.append(arena, text);
+            },
+            .trace => {},
+        }
+
+        const next_starts = if (i + 1 < report.parts.len) switch (report.parts[i + 1]) {
+            .@"error", .warn => true,
+            else => false,
+        } else true;
+
+        if (next_starts and have_cur) {
+            const message = if (cur_tips.items.len == 0) cur_text else blk: {
+                var buf = try std.ArrayList(u8).initCapacity(arena, cur_text.len + 64);
+                try buf.appendSlice(arena, cur_text);
+
+                for (cur_tips.items) |tip| {
+                    try buf.appendSlice(arena, "\n");
+                    try buf.appendSlice(arena, tip);
+                }
+
+                break :blk try buf.toOwnedSlice(arena);
+            };
+            const range = cur_range orelse T.Range{
+                .start = .{ .line = 0, .character = 0 },
+                .end = .{ .line = 0, .character = 0 },
+            };
+            try out.append(arena, .{
+                .range = range,
+                .severity = sev,
+                .code = code,
+                .message = message,
+                .source = "revo",
+                .tags = &.{},
+                .relatedInformation = try cur_related.toOwnedSlice(arena),
+            });
+            have_cur = false;
+        }
     }
     return out.toOwnedSlice(arena);
 }
