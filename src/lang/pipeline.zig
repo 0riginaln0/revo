@@ -393,6 +393,22 @@ fn extractPubImportsOneLevel(
 }
 
 pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
+    var dropped: ?diagnostic.Report = null;
+    const result = try buildWithWarnings(vm, source, opts, &dropped);
+    if (dropped) |*wr| wr.deinit(vm.runtime.alloc);
+    return result;
+}
+
+///
+/// build with an opt-in warnings outparam
+///
+/// ; warnings never fail the build
+///     TODO: add a -Werror
+///
+/// the report is owned by vm.runtime.alloc
+///     , deinit it when done
+///
+pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: *?diagnostic.Report) !BuildResult {
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
 
@@ -503,6 +519,7 @@ pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
         &type_annotations,
         null,
         .{ .ptr = &pipeline_resolver, .resolveFn = PipelineResolver.resolve },
+        warnings,
     )) |semantic_err| {
         // the original report is arena-owned inside semantic.analyze; copy it
         // out and take ownership of the source text (deinitError frees it)
@@ -821,6 +838,16 @@ pub fn renderError(allocator: std.mem.Allocator, writer: *std.Io.Writer, source:
             break :blk diagnostic.renderReport(allocator, writer, report);
         },
     };
+}
+
+/// render a warnings report
+///   ; same shape as errors
+///     , never fails the build
+pub fn renderWarnings(allocator: std.mem.Allocator, writer: *std.Io.Writer, source: Source, report: diagnostic.Report) !void {
+    var rep = report;
+    rep.source_name = rep.source_name orelse source.name;
+    rep.source = source.text;
+    return diagnostic.renderReport(allocator, writer, rep);
 }
 
 pub fn deinitError(alloc: std.mem.Allocator, err: Error) void {

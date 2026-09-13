@@ -330,6 +330,15 @@ pub fn printBuildError(gpa: std.mem.Allocator, source_info: lang.Source, err: la
     std.debug.print("{s}", .{buf.written()});
 }
 
+pub fn printBuildWarning(gpa: std.mem.Allocator, source_info: lang.Source, report: lang.diagnostic.Report) void {
+    // todo
+    if (comptime is_freestanding) return;
+    var buf = std.Io.Writer.Allocating.init(gpa);
+    defer buf.deinit();
+    lang.renderWarnings(gpa, &buf.writer, source_info, report) catch {};
+    std.debug.print("{s}", .{buf.written()});
+}
+
 pub fn printEvalError(gpa: std.mem.Allocator, source: []const u8, failure: EvalFailure) void {
     // todo
     if (comptime is_freestanding) return;

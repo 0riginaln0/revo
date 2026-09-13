@@ -1,6 +1,7 @@
 const ast = @import("../ast.zig");
 const revo = @import("revo");
 const std = @import("std");
+const type_serde = @import("../type_serde.zig");
 
 pub const UnionVariant = struct {
     name: []const u8,
@@ -456,10 +457,16 @@ pub fn unifyBranchType(acc: TypeInfo, branch: TypeInfo) TypeInfo {
 }
 
 pub fn inferMatchType(ctx: anytype, subject: *const ast.Node, arms: []const ast.MatchArm) TypeInfo {
-    _ = subject;
+    const subject_type = inferExprType(ctx, subject);
     var result: TypeInfo = .{ .tag = .never };
     for (arms) |arm| {
         result = unifyBranchType(result, inferExprType(ctx, arm.then));
+    }
+
+    // miss falls through to nil at runtime
+    // so a non-exhaustive match always carries :nil in its type
+    if (!type_serde.matchCovers(ctx, subject_type, arms)) {
+        result = withNilMiss(ctx.alloc, result);
     }
     return result;
 }
@@ -839,6 +846,337 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
         },
         else => ti,
     };
+}
+
+//
+// match cov prover
+//
+
+/// one guardless arm's contribution to exhaustiveness
+///
+/// callers map ast matchers to these
+/// guards excluded since a guard can always fail through
+pub const MatchCover = union(enum) {
+    wildcard, // `_`, binder `v`,, etc. anything matching every value
+    atom: []const u8, // `:ok` literal
+    tag: []const u8, // `{:ok, ...}` table pat leading tag
+    ascribed: TypeInfo, // `x: T` covers subject iff subject coerces to T
+    number, // numeric literal, one value of an infinite domain
+    string, // string literal, one value of an infinite domain
+    other, // shapes proving nothing;; ignored
+};
+
+/// true when covers hit every value of subject
+/// pure, no ast, no eval
+pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
+    if (subject.tag == .never) return true;
+    for (covers) |c| switch (c) {
+        .wildcard => return true,
+        .ascribed => |ti| {
+            if (canCoerce(subject, ti)) return true;
+        },
+        else => {},
+    };
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                var hit = false;
+                for (covers) |c| switch (c) {
+                    .atom => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .tag => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .ascribed => |ti| {
+                        if (targetAcceptsVariant(v, ti)) hit = true;
+                    },
+                    else => {},
+                };
+                if (!hit) return false;
+            }
+            return true;
+        },
+        .bool => {
+            var saw_true = false;
+            var saw_false = false;
+            for (covers) |c| switch (c) {
+                .atom => |name| {
+                    const bare = ast.atomName(name);
+                    if (std.mem.eql(u8, bare, "true")) saw_true = true;
+                    if (std.mem.eql(u8, bare, "false")) saw_false = true;
+                },
+                else => {},
+            };
+            return saw_true and saw_false;
+        },
+        .atom => |name| {
+            for (covers) |c| switch (c) {
+                .atom => |cover| {
+                    if (std.mem.eql(u8, ast.atomName(cover), ast.atomName(name))) return true;
+                },
+                else => {},
+            };
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// true when some subject value could meet the pattern
+///   ; unknown shapes (.other) assume reachable, never proven dead
+pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
+    switch (cover) {
+        .wildcard => return true,
+        .other => return true,
+        .ascribed => |ti| switch (subject.tag) {
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, ti)) return true;
+                return false;
+            },
+            .any, .type_var => return true,
+            else => return canCoerce(subject, ti),
+        },
+        .atom => |name| switch (subject.tag) {
+            .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (unionVariantTagEql(v, name)) return true;
+                return false;
+            },
+            .bool => {
+                const bare = ast.atomName(name);
+                return std.mem.eql(u8, bare, "true") or std.mem.eql(u8, bare, "false");
+            },
+            .atom => |s| return std.mem.eql(u8, ast.atomName(s), ast.atomName(name)),
+            else => return false,
+        },
+        .tag => |name| switch (subject.tag) {
+            .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (unionVariantTagEql(v, name)) return true;
+                return false;
+            },
+            .table => |tbl| {
+                const fields = tbl.fields orelse return true;
+                if (fields.len == 0 or fields[0].field_type.tag != .atom) return true;
+                return std.mem.eql(u8, ast.atomName(fields[0].field_type.tag.atom), ast.atomName(name));
+            },
+            else => return false,
+        },
+        .number => switch (subject.tag) {
+            .number, .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, .{ .tag = .number })) return true;
+                return false;
+            },
+            else => return false,
+        },
+        .string => switch (subject.tag) {
+            .string, .any, .type_var => return true,
+            .@"union" => |us| {
+                for (us) |v| if (targetAcceptsVariant(v, .{ .tag = .string })) return true;
+                return false;
+            },
+            else => return false,
+        },
+    }
+}
+
+/// union result with a :nil miss arm
+///
+/// non-exhaustive match falls through to nil at runtime, so :nil is part of the type
+/// `any` absorbs it and `never` (all arms diverge) becomes just :nil
+/// oom degrades to result
+pub fn withNilMiss(alloc: std.mem.Allocator, result: TypeInfo) TypeInfo {
+    if (result.tag == .any) return result;
+    if (result.tag == .never) return .{ .tag = .{ .atom = ":nil" } };
+
+    var variants = std.ArrayList(UnionVariant).initCapacity(alloc, 4) catch return result;
+    errdefer variants.deinit(alloc);
+
+    collectVariants(alloc, result, &variants) catch return result;
+    const nil_types = alloc.alloc(TypeInfo, 1) catch return result;
+
+    nil_types[0] = .{ .tag = .{ .atom = ":nil" } };
+    variants.append(alloc, .{ .name = "", .types = nil_types }) catch return result;
+
+    const owned = variants.toOwnedSlice(alloc) catch return result;
+    return .{ .tag = .{ .@"union" = owned } };
+}
+
+//
+// bare names of union/bool/atom variants no cover hits, for warning messages
+//   ; slices borrow subject storage, empty whn nothing nameable
+pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []const MatchCover, out: *std.ArrayList([]const u8)) !void {
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                var hit = false;
+                for (covers) |c| switch (c) {
+                    .atom => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .tag => |name| {
+                        if (unionVariantTagEql(v, name)) hit = true;
+                    },
+                    .ascribed => |ti| {
+                        if (targetAcceptsVariant(v, ti)) hit = true;
+                    },
+                    else => {},
+                };
+                if (hit or v.types.len == 0) continue;
+                if (v.types[0].tag == .atom) {
+                    try out.append(alloc, ast.atomName(v.types[0].tag.atom));
+                } else if (v.types[0].tag == .table) {
+                    const fields = v.types[0].tag.table.fields orelse continue;
+                    if (fields.len == 0 or fields[0].field_type.tag != .atom) continue;
+                    try out.append(alloc, ast.atomName(fields[0].field_type.tag.atom));
+                }
+            }
+        },
+        .bool => {
+            var saw_true = false;
+            var saw_false = false;
+            for (covers) |c| switch (c) {
+                .atom => |name| {
+                    const bare = ast.atomName(name);
+                    if (std.mem.eql(u8, bare, "true")) saw_true = true;
+                    if (std.mem.eql(u8, bare, "false")) saw_false = true;
+                },
+                else => {},
+            };
+            if (!saw_true) try out.append(alloc, "true");
+            if (!saw_false) try out.append(alloc, "false");
+        },
+        .atom => |name| {
+            for (covers) |c| switch (c) {
+                .atom => |cover| {
+                    if (std.mem.eql(u8, ast.atomName(cover), ast.atomName(name))) return;
+                },
+                else => {},
+            };
+            try out.append(alloc, ast.atomName(name));
+        },
+        else => {},
+    }
+}
+
+///
+/// source pattern covering one uncovered tag!!!
+///
+/// : `:tag` for bare atoms and bools
+/// , `{:tag, _, ...}` for tuple variants
+/// , null when the shape is not nameable (numbers, strings, dynamic tables) and `_` must cover it
+///
+/// no idea what to do for nums and strings
+///
+/// tags are bare names as returned by uncoveredTags
+/// caller owns the returned slice
+///
+pub fn suggestArmPattern(alloc: std.mem.Allocator, subject: TypeInfo, tag: []const u8) !?[]const u8 {
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                if (!unionVariantTagEql(v, tag)) continue;
+                if (v.types.len == 0) return null;
+                if (v.types[0].tag == .atom) {
+                    return try std.fmt.allocPrint(alloc, ":{s}", .{tag});
+                }
+                if (v.types[0].tag == .table) {
+                    const fields = v.types[0].tag.table.fields orelse return null;
+                    if (fields.len == 0 or fields[0].field_type.tag != .atom) return null;
+                    //
+                    // positional payload only;
+                    // named fields need a record pattern we canr dérive
+                    // , so `_` covers them
+                    var n: usize = 0;
+                    var idx: usize = 1;
+                    for (fields[1..]) |f| {
+                        var buf: [16]u8 = undefined;
+                        const want = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch break;
+                        if (!std.mem.eql(u8, f.name, want)) break;
+                        n += 1;
+                        idx += 1;
+                    }
+
+                    if (n != fields.len - 1) return null;
+                    if (n == 0) return try std.fmt.allocPrint(alloc, "{{:{s}}}", .{tag});
+
+                    var buf = try std.ArrayList(u8).initCapacity(alloc, 8 + n * 3);
+                    errdefer buf.deinit(alloc);
+
+                    try buf.appendSlice(alloc, "{:");
+                    try buf.appendSlice(alloc, tag);
+
+                    for (0..n) |_| try buf.appendSlice(alloc, ", _");
+                    try buf.append(alloc, '}');
+                    return try buf.toOwnedSlice(alloc);
+                }
+                return null;
+            }
+            return null;
+        },
+        .bool => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
+        .atom => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
+        else => return null,
+    }
+}
+
+test matchCoversAll {
+    // wildcard n never
+    const types = revo.lang.compiler.types;
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .never }, &.{}));
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .number }, &.{.wildcard}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .number }, &.{}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .number }, &.{.other}));
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .any }, &.{.wildcard}));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .any }, &.{.other}));
+
+    // atom union needs every tag
+    const ok: types.TypeInfo = .{ .tag = .{ .atom = ":ok" } };
+    const err: types.TypeInfo = .{ .tag = .{ .atom = ":err" } };
+    const ok_types = [_]types.TypeInfo{ok};
+    const err_types = [_]types.TypeInfo{err};
+    const variants = [_]types.UnionVariant{
+        .{ .name = "", .types = &ok_types },
+        .{ .name = "", .types = &err_types },
+    };
+    const subject: types.TypeInfo = .{ .tag = .{ .@"union" = &variants } };
+    try std.testing.expect(types.matchCoversAll(subject, &.{
+        .{ .atom = ":ok" },
+        .{ .atom = ":err" },
+    }));
+    try std.testing.expect(!types.matchCoversAll(subject, &.{.{ .atom = ":ok" }}));
+    try std.testing.expect(types.matchCoversAll(subject, &.{.wildcard}));
+    //
+    // bool n single atom
+    try std.testing.expect(types.matchCoversAll(.{ .tag = .bool }, &.{
+        .{ .atom = ":true" },
+        .{ .atom = ":false" },
+    }));
+    try std.testing.expect(!types.matchCoversAll(.{ .tag = .bool }, &.{.{ .atom = ":true" }}));
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .{ .atom = ":ok" } },
+        &.{.{ .atom = ":ok" }},
+    ));
+    try std.testing.expect(!types.matchCoversAll(
+        .{ .tag = .{ .atom = ":ok" } },
+        &.{.{ .atom = ":err" }},
+    ));
+    //
+    // ascribed covers when subject coerces
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .number } }},
+    ));
+    try std.testing.expect(types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .any } }},
+    ));
+    try std.testing.expect(!types.matchCoversAll(
+        .{ .tag = .number },
+        &.{.{ .ascribed = .{ .tag = .string } }},
+    ));
 }
 
 test "types: TypeInfo equality" {
@@ -1913,6 +2251,286 @@ test "match ascriptions narrow to the annotated type" {
         if (inst.op == .add_imm) saw_add_imm = true;
     }
     try std.testing.expect(saw_add_imm);
+}
+
+test "non-exhaustive match" {
+    try t.expectCompileError(
+        \\ let n: num = 1
+        \\ let x: num = match n
+        \\ | 1 => 2
+        \\ | 2 => 3
+    , .ParseError);
+
+    // partial result match carries :nil in its type
+    try t.expectCompileError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+    , .ParseError);
+
+    // wildcard match has no :nil
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | 1 => 10
+        \\ | _ => 20
+        \\ x
+    , 20);
+
+    // exhaustive bool match has no :nil
+    try t.topNumber(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ x
+    , 10);
+
+    // exhaustive result match has no :nil
+    try t.topNumber(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ y
+    , 42);
+
+    // ascribed arm can cover the subject
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | v: num => v
+        \\ x
+    , 5);
+
+    // exhaustive bool match is precise, not any
+    // `let s: string` only fails when x is exactly num; any would compile
+    try t.expectCompileError(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ let s: string = x
+    , .ParseError);
+
+    // exhaustive result match is precise, not any
+    try t.expectCompileError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ let s: string = y
+    , .ParseError);
+
+    // never arm does not widen match to any
+    try t.expectCompileError(
+        \\ type R = {:ok, num} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ let s: string = a
+    , .ParseError);
+
+    // any payload propagates through match
+    // annotation wins over the literal:
+    // x may later hold {:ok, "str"},
+    //   so v is any and the match is any
+    //
+    // narrowing to num would be unsound
+    try t.topNumber(
+        \\ type R = {:ok, any} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ a
+    , 1);
+
+    // non-exhaustive match still yields :nil at runtime
+    try t.topNil(
+        \\ match 99
+        \\ | 1 => 2
+        \\ | 2 => 3
+    );
+}
+
+test "non exhaustiveness warnings" {
+    // non-exhaustive match warns w uncovered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , ":err");
+
+    // partial literal match warns for subject type
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "number");
+
+    // exhaustive match warns nothing
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
+
+    // wildcard match warns nothing"
+    try t.expectNoWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+        \\ | _ => 3
+    );
+}
+
+test "dead match arms" {
+    // wildcard first cuts later arms off
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable");
+
+    // duplicate literal
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 10
+        \\ | 1 => 20
+        \\ | _ => 0
+    , "unreachable");
+
+    // covered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, _} => 1
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    , "unreachable");
+
+    // bool-exhaustive arms kill the wildcard
+    try t.expectWarning(
+        \\ let b = 1 == 1
+        \\ match b
+        \\ | :true => 1
+        \\ | :false => 2
+        \\ | _ => 3
+    , "unreachable");
+
+    // disjoint pattern never fires
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "never matches");
+}
+
+test "comma arms" {
+    try t.topString(
+        \\ match 2
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "hit");
+    try t.topString(
+        \\ match 3
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "miss");
+    // share bindings
+    try t.topString(
+        \\ type R = {:ok, string} | {:err, string}
+        \\ let x: R = {:err, "boom"}
+        \\ match x
+        \\ | {:ok, v}, {:err, v} => v
+        \\ | _ => "none"
+    , "boom");
+    // comma arm with guard
+    try t.topString(
+        \\ match 7
+        \\ | 1, 2 => "low"
+        \\ | v when v > 5 => "high"
+        \\ | _ => "mid"
+    , "high");
+}
+
+test "match warning codes" {
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable-match-arm");
+
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "impossible-match-arm");
+
+    try t.expectWarningCode(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "non-exhaustive-match");
+}
+
+test "match suggestion" {
+    // uncovered tag becomes a named arm, not a wildcard
+    try t.expectSuggestion(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "| {:err, _} => :nil");
+
+    // the suggested arm closes the warning
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => :nil
+    );
+
+    // infinite domains fall back to a wildcard arm
+    try t.expectSuggestion(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "| _ => :nil");
+
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
+}
+
+test "error codes" {
+    // type mismatch carries its code
+    try t.expectErrorCode(
+        \\ let x: num = "hi"
+    , "type-mismatch");
+
+    // unknown name carries its code
+    try t.expectErrorCode("aaa\n", "unknown-name");
 }
 
 test "return type propagation: const binding with annotated fn" {

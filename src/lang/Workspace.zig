@@ -35,6 +35,7 @@ const CacheEntry = struct {
     version: u32,
     opts: lang.BuildOptions,
     artifact: lang.Artifact,
+    warnings: ?lang.diagnostic.Report = null,
     symbols: []Symbol,
 };
 
@@ -72,6 +73,8 @@ pub const Analysis = struct {
     snapshot: Snapshot,
     artifact: ?lang.Artifact = null,
     diagnostics: ?lang.Error = null,
+    /// non-failing warnings; only set on success, dropped on error
+    warnings: ?lang.diagnostic.Report = null,
     cached: bool = false,
     symbols: []Symbol = &.{},
     dependencies: []FileId = &.{},
@@ -83,6 +86,9 @@ pub const Analysis = struct {
         }
         if (self.diagnostics) |err| {
             lang.deinitError(alloc, err);
+        }
+        if (self.warnings) |*w| {
+            w.deinit(alloc);
         }
         freeSymbols(alloc, self.symbols);
         alloc.free(self.dependencies);
@@ -431,12 +437,27 @@ pub fn analyzeDetailed(
         if (cached.version == snap.version and sameOpts(cached.opts, opts)) {
             const artifact = try copyArtifact(alloc, cached.artifact);
             errdefer deinitArtifact(alloc, artifact);
+            var warnings: ?lang.diagnostic.Report = null;
+            errdefer if (warnings) |*w| w.deinit(alloc);
+            if (cached.warnings) |cached_w| {
+                var wcopy = try cached_w.copy(alloc);
+                wcopy.source_name = alloc.dupe(u8, snap.name) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                wcopy.source = alloc.dupe(u8, snap.text) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                warnings = wcopy;
+            }
             if (opts.install_debug_info) {
                 try vm.setProgramDebugInfo(artifact.spans, snap.text, snap.name);
             }
             return .{
                 .snapshot = snap,
                 .artifact = artifact,
+                .warnings = warnings,
                 .cached = true,
                 .symbols = try copySymbols(alloc, cached.symbols),
                 .dependencies = try self.copyDeps(alloc, id),
@@ -477,35 +498,67 @@ pub fn analyzeDetailed(
     errdefer self.alloc.free(deps);
     try self.updateDeps(id, deps);
 
-    const build_result = try lang.build(vm, .{
+    var warn_report: ?lang.diagnostic.Report = null;
+    const build_result = try lang.buildWithWarnings(vm, .{
         .name = snap.name,
         .text = snap.text,
-    }, opts);
+    }, opts, &warn_report);
 
     return switch (build_result) {
         .ok => |artifact| blk: {
             defer deinitArtifact(vm.runtime.alloc, artifact);
             const cache_artifact = try copyArtifact(self.alloc, artifact);
             errdefer deinitArtifact(self.alloc, cache_artifact);
+
             const cache_symbols = try copySymbols(self.alloc, symbols);
             errdefer freeSymbols(self.alloc, cache_symbols);
-            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols);
+
+            // warnings are owned by vm.runtime.alloc
+            // re-own for the caller and the cache
+            var cache_warnings: ?lang.diagnostic.Report = null;
+            errdefer if (cache_warnings) |*w| w.deinit(self.alloc);
+            var warnings = if (warn_report) |wr| blk_w: {
+                var owned = try wr.copy(alloc);
+                owned.source_name = try alloc.dupe(u8, snap.name);
+                owned.source = try alloc.dupe(u8, snap.text);
+
+                cache_warnings = try wr.copy(self.alloc);
+                cache_warnings.?.source_name = try self.alloc.dupe(u8, snap.name);
+                cache_warnings.?.source = try self.alloc.dupe(u8, snap.text);
+
+                var mutable = wr;
+                mutable.deinit(vm.runtime.alloc);
+
+                break :blk_w owned;
+            } else null;
+
+            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols, cache_warnings);
+            cache_warnings = null;
+
             const copy = try copyArtifact(alloc, artifact);
             errdefer deinitArtifact(alloc, copy);
+
+            errdefer if (warnings) |*w| w.deinit(alloc);
             break :blk .{
                 .snapshot = snap,
                 .artifact = copy,
+                .warnings = warnings,
                 .cached = false,
                 .symbols = try copySymbols(alloc, symbols),
                 .dependencies = try self.copyDeps(alloc, id),
             };
         },
-        .err => |err| .{
-            .snapshot = snap,
-            .diagnostics = try copyError(alloc, err, snap.name, snap.text),
-            .cached = false,
-            .symbols = try copySymbols(alloc, symbols),
-            .dependencies = try self.copyDeps(alloc, id),
+        .err => |err| blk: {
+            // errors dominate
+            // warnings drop with them
+            if (warn_report) |*wr| wr.deinit(vm.runtime.alloc);
+            break :blk .{
+                .snapshot = snap,
+                .diagnostics = try copyError(alloc, err, snap.name, snap.text),
+                .cached = false,
+                .symbols = try copySymbols(alloc, symbols),
+                .dependencies = try self.copyDeps(alloc, id),
+            };
         },
     };
 }
@@ -518,15 +571,33 @@ pub fn diagnostics(
     id: FileId,
     opts: lang.BuildOptions,
 ) !?lang.Error {
+    var bundle = try self.diagnosticsWithWarnings(alloc, id, opts);
+    if (bundle.warnings) |*w| w.deinit(alloc);
+    return bundle.err;
+}
+
+pub const DiagnosticsBundle = struct {
+    err: ?lang.Error = null,
+    warnings: ?lang.diagnostic.Report = null,
+};
+
+/// same as diagnostics,
+/// but also lifts non-failing warnings from th full build
+pub fn diagnosticsWithWarnings(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: lang.BuildOptions,
+) !DiagnosticsBundle {
     var sem = try self.inspectDetailed(alloc, id, opts);
     errdefer sem.deinit(alloc);
     var full = self.analyzeDetailed(alloc, id, opts) catch |err| switch (err) {
         error.VmUnavailable => {
             if (sem.diagnostics) |diag| {
                 sem.diagnostics = null;
-                return diag;
+                return .{ .err = diag };
             }
-            return null;
+            return .{};
         },
         else => |e| return e,
     };
@@ -540,18 +611,26 @@ pub fn diagnostics(
             // errorKind doesn't matter much for diagnostics display
             full.diagnostics = null;
             sem.diagnostics = null;
-            return lang.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } };
+            const warnings = full.warnings;
+            full.warnings = null;
+            return .{ .err = lang.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
         }
         full.diagnostics = null;
-        return full_diag;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = full_diag, .warnings = warnings };
     }
 
     if (sem.diagnostics) |diag| {
         sem.diagnostics = null;
-        return diag;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = diag, .warnings = warnings };
     }
 
-    return null;
+    const warnings = full.warnings;
+    full.warnings = null;
+    return .{ .warnings = warnings };
 }
 
 /// returns syms defined in a file
@@ -1088,6 +1167,7 @@ pub fn inspectDetailed(
         docs.deinit();
     }
 
+    var dropped_warn: ?lang.diagnostic.Report = null;
     const semantic_error = try semantic.analyze(
         alloc,
         root,
@@ -1098,7 +1178,10 @@ pub fn inspectDetailed(
         &type_annotations,
         &docs,
         .{ .ptr = &ws_resolver, .resolveFn = WorkspaceResolver.resolve },
+        &dropped_warn,
     );
+
+    if (dropped_warn) |*wr| wr.deinit(alloc);
 
     const cache_diag = if (semantic_error) |err|
         try copyError(self.alloc, err, snap.name, snap.text)
@@ -1424,16 +1507,19 @@ fn putCache(
     opts: lang.BuildOptions,
     artifact: lang.Artifact,
     symbols: []Symbol,
+    warnings: ?lang.diagnostic.Report,
 ) !void {
     const entry = CacheEntry{
         .version = version,
         .opts = opts,
         .artifact = artifact,
+        .warnings = warnings,
         .symbols = symbols,
     };
     if (self.cache.getPtr(id)) |slot| {
         deinitArtifact(self.alloc, slot.artifact);
         freeSymbols(self.alloc, slot.symbols);
+        if (slot.warnings) |*w| w.deinit(self.alloc);
         slot.* = entry;
     } else {
         try self.cache.put(id, entry);
@@ -1457,8 +1543,10 @@ fn invalidateCacheImpl(
     visited.put(id, {}) catch return;
 
     if (self.cache.fetchRemove(id)) |kv| {
-        deinitArtifact(self.alloc, kv.value.artifact);
-        freeSymbols(self.alloc, kv.value.symbols);
+        var val = kv.value;
+        deinitArtifact(self.alloc, val.artifact);
+        freeSymbols(self.alloc, val.symbols);
+        if (val.warnings) |*w| w.deinit(self.alloc);
     }
     if (self.inspect_cache.fetchRemove(id)) |kv| {
         freeSymbols(self.alloc, kv.value.symbols);
@@ -1790,6 +1878,7 @@ fn clearCache(self: *Workspace) void {
     while (it.next()) |entry| {
         deinitArtifact(self.alloc, entry.value_ptr.artifact);
         freeSymbols(self.alloc, entry.value_ptr.symbols);
+        if (entry.value_ptr.warnings) |*w| w.deinit(self.alloc);
     }
     var inspect_it = self.inspect_cache.iterator();
     while (inspect_it.next()) |entry| {
@@ -2222,6 +2311,14 @@ fn mergeReports(alloc: std.mem.Allocator, a: lang.Error, b: lang.Error) !lang.di
                 }
             }
         }
+        if (p == .@"error") {
+            for (a_report.parts) |ap| {
+                if (ap == .@"error" and std.mem.eql(u8, ap.@"error", p.@"error")) {
+                    dup = true;
+                    break;
+                }
+            }
+        }
         if (!dup) all_parts.appendAssumeCapacity(p);
     }
     const message = if (a_report.message.len > 0)
@@ -2233,6 +2330,7 @@ fn mergeReports(alloc: std.mem.Allocator, a: lang.Error, b: lang.Error) !lang.di
     return .{
         .parts = try all_parts.toOwnedSlice(alloc),
         .message = message,
+        .code = a_report.code orelse b_report.code,
         .source_name = try alloc.dupe(u8, a_report.source_name orelse b_report.source_name orelse ""),
         .source = try alloc.dupe(u8, a_report.source orelse b_report.source orelse ""),
     };
@@ -2948,13 +3046,17 @@ fn completionTargetType(
         .ok => |ok| ok.root,
         .err => return null,
     };
+
     const known_globals = getKnownGlobals(self, arena) catch return null;
     var type_map = std.StringHashMap(lang.types.TypeInfo).init(arena);
     var anchor: u8 = 0;
+    var dropped_warn: ?lang.diagnostic.Report = null;
+
     _ = semantic.analyze(arena, root, snap.name, truncated, known_globals, &type_map, null, null, .{
         .ptr = @ptrCast(&anchor),
         .resolveFn = nullResolve,
-    }) catch return null;
+    }, &dropped_warn) catch return null;
+
     return type_map.get(target);
 }
 

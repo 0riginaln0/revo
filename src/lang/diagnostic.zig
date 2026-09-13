@@ -59,13 +59,29 @@ pub const Part = union(enum) {
     tip: []const u8,
     warn: []const u8,
     note: []const u8,
+    suggestion: Suggestion,
     trace: TraceFrame,
 };
 
-/// arena-backed payload
+/// an actionable edit: replacement text for span, empty span inserts
+pub const Suggestion = struct {
+    span: ast.Span,
+    message: []const u8 = "",
+    replacement: []const u8,
+};
+
+/// arena-backed
+///
+/// codes are lowercase kebab slugs naming the problem instead of phase
+/// : `non-exhaustive-match`, `type-mismatch`
+///
+/// codes are always static strings, borrowed never freed
+///
 pub const Report = struct {
     parts: []const Part = &.{},
     message: []const u8 = "",
+    severity: Severity = .err,
+    code: ?[]const u8 = null,
     source_name: ?[]const u8 = null,
     source: ?[]const u8 = null,
 
@@ -73,11 +89,16 @@ pub const Report = struct {
         if (self.message.len != 0) alloc.free(self.message);
         if (self.source_name) |sn| alloc.free(sn);
         if (self.source) |src| alloc.free(src);
+
         for (self.parts) |part| switch (part) {
             .@"error" => |err| alloc.free(err),
             .tip => |tip| alloc.free(tip),
             .warn => |warn| alloc.free(warn),
             .note => |note| alloc.free(note),
+            .suggestion => |sug| {
+                if (sug.message.len != 0) alloc.free(sug.message);
+                if (sug.replacement.len != 0) alloc.free(sug.replacement);
+            },
             .span => |span| {
                 if (span.message.len != 0) alloc.free(span.message);
                 if (span.source_name) |sn| alloc.free(sn);
@@ -104,6 +125,12 @@ pub const Report = struct {
             .tip => |tip| part.* = .{ .tip = try alloc.dupe(u8, tip) },
             .warn => |warn| part.* = .{ .warn = try alloc.dupe(u8, warn) },
             .note => |note| part.* = .{ .note = try alloc.dupe(u8, note) },
+            .suggestion => |sug| {
+                var c = sug;
+                if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
+                if (c.replacement.len != 0) c.replacement = try alloc.dupe(u8, c.replacement);
+                part.* = .{ .suggestion = c };
+            },
             .span => |span| {
                 var c = span;
                 if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
@@ -123,6 +150,8 @@ pub const Report = struct {
         return .{
             .parts = parts,
             .message = message,
+            .severity = report.severity,
+            .code = report.code,
             .source_name = null,
             .source = null,
         };
@@ -157,6 +186,36 @@ pub fn firstError(report: Report) ?[]const u8 {
     return null;
 }
 
+/// first warning message if the report has one
+pub fn firstWarn(report: Report) ?[]const u8 {
+    for (report.parts) |part| {
+        if (part == .warn) return part.warn;
+    }
+    return null;
+}
+
+///
+/// the one grand old big gorgeous magnificent beautiful severity header line
+///
+/// : `error: text [slug]`
+/// , color by severity
+///   codes print after the text
+///   ; tips and notes never carry one
+///
+fn printHeader(writer: *std.Io.Writer, severity: Severity, code: ?[]const u8, text: []const u8) !void {
+    if (code) |c| switch (severity) {
+        .err => try pretty.printError(writer, "{s} [{s}]", .{ text, c }),
+        .warning => try pretty.printWarning(writer, "{s} [{s}]", .{ text, c }),
+        .note => try pretty.printNote(writer, "{s} [{s}]", .{ text, c }),
+        .help => try pretty.printHelp(writer, "{s} [{s}]", .{ text, c }),
+    } else switch (severity) {
+        .err => try pretty.printError(writer, "{s}", .{text}),
+        .warning => try pretty.printWarning(writer, "{s}", .{text}),
+        .note => try pretty.printNote(writer, "{s}", .{text}),
+        .help => try pretty.printHelp(writer, "{s}", .{text}),
+    }
+}
+
 /// render a full report to the writer
 pub fn renderReport(
     alloc: std.mem.Allocator,
@@ -166,31 +225,64 @@ pub fn renderReport(
     const source_name = report.source_name orelse "<source>";
     const source = report.source orelse "";
     if (report.parts.len == 0 and report.message.len != 0) {
-        try pretty.printError(writer, "{s}", .{report.message});
+        try printHeader(writer, report.severity, report.code, report.message);
         return;
     }
 
-    var error_seen = false;
+    var header_seen = false;
     var trace_seen = false;
     var trace_idx: usize = 0;
     for (report.parts) |part| {
         switch (part) {
             .@"error" => |message| {
-                if (error_seen) try writer.writeByte('\n');
-                try pretty.printError(writer, "{s}", .{message});
-                error_seen = true;
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .err, report.code, message);
+                header_seen = true;
             },
             .span => |span| {
                 const msg = if (span.message.len == 0) null else span.message;
                 switch (span.role) {
-                    .primary => try renderSpanBlock(alloc, writer, span.source_name orelse source_name, span.source orelse source, span.span, msg),
-                    .secondary => try renderSecondarySpan(writer, span.source_name orelse source_name, span.span, msg),
+                    .primary => try renderSpanBlock(
+                        alloc,
+                        writer,
+                        span.source_name orelse source_name,
+                        span.source orelse source,
+                        span.span,
+                        msg,
+                    ),
+                    .secondary => try renderSecondarySpan(
+                        writer,
+                        span.source_name orelse source_name,
+                        span.span,
+                        msg,
+                    ),
                     else => {},
                 }
             },
-            .tip => |tip| try writer.print("  = tip: {s}\n", .{tip}),
-            .warn => |warn| try writer.print("  = warning: {s}\n", .{warn}),
-            .note => |note| try writer.print("  = note: {s}\n", .{note}),
+            .tip => |tip| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .help, null, tip);
+                header_seen = true;
+            },
+            .warn => |warn| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .warning, report.code, warn);
+                header_seen = true;
+            },
+            .note => |note| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .note, null, note);
+                header_seen = true;
+            },
+            .suggestion => |sug| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .help, null, sug.message);
+                // replacement carries its own newline + indent for the edit,
+                // show it trimmed so the `+` line reads as a diff
+                const shown = std.mem.trim(u8, sug.replacement, " \t\r\n");
+                try writer.print("  + {s}\n", .{shown});
+                header_seen = true;
+            },
             .trace => |frame| {
                 if (!trace_seen) {
                     try writer.writeAll("\nstack trace:\n");
@@ -759,6 +851,10 @@ test "report copy preserves multiple error parts" {
             .tip => |tip| alloc.free(tip),
             .warn => |warn| alloc.free(warn),
             .note => |note| alloc.free(note),
+            .suggestion => |sug| {
+                if (sug.message.len != 0) alloc.free(sug.message);
+                if (sug.replacement.len != 0) alloc.free(sug.replacement);
+            },
             .trace => |trace| {
                 alloc.free(trace.function_name);
                 if (trace.source_name) |sn| alloc.free(sn);
@@ -798,4 +894,71 @@ test "render report prints multiple error blocks" {
     try renderReport(alloc, &buf.writer, report);
     try std.testing.expect(std.mem.find(u8, buf.written(), "first problem") != null);
     try std.testing.expect(std.mem.find(u8, buf.written(), "second problem") != null);
+}
+
+test "warnings report renders severity and code" {
+    const alloc = std.testing.allocator;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    defer buf.deinit();
+
+    const report: Report = .{
+        .severity = .warning,
+        .code = "non-exhaustive-match",
+        .message = "match is not exhaustive: :err not covered, miss yields :nil",
+        .source_name = "<source>",
+        .source = "match x\n",
+        .parts = &.{
+            .{ .warn = "match is not exhaustive: :err not covered, miss yields :nil" },
+            .{ .span = .{
+                .span = .{ .start = 0, .end = 7, .line = 1, .column = 1 },
+                .role = .primary,
+                .message = "non-exhaustive match",
+            } },
+        },
+    };
+
+    try renderReport(alloc, &buf.writer, report);
+    const output = buf.written();
+    try std.testing.expect(std.mem.find(u8, output, "warning:") != null);
+    try std.testing.expect(std.mem.find(u8, output, "[non-exhaustive-match]") != null);
+    try std.testing.expect(std.mem.find(u8, output, "match x") != null);
+
+    var copied = try report.copy(alloc);
+    defer copied.deinit(alloc);
+    try std.testing.expect(copied.severity == .warning);
+    try std.testing.expectEqualStrings("non-exhaustive-match", copied.code.?);
+}
+
+test "suggestion renders as help with replacement" {
+    const alloc = std.testing.allocator;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    defer buf.deinit();
+
+    const report: Report = .{
+        .severity = .warning,
+        .code = "non-exhaustive-match",
+        .message = "match is not exhaustive",
+        .source_name = "<source>",
+        .source = "match x\n",
+        .parts = &.{
+            .{ .warn = "match is not exhaustive" },
+            .{ .suggestion = .{
+                .span = .{ .start = 7, .end = 7, .line = 1, .column = 8 },
+                .message = "add an explicit nil arm",
+                .replacement = "\n| _ => :nil",
+            } },
+        },
+    };
+
+    try renderReport(alloc, &buf.writer, report);
+    const output = buf.written();
+    try std.testing.expect(std.mem.find(u8, output, "help:") != null);
+    try std.testing.expect(std.mem.find(u8, output, "add an explicit nil arm") != null);
+    try std.testing.expect(std.mem.find(u8, output, "+ | _ => :nil") != null);
+
+    var copied = try report.copy(alloc);
+    defer copied.deinit(alloc);
+    const sug = copied.parts[1].suggestion;
+    try std.testing.expectEqualStrings("add an explicit nil arm", sug.message);
+    try std.testing.expectEqualStrings("\n| _ => :nil", sug.replacement);
 }

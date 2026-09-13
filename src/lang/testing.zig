@@ -165,6 +165,130 @@ pub fn topFalse(source: []const u8) !void {
     try std.testing.expect(revo.isFalse(result.value));
 }
 
+pub fn expectWarning(source: []const u8, snippet: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    var w: ?lang.diagnostic.Report = null;
+    const result = try lang.buildWithWarnings(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    }, &w);
+    defer if (w) |*wr| wr.deinit(alloc);
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+        },
+        .err => |lang_err| {
+            revo.printBuildError(alloc, .{ .text = source }, lang_err);
+            vm.runtime.resetDiagArena();
+            return error.ExpectedCompileSuccess;
+        },
+    }
+    const wr = w orelse return error.ExpectedWarning;
+    const msg = lang.diagnostic.firstWarn(wr) orelse return error.ExpectedWarning;
+    try std.testing.expect(std.mem.find(u8, msg, snippet) != null);
+}
+
+pub fn expectWarningCode(source: []const u8, code: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    var w: ?lang.diagnostic.Report = null;
+    const result = try lang.buildWithWarnings(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    }, &w);
+    defer if (w) |*wr| wr.deinit(alloc);
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+        },
+        .err => |lang_err| {
+            revo.printBuildError(alloc, .{ .text = source }, lang_err);
+            vm.runtime.resetDiagArena();
+            return error.ExpectedCompileSuccess;
+        },
+    }
+    const wr = w orelse return error.ExpectedWarning;
+    const got = wr.code orelse return error.ExpectedCode;
+    try std.testing.expectEqualStrings(code, got);
+}
+
+pub fn expectSuggestion(source: []const u8, snippet: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    var w: ?lang.diagnostic.Report = null;
+    const result = try lang.buildWithWarnings(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    }, &w);
+    defer if (w) |*wr| wr.deinit(alloc);
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+        },
+        .err => |lang_err| {
+            revo.printBuildError(alloc, .{ .text = source }, lang_err);
+            vm.runtime.resetDiagArena();
+            return error.ExpectedCompileSuccess;
+        },
+    }
+    const wr = w orelse return error.ExpectedWarning;
+    for (wr.parts) |part| {
+        if (part == .suggestion and std.mem.find(u8, part.suggestion.replacement, snippet) != null) return;
+    }
+    return error.ExpectedSuggestion;
+}
+
+pub fn expectNoWarning(source: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    var w: ?lang.diagnostic.Report = null;
+    const result = try lang.buildWithWarnings(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    }, &w);
+    defer if (w) |*wr| wr.deinit(alloc);
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+        },
+        .err => |lang_err| {
+            revo.printBuildError(alloc, .{ .text = source }, lang_err);
+            vm.runtime.resetDiagArena();
+            return error.ExpectedCompileSuccess;
+        },
+    }
+    try std.testing.expect(w == null);
+}
+
+pub fn expectErrorCode(source: []const u8, code: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    const result = try lang.build(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    });
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+            return error.ExpectedCompileFailure;
+        },
+        .err => |failure| switch (failure) {
+            .lower, .semantic => |err| {
+                defer vm.runtime.resetDiagArena();
+                const got = err.report.code orelse return error.ExpectedCode;
+                try std.testing.expectEqualStrings(code, got);
+            },
+            .expand, .parse => return error.ExpectedLowerFailure,
+        },
+    }
+}
+
 pub fn expectCompileError(source: []const u8, expected: lang.LowerErrorKind) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();

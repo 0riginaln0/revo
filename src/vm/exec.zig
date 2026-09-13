@@ -1292,7 +1292,6 @@ noinline fn execPow(self: *VM, regs: []Data, base: usize, instr: Instruction) VM
     );
 }
 
-
 /// string * n fallback for .mul (numeric fast path stays inline)
 noinline fn execStringRepeat(
     self: *VM,

@@ -14,6 +14,7 @@ pub const parse = pipeline.parse;
 pub const expand = pipeline.expand;
 pub const lower = pipeline.lower;
 pub const build = pipeline.build;
+pub const buildWithWarnings = pipeline.buildWithWarnings;
 
 pub const compiler = @import("compiler/root.zig");
 
@@ -29,6 +30,7 @@ pub const types = compiler.types;
 pub const ir = compiler.ir;
 
 pub const renderError = pipeline.renderError;
+pub const renderWarnings = pipeline.renderWarnings;
 pub const deinitError = pipeline.deinitError;
 pub const expandExpr = expander.expandExpr;
 pub const lexAt = Lexer.lexAt;

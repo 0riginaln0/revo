@@ -424,6 +424,13 @@ pub const Session = struct {
             return true;
         }
 
+        if (analysis.warnings) |w| {
+            var buf = std.Io.Writer.Allocating.init(self.gpa);
+            defer buf.deinit();
+            try revo.lang.renderWarnings(self.gpa, &buf.writer, .{ .name = "<repl>", .text = source }, w);
+            try out.writeAll(buf.written());
+        }
+
         const artifact = analysis.artifact.?;
         analysis.artifact = null;
         defer self.gpa.free(artifact.instructions);

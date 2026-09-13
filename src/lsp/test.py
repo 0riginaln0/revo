@@ -7,9 +7,11 @@ import pytest_lsp
 from lsprotocol.types import (
     ClientCapabilities,
     CodeActionContext,
+    CodeActionKind,
     CodeActionParams,
     CompletionParams,
     DefinitionParams,
+    DiagnosticSeverity,
     DidChangeTextDocumentParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
@@ -701,6 +703,58 @@ async def test_multiple_errors_keep_own_messages(client: LanguageClient):
         f"missing unknown-field text in {[d.message for d in diags]}")
     assert any("wants number" in d.message for d in diags), (
         f"missing mismatch text in {[d.message for d in diags]}")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_match_warning_severity_and_code(client: LanguageClient):
+    """partial match publishes a Warning diagnostic with its code"""
+    uri = "file:///test/match_warn.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1,
+                text='type Res = {:ok, num} | {:err, string}\nlet x: Res = {:ok, 42}\nmatch x\n| {:ok, v} => v\n',
+            )
+        )
+    )
+
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    diags = client.diagnostics.get(uri, [])
+    for d in diags:
+        print(f"  diag: msg={d.message!r} code={
+              d.code} severity={d.severity} range={d.range}")
+    assert len(diags) == 1, f"expected 1 warning, got {
+        len(diags)}: {[d.message for d in diags]}"
+    assert diags[0].severity == DiagnosticSeverity.Warning, f"expected Warning, got {
+        diags[0].severity}"
+    assert diags[0].code == "non-exhaustive-match", f"expected code, got {
+        diags[0].code}"
+    assert "add an explicit nil arm" not in diags[0].message, f"suggestion leaked into diag: {
+        diags[0].message!r}"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_undefined_name_code(client: LanguageClient):
+    """undefined name diagnostic carries Error severity and its code"""
+    uri = "file:///test/undefined_code.rv"
+    client.text_document_did_open(
+        params=DidOpenTextDocumentParams(
+            text_document=TextDocumentItem(
+                uri=uri, language_id="revo", version=1, text="ccc\n",
+            )
+        )
+    )
+    await client.wait_for_notification("textDocument/publishDiagnostics")
+    diags = client.diagnostics.get(uri, [])
+    for d in diags:
+        print(f"  diag: msg={d.message!r} code={
+              d.code} severity={d.severity} range={d.range}")
+    assert len(diags) == 1, f"expected 1 diagnostic, got {
+        len(diags)}: {[d.message for d in diags]}"
+    assert diags[0].severity == DiagnosticSeverity.Error, f"expected Error, got {
+        diags[0].severity}"
+    assert diags[0].code == "unknown-name", f"expected code, got {
+        diags[0].code}"
 
 
 @pytest.mark.asyncio(loop_scope="module")

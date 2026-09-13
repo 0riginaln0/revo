@@ -32,6 +32,8 @@ tuples and structs are gone now, most breaking change yet
 
       tables with unknown shapes are still ok though
 
+    - non-exhaustive match is now detected and will give you a warning
+
     - lsp dot-completion for locals: `t.` completes record fields with types
       (analyzed from the buffer minus the incomplete access, which never parses)
 
@@ -41,6 +43,8 @@ tuples and structs are gone now, most breaking change yet
     - lsp module hover lists macros: `pub proc`/`macro` decls show up
       in `a.` hover and completions; prelude macros no longer leak
       into dependency members with bogus lines
+
+    - now carry severity of either err, warning, note, or help
 
 - just match
   sugar for `match :true`
@@ -96,6 +100,40 @@ tuples and structs are gone now, most breaking change yet
   # => 11
   ```
 
+- match arms take comma alternatives now:
+
+    ```ruby
+    match 1
+    | 3, 3 => :wrong
+    | 1, 2 => :right
+    ```
+
+    it tries each pattern in order, firsr hit wins\
+    bindings share one slot per name across the alternatives
+
+- a match miss falls through to nil, and the type knows it;\
+  partial matches union `:nil` into the result type
+
+- match warnings!
+  non-exhaustive matches warn with the uncovered tags,
+  dead arms warn as unreachable,
+  patterns the subject can't meet warn as never-matching
+
+- non-exhaustive matches suggest the missing arm
+
+  ```ruby
+  match x
+  | {:ok, v} => v
+  # help: add an explicit nil arm
+  #   + | {:err, _} => :nil
+  ```
+  named when the shape is known, `_` otherwise\
+  cli prints it as help output,\
+  lsp offers it as a quickfix anywhere inside the match
+
+- diagnostics have severity (err, warning, note, help) and slug codes. works for lsp as well
+
+
 - std:
   - `stats` module -- build a table for statistics
   - `frame` module -- dataframe-like structure
@@ -145,6 +183,7 @@ tuples and structs are gone now, most breaking change yet
   `fn id(x) x` is `fn id[T](x: T) -> T`
 
   aids tables massively
+
   ```ruby
   fn v2(x, y) { x = x, y = y }
   let t = v2(1, 2)

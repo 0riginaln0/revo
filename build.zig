@@ -602,6 +602,40 @@ pub fn build(b: *Build) !void {
         builder.addRule(.{ .builtin = .import_ordering }, .{});
         break :step builder.build();
     });
+    //
+    // chore
+    //   : fmt, lint, test, markdown fmt
+    //
+    // an ofa you should run before a commit thats supposed to be 100% correct
+    // you really dont have to do it all the time
+    //
+    // if this passes, your state is very likely correct
+    //
+    const chore_step = b.step("chore", "run zig fmt, check, lint, tests, c tests, lsp pytest, and rumdl fmt");
+    {
+        const chore_fmt = b.addFmt(.{ .paths = &.{"."} });
+
+        const chore_check = b.addSystemCommand(&.{ "zig", "build", "check" });
+        chore_check.step.dependOn(&chore_fmt.step);
+
+        // TODO: when you fix all `zig build lint` suggestions, do both regular lint and autofix
+        const chore_lint = b.addSystemCommand(&.{ "zig", "build", "lint", "--", "--fix" });
+        chore_lint.step.dependOn(&chore_check.step);
+
+        const chore_test = b.addSystemCommand(&.{ "zig", "build", "test", "--error-style", "minimal" });
+        chore_test.step.dependOn(&chore_lint.step);
+
+        const chore_test_c = b.addSystemCommand(&.{ "zig", "build", "test-c", "--error-style", "minimal" });
+        chore_test_c.step.dependOn(&chore_test.step);
+
+        const chore_pytest = b.addSystemCommand(&.{ "python3", "-m", "pytest", "src/lsp/test.py", "-v" });
+        chore_pytest.step.dependOn(&chore_test_c.step);
+
+        const chore_rumdl = b.addSystemCommand(&.{ "rumdl", "fmt", "." });
+        chore_rumdl.step.dependOn(&chore_pytest.step);
+
+        chore_step.dependOn(&chore_rumdl.step);
+    }
 }
 const builds = struct {
     fn mvzr(
