@@ -145,6 +145,7 @@ tuples and structs are gone now, most breaking change yet
   `fn id(x) x` is `fn id[T](x: T) -> T`
 
   aids tables massively
+
   ```ruby
   fn v2(x, y) { x = x, y = y }
   let t = v2(1, 2)
