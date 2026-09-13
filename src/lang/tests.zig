@@ -848,12 +848,6 @@ test "zero-arg macro expands on identifier use" {
     , 42);
 }
 
-test "unary macro expands in call position" {
-    try t.topNumber(
-        \\ macro id! `%e:expr` `%e`
-        \\ id!(42)
-    , 42);
-}
 test "macro system capabilities and limitations" {
     try t.topNumber(
         \\ macro id! `%x:expr` `%x`
@@ -867,13 +861,6 @@ test "macro system capabilities and limitations" {
 }
 
 // basic simple captures
-test "unary macro - single expression capture" {
-    try t.topNumber(
-        \\ macro id! `%x:expr` `%x`
-        \\ id!(42)
-    , 42);
-}
-
 test "binary structure macro - multiple captures with literals" {
     try t.topNumber(
         \\ macro combine! `(%left:expr %right:expr)` `%left + %right`
@@ -972,74 +959,51 @@ test "custom keyword structure - keywords at multiple positions" {
 // quasiquote `template` with %splice
 //
 
-test "quasiquote atom" {
+test "quasiquote encodes literals as tables" {
     try t.topTrue(
         \\let r = `:hello`
         \\r == {:hash, "hello"}
     );
-}
-
-test "quasiquote number" {
     try t.topTrue(
         \\let r = `42`
         \\r == {:number, 42}
     );
-}
-
-test "quasiquote string" {
     try t.topTrue(
         \\let r = `"hello"`
         \\r == {:string, "hello"}
     );
-}
-test "quasiquote produces table" {
+    try t.topTrue(
+        \\let r = `hello`
+        \\r == {:ident, "hello"}
+    );
     try t.topTrue(
         \\let r = `{:a, :b}`
         \\r == {:table, {{:nil, :false, {:hash, "a"}}, {:nil, :false, {:hash, "b"}}}}
     );
 }
 
-test "quasiquote splice inserts value" {
+test "quasiquote splices insert values" {
     try t.topTrue(
         \\let x = 10
         \\let r = `(%x + 1)`
         \\r == {:binary, :add, 10, {:number, 1}}
     );
-}
-
-test "quasiquote table named key" {
     try t.topTrue(
         \\let v = 42
         \\let r = `{key = %v}`
         \\r == {:table, {{{:ident, "key"}, :false, 42}}}
     );
-}
-
-test "quasiquote nested splice in table" {
     try t.topTrue(
         \\let x = 42
         \\let r = `{{:a, %x}}`
         \\r == {:table, {{:nil, :false, {:table, {{:nil, :false, {:hash, "a"}}, {:nil, :false, 42}}}}}}
     );
-}
-
-test "quasiquote multiple splices" {
     try t.topTrue(
         \\let a = 20
         \\let b = 22
         \\let r = `(f(%a, %b))`
         \\r == {:call, {:ident, "f"}, {20, 22}, :false, {}}
     );
-}
-
-test "quasiquote bare ident" {
-    try t.topTrue(
-        \\let r = `hello`
-        \\r == {:ident, "hello"}
-    );
-}
-
-test "quasiquote table computed key with splice" {
     try t.topTrue(
         \\let k = 99
         \\let v = 42
@@ -1159,9 +1123,6 @@ test "loops thread state and break with a single value" {
         \\     break(:nil)
         \\ end
     , "loop");
-}
-
-test "loop breaks with explicit value" {
     try t.topNumber(
         \\ loop/l do
         \\     break/l(42)
@@ -1176,20 +1137,6 @@ test "loop breaks with explicit value" {
         \\         break/l(i)
         \\ end
     , 99);
-    try t.topNumber(
-        \\ let i = 0
-        \\ loop/l do
-        \\   if i < 2
-        \\     i = i + 1
-        \\   else
-        \\     break/l(i)
-        \\ end
-    , 2);
-    try t.topAtom(
-        \\ loop do
-        \\   break(42)
-        \\ end
-    , "loop");
 }
 
 test "indexed table iteration gets value and index" {
@@ -1236,16 +1183,6 @@ test "for loop with range literal iterates numeric sequence" {
     , 10);
 }
 
-test "for loop with range literal starting at 1" {
-    try t.topNumber(
-        \\ let sum = 0
-        \\ for i in 1..6 do
-        \\     sum = sum + i
-        \\ end
-        \\ sum
-    , 15);
-}
-
 test "for loop with range literal and variable end" {
     try t.topNumber(
         \\ let n = 10
@@ -1270,7 +1207,7 @@ test "for loop with range produces loop result" {
     , 11);
 }
 
-test "while loop via while <cond> do <expr> end" {
+test "while loop runs while cond holds" {
     try t.topNumber(
         \\ let x = 0
         \\ while x < 5 do
@@ -1278,9 +1215,6 @@ test "while loop via while <cond> do <expr> end" {
         \\ end
         \\ x
     , 5);
-}
-
-test "while loop isn't ran unconditionally" {
     try t.topNumber(
         \\ let x = 0
         \\ while :false do
@@ -1290,21 +1224,11 @@ test "while loop isn't ran unconditionally" {
     , 0);
 }
 
-test "while loop counts down" {
-    try t.topNumber(
-        \\ let n = 3
-        \\ while n > 0 do
-        \\     n = n - 1
-        \\ end
-        \\ n
-    , 0);
-}
-
 test "continue doesnt doesnt work outside of loop" {
     try t.expectCompileError("continue", .UnsupportedSyntax);
 }
 
-test "continue in loop" {
+test "continue skips to next iteration" {
     try t.topNumber(
         \\ let i = 0
         \\ let result = 0
@@ -1322,9 +1246,6 @@ test "continue in loop" {
         \\   if i > 5 break(i)
         \\ end
     , "loop");
-}
-
-test "continue in while" {
     try t.topNumber(
         \\ let i = 0
         \\ let result = 0
@@ -1335,9 +1256,6 @@ test "continue in while" {
         \\ end
         \\ result
     , 9);
-}
-
-test "continue in for range" {
     try t.topNumber(
         \\ let result = 0
         \\ for i in 1..6 do
@@ -1346,9 +1264,6 @@ test "continue in for range" {
         \\ end
         \\ result
     , 9);
-}
-
-test "continue in nested loops" {
     try t.topNumber(
         \\ let result = 0
         \\ for i in 1..3 do
@@ -1651,44 +1566,17 @@ test "function return value destructuring" {
     , 20);
 }
 
-test "basic loop with break" {
-    try t.topNumber(
-        \\ let a = 1
-        \\ loop/l do
-        \\     if a < 5
-        \\         a = a + 1
-        \\     else
-        \\         break/l(a)
-        \\ end
-    , 5);
-    try t.topAtom(
-        \\ let a = 1
-        \\ loop do
-        \\     if a < 5
-        \\         a = a + 1
-        \\     else
-        \\         break(a)
-        \\ end
-    , "loop");
-}
-
 test "import caches modules and reuses the same table" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "counter.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "counter.rv", .data =
         \\ let state = {count = 0}
         \\ state.count = state.count + 1
         \\ state
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const a = import "./counter"
         \\ a.count = 41
         \\ const b = import "./counter"
@@ -1697,22 +1585,16 @@ test "import caches modules and reuses the same table" {
 }
 
 test "import keeps module globals isolated from importer globals" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "answer.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "answer.rv", .data =
         \\ let x = 41
         \\ const answer = x
         \\ answer
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ let x = 99
         \\ const ans = import "./answer"
         \\ x + ans
@@ -1720,22 +1602,16 @@ test "import keeps module globals isolated from importer globals" {
 }
 
 test "import returns module value" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "vis.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "vis.rv", .data =
         \\ const hidden = 7
         \\ const shown = 9
         \\ shown
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const ns = import "./vis"
         \\ ns
     , 9);
@@ -1775,118 +1651,94 @@ test "top-level locals are real closure locals" {
 }
 
 test "top module assignment does not create vm global" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "setx.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "setx.rv", .data =
         \\ const x = 41
         \\ x
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "./setx"
         \\ x
     );
 }
 
 test "imported module assignment is private to module cache" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "private_state.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "private_state.rv", .data =
         \\ const y = 7
         \\ const value = y
         \\ value
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const m = import "./private_state"
         \\ m
     , 7);
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "./private_state"
         \\ y
     );
 }
 
 test "imported module members work  and are typed" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "calc.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "calc.rv", .data =
         \\ pub fn double(n: num) n * 2
         \\ pub const version = 3
         \\ const hidden = 99
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.double(21)
     , 42);
 
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.version
     , 3);
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.double("x")
     );
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.typo
     );
 
     // non-pub names are not runtime exports either
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.hidden
     );
 }
 
 test "imported proc macros expand, unknown ones error" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "macs.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "macs.rv", .data =
         \\ pub proc answer!(iter) do
         \\   {{:number, 42}}
         \\ end
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const m = import "./macs"
         \\ m.answer!()
     , 42);
 
-    try t.expectExpandErrorInDir(module_dir,
+    try t.expectExpandErrorInDir(m.dir,
         \\ const m = import "./macs"
         \\ m.nope!(1)
     , "unknown macro `m.nope!`");
@@ -1900,44 +1752,38 @@ test "unknown macro calls are compile errors" {
 }
 
 test "imported qualified types check values" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "shapes.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "shapes.rv", .data =
         \\ pub type T = {:ok, string}
         \\ pub fn f() 10
         \\ pub let v = 5
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ import "shapes"
         \\ let x: shapes.T = {:ok, "hi"}
         \\ 1
     , 1);
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "shapes"
         \\ let x: shapes.T = {:err, 5}
     );
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "shapes"
         \\ let x: shapes.U = {:ok, "hi"}
     );
 
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "shapes"
         \\ type B = shapes.T
         \\ let y: B = {:err, 5}
     );
 
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ import "shapes"
         \\ fn get() -> shapes.T {:ok, "hi"}
         \\ 1
@@ -1945,27 +1791,21 @@ test "imported qualified types check values" {
 }
 
 test "imported unknown member calls are errors" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "calc.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "calc.rv", .data =
         \\ pub fn double(n: num) n * 2
         \\ pub const version = 3
-        ,
+        },
     });
+    defer m.deinit();
 
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.typo()
     );
 
     // stdlib method dispatch still works on known-shape tables
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ const m = import "./calc"
         \\ m.double(21)
     , 42);
@@ -1973,22 +1813,6 @@ test "imported unknown member calls are errors" {
 //
 // misc behaviour doc
 //
-test "closure captures and updates outer variable" {
-    try t.topNumber(
-        \\ const outer = fn() do
-        \\     let x = 1
-        \\     const inc = fn() do
-        \\         x = x + 1
-        \\         x
-        \\     end
-        \\     inc()
-        \\     inc()
-        \\     x
-        \\ end
-        \\ outer()
-    , 3);
-}
-
 test "nested closure accesses upvalues from parent scope" {
     try t.topNumber(
         \\ const outer = fn(a) do
@@ -2019,17 +1843,6 @@ test "multiple closures share same upvalue cell" {
 //
 // loop & control flow
 //
-test "loop threading with guards" {
-    try t.topNumber(
-        \\ let x = 0
-        \\ loop/l do
-        \\     if x < 10
-        \\         x = x + 1
-        \\     else
-        \\         break/l(x)
-        \\ end
-    , 10);
-}
 test "big loop doesnt crash" {
     try t.topNumber(
         \\ let x = 1
@@ -2770,23 +2583,10 @@ test "macro inner binding invisible outside" {
     , .ParseError);
 }
 
-test "proc macro call arguments are not semantically analyzed" {
-    // arguments to proc macros are raw syntax, not real revo expressions.
-    // the semantic checker must not report false "unknown name" errors for
-    // identifiers used as syntax inside proc macro calls (e.g. method names
-    // passed to a doto!-style macro)
-    try t.topNumber(
-        \\ proc echo!(iter) do
-        \\   let node = iter:next()
-        \\   {node}
-        \\ end
-        \\ echo!(42)
-    , 42);
-}
-
 test "proc macro call with multiple args does not analyze arguments" {
-    // proc macro arguments are raw syntax; the semantic checker must not
-    // produce false "unknown name" errors inside them
+    // arguments to proc macros are raw syntax, not real revo expressions
+    // (e.g. method names passed to a doto!-style macro); the semantic
+    // checker must not report false "unknown name" errors inside them
     try t.topNumber(
         \\ proc pick!(iter) do
         \\   let _first = iter:next()
@@ -2906,59 +2706,41 @@ test "pipe: match with explicit subject acts like parens" {
 
 // pipe placeholders
 
-test "pipe: explicit placeholder arg position" {
+test "pipe: placeholders fill call slots" {
     try t.topString(
         \\ fn f(a, b) string(a) ~ string(b)
         \\ "asdf" |> f("got ", _)
     , "got asdf");
-}
-
-test "pipe: explicit placeholder method receiver" {
-    try t.topNumber(
-        \\ const obj = { inner = 40, meth = fn(self, x) self.inner + x }
-        \\ obj |> _:meth(2)
-    , 42);
-}
-
-test "pipe: explicit placeholder index access" {
-    try t.topNumber(
-        \\ const t = {5, 6, 7}
-        \\ 1 |> t[_]
-    , 6);
-}
-
-test "pipe: explicit placeholder expression" {
-    try t.topString(
-        \\ "asdf" |> "aaa" ~ _:upper()
-    , "aaaASDF");
-}
-
-test "pipe: explicit placeholder in nested call arg" {
     try t.topString(
         \\ fn fmt(s, v) s ~ v
         \\ "asdf" |> fmt("aaa", _:upper())
     , "aaaASDF");
-}
-
-test "pipe: explicit placeholder in expr" {
-    try t.topString(
-        \\ const x = "asdf"
-        \\ x |> do string(_) end
-    , "asdf");
-}
-
-test "pipe: multiple placeholders" {
     try t.topNumber(
         \\ fn add(a, b) a + b
         \\ 5 |> add(_, _)
     , 10);
-}
-
-test "pipe: placeholder as callee" {
     try t.topString(
         \\ fn f(x) x:upper()
         \\ "asdf" |> f(_)
     , "ASDF");
+}
+
+test "pipe: placeholders in receiver and blocks" {
+    try t.topNumber(
+        \\ const obj = { inner = 40, meth = fn(self, x) self.inner + x }
+        \\ obj |> _:meth(2)
+    , 42);
+    try t.topNumber(
+        \\ const t = {5, 6, 7}
+        \\ 1 |> t[_]
+    , 6);
+    try t.topString(
+        \\ "asdf" |> "aaa" ~ _:upper()
+    , "aaaASDF");
+    try t.topString(
+        \\ const x = "asdf"
+        \\ x |> do string(_) end
+    , "asdf");
 }
 
 test "pipe: method chain with state mutation" {
@@ -3058,21 +2840,6 @@ test "for loop calls iterator" {
 // optional param
 //
 
-test "optional params basic" {
-    try t.topAtom(
-        \\ const f = fn(a, ?b) b
-        \\ f(42)
-    , "none");
-    try t.topNumber(
-        \\ const f = fn(a, ?b) b
-        \\ f(42, 10)
-    , 10);
-    try t.topNumber(
-        \\ const f = fn(a, ?b) a + b
-        \\ f(3, 7)
-    , 10);
-}
-
 test "optional params multiple" {
     try t.topAtom(
         \\ const f = fn(a, ?b, ?c) c
@@ -3115,184 +2882,142 @@ test "optional params with typed function" {
 //
 
 test "module import auto-binds filename" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mymod.rv",
-        .data = "const x = 42\nx\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "mymod.rv", .data = "const x = 42\nx\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./mymod"
         \\ mymod
     , 42);
 }
 
 test "module import with custom name" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mymod.rv",
-        .data = "const x = 7\nx\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "mymod.rv", .data = "const x = 7\nx\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import { m = "./mymod" }
         \\ m
     , 7);
 }
 
 test "module pub exports are accessible as fields" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "lib.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "lib.rv", .data =
         \\ pub const x = 42
         \\ pub fn y(n) n * 2
         \\ const secret = "hidden"
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ const lib = import "./lib"
         \\ lib.y(lib.x)
     , 84);
 }
 
 test "module non-pub values are not exported" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "lib.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "lib.rv", .data =
         \\ pub const visible = 42
         \\ const hidden = 99
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ const lib = import "./lib"
         \\ lib.visible
     , 42);
 }
 
 test "cross-module macro injection works" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "macros.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "macros.rv", .data =
         \\ pub macro double! `%e:expr` `%e * 2`
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./macros"
         \\ macros.double!(21)
     , 42);
 }
 
 test "non-pub macro is not injected" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "macros.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "macros.rv", .data =
         \\ macro hidden! `%e:expr` `42`
         \\ pub macro visible! `%e:expr` `%e`
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./macros"
         \\ macros.visible!(99)
     , 99);
     // non-pub macros are not injected, so the call never expands:
     // unknown macro is a compile error, not a runtime one
-    try t.expectExpandErrorInDir(module_dir,
+    try t.expectExpandErrorInDir(m.dir,
         \\ import "./macros"
         \\ macros.hidden!(21)
     , "unknown macro `macros.hidden!`");
 }
 
 test "cross-module proc macro injection works" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "procs.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "procs.rv", .data =
         \\ pub proc add_one!(iter) do
         \\   let n = iter:next()
         \\   {{:binary, :add, n, {:number, 1}}}
         \\ end
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./procs"
         \\ procs.add_one!(41)
     , 42);
 }
 
 test "const x = import \"foo\" with different names binds both" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mymod.rv",
-        .data = "pub const val = 42\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "mymod.rv", .data = "pub const val = 42\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ const x = import "./mymod"
         \\ x.val
     , 42);
 }
 
 test "import of non-existent file reports runtime error" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.expectRuntimeErrorInDir(module_dir,
+    var m = try t.TmpMod.init(&.{});
+    defer m.deinit();
+    try t.expectRuntimeErrorInDir(m.dir,
         \\ import "./nonexistent"
         \\ nonexistent
     , .ModuleNotFound);
 }
 
 test "import empty module does not crash" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "empty.rv",
-        .data = "",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "empty.rv", .data = "" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./empty"
         \\ 42
     , 42);
 }
 
 test "import in function body binds correctly" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "helper.rv",
-        .data = "pub const val = 99\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "helper.rv", .data = "pub const val = 99\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ fn get_val() do
         \\   import "./helper"
         \\   helper.val
@@ -3302,18 +3027,14 @@ test "import in function body binds correctly" {
 }
 
 test "pub type alias from imported module is available" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "types.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "types.rv", .data =
         \\ pub type UserId = int
         \\ pub fn greet(id: UserId) id
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./types"
         \\ const x: UserId = 42
         \\ types.greet(x)
@@ -3321,55 +3042,43 @@ test "pub type alias from imported module is available" {
 }
 
 test "non-pub type alias in imported module does not pollute importer" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "priv_types.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "priv_types.rv", .data =
         \\ type Hidden = int
         \\ pub const val = 42
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./priv_types"
         \\ priv_types.val
     , 42);
 }
 
 test "pub type alias referencing another type alias from same module" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "chain.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "chain.rv", .data =
         \\ pub type Id = int
         \\ pub type Alias = Id
         \\ pub fn take(n: Alias) n
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./chain"
         \\ chain.take(42)
     , 42);
 }
 
 test "pub type alias works in type annotation after import" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "alias_mod.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "alias_mod.rv", .data =
         \\ pub type Code = int
         \\ pub fn lookup(c: Code) c
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./alias_mod"
         \\ const x: Code = 99
         \\ alias_mod.lookup(x)
@@ -3377,91 +3086,62 @@ test "pub type alias works in type annotation after import" {
 }
 
 test "module with only non-pub items compiles and imports" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "priv.rv",
-        .data = "const secret = 42\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "priv.rv", .data = "const secret = 42\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./priv"
         \\ 1
     , 1);
 }
 
 test "pub import { x = \"a\" } re-exports module" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "inner.rv",
-        .data = "pub const val = 42\n",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "outer.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "inner.rv", .data = "pub const val = 42\n" },
+        .{ .path = "outer.rv", .data =
         \\ pub import { inner = "./inner" }
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ const outer = import "./outer"
         \\ outer.inner.val
     , 42);
 }
 
 test "pub import \"foo\" at statement level re-exports" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "inner.rv",
-        .data = "pub const val = 42\n",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "outer.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "inner.rv", .data = "pub const val = 42\n" },
+        .{ .path = "outer.rv", .data =
         \\ pub import "./inner"
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ const outer = import "./outer"
         \\ outer.inner.val
     , 42);
 }
 
 test "multi-import with two entries" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "alpha.rv",
-        .data = "pub const a = 1\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "alpha.rv", .data = "pub const a = 1\n" },
+        .{ .path = "beta.rv", .data = "pub const b = 2\n" },
     });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "beta.rv",
-        .data = "pub const b = 2\n",
-    });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import { x = "./alpha", y = "./beta" }
         \\ x.a + y.b
     , 3);
 }
 
 test "import inside do block binds correctly" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "helper.rv",
-        .data = "pub const val = 7\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "helper.rv", .data = "pub const val = 7\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ do
         \\   import "./helper"
         \\   helper.val
@@ -3470,15 +3150,11 @@ test "import inside do block binds correctly" {
 }
 
 test "import with relative path works" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "sub_rel.rv",
-        .data = "pub const val = 42\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "sub_rel.rv", .data = "pub const val = 42\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./sub_rel"
         \\ sub_rel.val
     , 42);
@@ -3486,80 +3162,43 @@ test "import with relative path works" {
 
 test "circular import does not hang" {
     return error.SkipZigTest; // noisy
-    // var tmp = std.testing.tmpDir(.{});
-    // defer tmp.cleanup();
-    // try tmp.dir.writeFile(io, .{
-    //     .sub_path = "a.rv",
-    //     .data = "pub import \"b\"\npub const x = 1\n",
-    // });
-    // try tmp.dir.writeFile(io, .{
-    //     .sub_path = "b.rv",
-    //     .data = "pub import \"a\"\npub const y = 2\n",
-    // });
-    // const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    // defer alloc.free(module_dir);
-    // // circular import should not hang or crash;;; either result is fine
-    // const result = t.topResult("import \"a\"\n1", module_dir);
-    // if (result) |res| {
-    //     var r = res;
-    //     r.deinit();
-    //     // completed without error!!! unexpected but acceptable
-    //     // the import may succeed if the cycle resolves in time
-    // } else |_| {
-    //     // expected!! circular import may error at runtime
-    // }
 }
 
 test "transitive pub import through re-export chain" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "leaf.rv",
-        .data = "pub const deep = 99\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "leaf.rv", .data = "pub const deep = 99\n" },
+        .{ .path = "middle.rv", .data = "pub import \"./leaf\"\npub const mid = 50\n" },
     });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "middle.rv",
-        .data = "pub import \"./leaf\"\npub const mid = 50\n",
-    });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./middle"
         \\ middle.leaf.deep + middle.mid
     , 149);
 }
 
 test "same file imported under multiple names" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "shared.rv",
-        .data = "pub const v = 7\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "shared.rv", .data = "pub const v = 7\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import { a = "./shared", b = "./shared" }
         \\ a.v + b.v
     , 14);
 }
 
 test "import with absolute path" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "absm.rv",
-        .data = "pub const x = 42\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "absm.rv", .data = "pub const x = 42\n" },
     });
-    const abs_path = try tmp.dir.realPathFileAlloc(io, "absm.rv", alloc);
+    defer m.deinit();
+    const abs_path = try std.fmt.allocPrint(alloc, "{s}/absm.rv", .{m.dir});
     defer alloc.free(abs_path);
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
 
     const source = try std.fmt.allocPrint(alloc, "import '{s}'\nabsm.x", .{abs_path});
     defer alloc.free(source);
 
-    var result = try t.topResult(source, module_dir);
+    var result = try t.topResult(source, m.dir);
     defer result.deinit();
     const actual = try result.value.asNumber();
     if (@abs(@as(f64, 42) - actual) > 0.000000001)
@@ -3568,46 +3207,25 @@ test "import with absolute path" {
 
 test "@exports shadow in module is caught at compile time" {
     return error.SkipZigTest; // noisy
-    // var tmp = std.testing.tmpDir(.{});
-    // defer tmp.cleanup();
-    // try tmp.dir.writeFile(io, .{
-    //     .sub_path = "collide.rv",
-    //     .data = "pub const @exports = 42\npub const x = 99\n",
-    // });
-    // const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    // defer alloc.free(module_dir);
-    //
-    // try t.expectRuntimeErrorInDir(module_dir,
-    //     \\ import "./collide"
-    //     \\ 1
-    // , .Panic);
 }
 
 test "let import binding is rejected" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mod.rv",
-        .data = "pub const x = 42\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "mod.rv", .data = "pub const x = 42\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.expectCompileErrorInDir(module_dir,
+    defer m.deinit();
+    try t.expectCompileErrorInDir(m.dir,
         \\ let m = import "./mod"
         \\ m.x
     );
 }
 
 test "duplicate import name is rejected at compile time" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "mod.rv",
-        .data = "pub const v = 1\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "mod.rv", .data = "pub const v = 1\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.expectCompileErrorInDir(module_dir,
+    defer m.deinit();
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "./mod"
         \\ import "./mod"
     );
@@ -3707,57 +3325,45 @@ test "labeled break with unknown label is rejected" {
 }
 
 test "import typed function reports arg type mismatch" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "adder.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "adder.rv", .data =
         \\ pub fn add(a: int, b: int) a + b
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
+    defer m.deinit();
     // correct types work
-    try t.topNumberInDir(module_dir,
+    try t.topNumberInDir(m.dir,
         \\ import "./adder"
         \\ adder.add(1, 2)
     , 3);
     // wrong type should fail at compile time
-    try t.expectCompileErrorInDir(module_dir,
+    try t.expectCompileErrorInDir(m.dir,
         \\ import "./adder"
         \\ adder.add("hi", 2)
     );
 }
 
 test "import typed function with string param passes type check" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "echo.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "echo.rv", .data =
         \\ pub fn echo(s: string) s
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topStringInDir(module_dir,
+    defer m.deinit();
+    try t.topStringInDir(m.dir,
         \\ import "./echo"
         \\ echo.echo("ok")
     , "ok");
 }
 
 test "import typed function with no type annotations falls through" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{
-        .sub_path = "plain.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "plain.rv", .data =
         \\ pub fn double(n) n * 2
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(io, ".", alloc);
-    defer alloc.free(module_dir);
-    try t.topNumberInDir(module_dir,
+    defer m.deinit();
+    try t.topNumberInDir(m.dir,
         \\ import "./plain"
         \\ plain.double(21)
     , 42);

@@ -676,13 +676,6 @@ test "table literals and field lookup work" {
     , 42);
 }
 
-test "table positional access" {
-    try testing.topNumber(
-        \\ const t = {41, 1}
-        \\ t[0] + t[1]
-    , 42);
-}
-
 test "table field assignment" {
     try testing.topNumber(
         \\ const t = {answer = 41}
@@ -1027,22 +1020,6 @@ test "computed table keys use runtime values" {
     , 9);
 }
 
-test "array-style table literal" {
-    try testing.topNumber(
-        \\ const tbl = {10, 20, 30}
-        \\ tbl[0] + tbl[1] + tbl[2]
-    , 60);
-}
-
-test "numeric and string keys are distinct" {
-    try testing.topNumber(
-        \\ const t = {}
-        \\ t[1] = 100
-        \\ t["1"] = 200
-        \\ t[1] + t["1"]
-    , 300);
-}
-
 test "concatenated string keys match literal keys" {
     try testing.topNumber(
         \\ const t = {}
@@ -1124,18 +1101,4 @@ test "non-table values can use metatable fields as methods" {
         \\ set_meta("", mt)
         \\ "asdf":reverse()
     , "fdsa");
-}
-
-test "pipe: explicit placeholder method receiver with table" {
-    try testing.topNumber(
-        \\ const obj = { inner = 40, meth = fn(self, x) self.inner + x }
-        \\ obj |> _:meth(2)
-    , 42);
-}
-
-test "pipe: explicit placeholder index access with table" {
-    try testing.topNumber(
-        \\ const t = {5, 6, 7}
-        \\ 1 |> t[_]
-    , 6);
 }

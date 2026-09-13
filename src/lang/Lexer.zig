@@ -1483,17 +1483,26 @@ test "token span includes line column start end" {
     try std.testing.expectEqual(@as(usize, 15), span.end);
 }
 
-test "lexes string with newline escape" {
-    const tokens = try lexAt(std.testing.allocator, "\"hello\\nworld\"", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
+test "lexes string escapes" {
+    const cases = [_]struct { src: []const u8, want: []const u8 }{
+        .{ .src = "\"hello\\nworld\"", .want = "hello\nworld" },
+        .{ .src = "\"hi\\tworld\"", .want = "hi\tworld" },
+        .{ .src = "\"path\\\\to\\\\file\"", .want = "path\\to\\file" },
+        .{ .src = "\"say \\\"hello\\\"\"", .want = "say \"hello\"" },
+        .{ .src = "\"line1\\rline2\"", .want = "line1\rline2" },
+    };
+    for (cases) |c| {
+        const tokens = try lexAt(std.testing.allocator, c.src, .{});
+        defer {
+            for (tokens) |tok| {
+                if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
+            }
+            std.testing.allocator.free(tokens);
         }
-        std.testing.allocator.free(tokens);
-    }
 
-    try std.testing.expectEqual(TokenType.string, tokens[0].type);
-    try std.testing.expectEqualStrings("hello\nworld", tokens[0].text);
+        try std.testing.expectEqual(TokenType.string, tokens[0].type);
+        try std.testing.expectEqualStrings(c.want, tokens[0].text);
+    }
 }
 
 test "unterminated string span points at opening quote" {
@@ -1501,7 +1510,6 @@ test "unterminated string span points at opening quote" {
         \\  
         \\  "unterminated
     , .{});
-    try std.testing.expect(report == .err);
     try std.testing.expect(report == .err);
     try std.testing.expectEqual(LexError.Kind.UnterminatedString, report.err.kind);
     try std.testing.expectEqual(@as(u32, 2), report.err.span.line);
@@ -1514,62 +1522,9 @@ test "unterminated multiline comment span points at opening hashes" {
         \\  ## never closed
     , .{});
     try std.testing.expect(report == .err);
-    try std.testing.expect(report == .err);
     try std.testing.expectEqual(LexError.Kind.UnterminatedComment, report.err.kind);
     try std.testing.expectEqual(@as(u32, 2), report.err.span.line);
     try std.testing.expectEqual(@as(u32, 3), report.err.span.column);
-}
-
-test "lexes string with tab escape" {
-    const tokens = try lexAt(std.testing.allocator, "\"hi\\tworld\"", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
-        }
-        std.testing.allocator.free(tokens);
-    }
-
-    try std.testing.expectEqual(TokenType.string, tokens[0].type);
-    try std.testing.expectEqualStrings("hi\tworld", tokens[0].text);
-}
-
-test "lexes string with backslash escape" {
-    const tokens = try lexAt(std.testing.allocator, "\"path\\\\to\\\\file\"", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
-        }
-        std.testing.allocator.free(tokens);
-    }
-
-    try std.testing.expectEqual(TokenType.string, tokens[0].type);
-    try std.testing.expectEqualStrings("path\\to\\file", tokens[0].text);
-}
-
-test "lexes string with quote escape" {
-    const tokens = try lexAt(std.testing.allocator, "\"say \\\"hello\\\"\"", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
-        }
-        std.testing.allocator.free(tokens);
-    }
-
-    try std.testing.expectEqual(TokenType.string, tokens[0].type);
-    try std.testing.expectEqualStrings("say \"hello\"", tokens[0].text);
-}
-
-test "lexes string with carriage return escape" {
-    const tokens = try lexAt(std.testing.allocator, "\"line1\\rline2\"", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .string) freeTokenStrings(std.testing.allocator, tok);
-        }
-        std.testing.allocator.free(tokens);
-    }
-
-    try std.testing.expectEqual(TokenType.string, tokens[0].type);
-    try std.testing.expectEqualStrings("line1\rline2", tokens[0].text);
 }
 
 test "lexes single quoted string is raw" {
@@ -1585,30 +1540,31 @@ test "lexes single quoted string is raw" {
     try std.testing.expectEqualStrings("hello\\nworld", tokens[0].text);
 }
 
-test "lexes backtick string with escapes" {
-    const tokens = try lexAt(std.testing.allocator, "`hello\\nworld`", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .backtick_string) freeTokenStrings(std.testing.allocator, tok);
+test "lexes backtick string escapes" {
+    {
+        const tokens = try lexAt(std.testing.allocator, "`hello\\nworld`", .{});
+        defer {
+            for (tokens) |tok| {
+                if (tok.type == .backtick_string) freeTokenStrings(std.testing.allocator, tok);
+            }
+            std.testing.allocator.free(tokens);
         }
-        std.testing.allocator.free(tokens);
+
+        try std.testing.expectEqual(TokenType.backtick_string, tokens[0].type);
+        try std.testing.expectEqualStrings("hello\nworld", tokens[0].text);
     }
-
-    try std.testing.expectEqual(TokenType.backtick_string, tokens[0].type);
-    try std.testing.expectEqualStrings("hello\nworld", tokens[0].text);
-}
-
-test "lexes backtick string with backtick escape" {
-    const tokens = try lexAt(std.testing.allocator, "`say \\`hi\\``", .{});
-    defer {
-        for (tokens) |tok| {
-            if (tok.type == .backtick_string) freeTokenStrings(std.testing.allocator, tok);
+    {
+        const tokens = try lexAt(std.testing.allocator, "`say \\`hi\\``", .{});
+        defer {
+            for (tokens) |tok| {
+                if (tok.type == .backtick_string) freeTokenStrings(std.testing.allocator, tok);
+            }
+            std.testing.allocator.free(tokens);
         }
-        std.testing.allocator.free(tokens);
-    }
 
-    try std.testing.expectEqual(TokenType.backtick_string, tokens[0].type);
-    try std.testing.expectEqualStrings("say `hi`", tokens[0].text);
+        try std.testing.expectEqual(TokenType.backtick_string, tokens[0].type);
+        try std.testing.expectEqualStrings("say `hi`", tokens[0].text);
+    }
 }
 
 test "lexes string with unknown escape passed through" {
@@ -1624,11 +1580,8 @@ test "lexes string with unknown escape passed through" {
     try std.testing.expectEqualStrings("hello\\qworld", tokens[0].text);
 }
 
-test "lexes pub keyword" {
+test "lexes pub and declare keywords" {
     try testing.expectTypes("pub const x = 1", &.{ .kw_pub, .kw_const, .ident, .assign, .number, .eof });
-}
-
-test "lexes declare keyword" {
     try testing.expectTypes(
         "declare ring = fn(volume: number, label: string) -> bool",
         &.{

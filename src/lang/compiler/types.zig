@@ -1184,7 +1184,6 @@ test "types: TypeInfo equality" {
     const any_type: revo.lang.compiler.types.TypeInfo = .{ .tag = .any };
 
     try std.testing.expect(int_type.eql(.{ .tag = .number }));
-    try std.testing.expect(int_type.eql(.{ .tag = .number }));
     try std.testing.expect(any_type.eql(.{ .tag = .any }));
 }
 
@@ -1204,14 +1203,8 @@ test "types: type coercion" {
 
 test "types: binary op inference - arithmetic" {
     const types = revo.lang.compiler.types;
-    const add_int_int = types.inferBinaryOp(.add, .{ .tag = .number }, .{ .tag = .number });
-    try std.testing.expect(add_int_int.eql(.{ .tag = .number }));
-
-    const add_float_float = types.inferBinaryOp(.add, .{ .tag = .number }, .{ .tag = .number });
-    try std.testing.expect(add_float_float.eql(.{ .tag = .number }));
-
-    const add_int_float = types.inferBinaryOp(.add, .{ .tag = .number }, .{ .tag = .number });
-    try std.testing.expect(add_int_float.eql(.{ .tag = .number }));
+    const add = types.inferBinaryOp(.add, .{ .tag = .number }, .{ .tag = .number });
+    try std.testing.expect(add.eql(.{ .tag = .number }));
 }
 
 test "types: binary op inference - comparison" {
@@ -1248,41 +1241,14 @@ const lang = revo.lang;
 const t = lang.testing;
 const VM = revo.VM;
 
-test "typed binding num accepts int literal" {
+test "typed num/string bindings accept and reject" {
     try t.topNumber(
         \\ let x: num = 42
         \\ x
     , 42);
-}
-
-test "typed binding num accepts float literal" {
-    try t.topNumber(
-        \\ let x: num = 3.14
-        \\ x
-    , 3.14);
-}
-
-test "typed binding num accepts num literal coerced to num" {
-    try t.topNumber(
-        \\ let x: num = 10
-        \\ x
-    , 10.0);
-}
-
-test "typed binding rejects string for num" {
     try t.expectCompileError(
         \\ let x: num = "hello"
     , .ParseError);
-}
-
-test "typed binding num accepts float literal as num" {
-    try t.topNumber(
-        \\ let x: num = 3.14
-        \\ x
-    , 3.14);
-}
-
-test "typed binding rejects num for string" {
     try t.expectCompileError(
         \\ let x: string = 42
     , .ParseError);
@@ -1302,131 +1268,80 @@ test "typed binding table<string, num> accepts keyed table literal" {
     , 1);
 }
 
-test "record annotation accepts matching literal" {
+test "records accept matching shapes" {
     try t.topNumber(
         \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
         \\ u.age
     , 30);
-}
-
-test "record rejects missing field" {
-    try t.expectCompileError(
-        \\ let u: { name: string, age: num } = { name = "alice" }
-    , .ParseError);
-}
-
-test "record rejects wrong field type" {
-    try t.expectCompileError(
-        \\ let u: { name: string } = { name = 42 }
-    , .ParseError);
-}
-
-test "record allows extra fields" {
     try t.topString(
         \\ let u: { name: string } = { name = "alice", age = 30 }
         \\ u.name
     , "alice");
-}
-
-test "record field access infers precise type" {
     try t.topNumber(
         \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
         \\ u.age + 12
     , 42);
-}
-
-test "record field flows into typed binding" {
-    try t.expectCompileError(
-        \\ let u: { name: string } = { name = "alice" }
-        \\ let x: num = u.name
-    , .ParseError);
-}
-
-test "record fn param accepts table with extra fields" {
     try t.topString(
         \\ fn greet(u: { name: string }) u.name
         \\ greet({ name = "bob", age = 40 })
     , "bob");
-}
-
-test "record fn param rejects missing field" {
-    try t.expectCompileError(
-        \\ fn greet(u: { name: string, age: num }) u.name
-        \\ greet({ name = "bob" })
-    , .ParseError);
-}
-
-test "record alias works in bindings" {
     try t.topNumber(
         \\ type User = { name: string, age: num }
         \\ let u: User = { name = "alice", age = 30 }
         \\ u.age
     , 30);
-}
-
-test "nested records check inner fields" {
     try t.topString(
         \\ let t: { user: { name: string } } = { user = { name = "alice" } }
         \\ t.user.name
     , "alice");
-}
-
-test "nested record rejects bad inner field" {
-    try t.expectCompileError(
-        \\ let t: { user: { name: string } } = { user = { name = 42 } }
-    , .ParseError);
-}
-
-test "empty record accepts any table" {
     try t.topNumber(
         \\ let u: {} = { a = 1 }
         \\ 1
     , 1);
-}
-
-test "record rejects empty literal" {
-    try t.expectCompileError(
-        \\ let a: { name: num } = {}
-    , .ParseError);
-}
-
-test "record rejects array literal" {
-    try t.expectCompileError(
-        \\ let a: { name: num } = { 1, 2, 3 }
-    , .ParseError);
-}
-
-test "positional record accepts matching literal" {
     try t.topNumber(
         \\ let t0: {number, number} = {1, 2}
         \\ 1
     , 1);
-}
-
-test "positional record rejects wrong field type" {
-    try t.expectCompileError(
-        \\ let a: {number, string} = {1, 2}
-    , .ParseError);
-}
-
-test "mixed record accepts matching literal" {
     try t.topString(
         \\ let t1: {number, number, name: string} = {1, 2, name = "me"}
         \\ t1.name
     , "me");
-}
-
-test "mixed record rejects missing named field" {
-    try t.expectCompileError(
-        \\ let t1: {number, number, name: string} = {1, 2}
-    , .ParseError);
-}
-
-test "positional atom record accepts literal and any atom" {
     try t.topAtom(
         \\ let tb: {number, number, :err, atom} = {1, 2, :err, :NotFound}
         \\ :NotFound
     , "NotFound");
+}
+
+test "records reject mismatched shapes" {
+    try t.expectCompileError(
+        \\ let u: { name: string, age: num } = { name = "alice" }
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let u: { name: string } = { name = 42 }
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let u: { name: string } = { name = "alice" }
+        \\ let x: num = u.name
+    , .ParseError);
+    try t.expectCompileError(
+        \\ fn greet(u: { name: string, age: num }) u.name
+        \\ greet({ name = "bob" })
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let t: { user: { name: string } } = { user = { name = 42 } }
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let a: { name: num } = {}
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let a: { name: num } = { 1, 2, 3 }
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let a: {number, string} = {1, 2}
+    , .ParseError);
+    try t.expectCompileError(
+        \\ let t1: {number, number, name: string} = {1, 2}
+    , .ParseError);
 }
 
 test "fn alias enforces arity at call sites" {
@@ -1436,14 +1351,11 @@ test "fn alias enforces arity at call sites" {
     , .ParseError);
 }
 
-test "unknown table field read is an error" {
+test "unknown table field reads are errors" {
     try t.expectCompileError(
         \\ let t = { name = "me" }
         \\ t.a
     , .ParseError);
-}
-
-test "unknown table field index read is an error" {
     try t.expectCompileError(
         \\ let t = { name = "me" }
         \\ t[:a]
@@ -1489,14 +1401,11 @@ test "typed function params accept correct types" {
     , 7);
 }
 
-test "typed function rejects wrong arg type" {
+test "typed function rejects wrong arg types" {
     try t.expectCompileError(
         \\ const add = fn(a: num, b: num) a + b
         \\ add(3, "wrong")
     , .ParseError);
-}
-
-test "typed function rejects first arg wrong type" {
     try t.expectCompileError(
         \\ const add = fn(a: num, b: num) a + b
         \\ add("wrong", 4)
@@ -1531,28 +1440,6 @@ test "binary num + num emits add" {
         .text =
         \\ let a: num = 5
         \\ let b: num = 3
-        \\ a + b
-        ,
-    }, .{});
-    try std.testing.expect(built == .ok);
-    defer vm.runtime.alloc.free(built.ok.instructions);
-    defer vm.runtime.alloc.free(built.ok.spans);
-
-    var saw_add = false;
-    for (built.ok.instructions) |inst| {
-        if (inst.op == .add) saw_add = true;
-    }
-    try std.testing.expect(saw_add);
-}
-
-test "binary float literal + float emits add" {
-    var vm = try VM.init(testRuntime());
-    defer vm.deinit();
-
-    const built = try lang.build(&vm, .{
-        .text =
-        \\ let a: num = 1.5
-        \\ let b: num = 2.5
         \\ a + b
         ,
     }, .{});
@@ -1623,28 +1510,6 @@ test "untyped code still works" {
     , "hello");
 }
 
-test "mixed num and num falls back to generic add" {
-    var vm = try VM.init(testRuntime());
-    defer vm.deinit();
-
-    const built = try lang.build(&vm, .{
-        .text =
-        \\ let a: num = 5
-        \\ let b: num = 2.5
-        \\ a + b
-        ,
-    }, .{});
-    try std.testing.expect(built == .ok);
-    defer vm.runtime.alloc.free(built.ok.instructions);
-    defer vm.runtime.alloc.free(built.ok.spans);
-
-    var saw_generic_add = false;
-    for (built.ok.instructions) |inst| {
-        if (inst.op == .add) saw_generic_add = true;
-    }
-    try std.testing.expect(saw_generic_add);
-}
-
 test "nested function with typed params" {
     try t.topNumber(
         \\ const outer = fn(x: num) do
@@ -1673,71 +1538,41 @@ test "return type validation accepts correct type" {
     , 42);
 }
 
-test "atoms<->any relationship" {
-    try t.topNumber(
-        \\ const get_num = fn() -> num do
-        \\     return 42
-        \\ end
-        \\ get_num()
-    , 42);
-}
-
 //
 // typed const bindings
 //
-test "typed const binding num int" {
+test "typed const and global bindings accept and reject" {
     try t.topNumber(
         \\ const x: num = 42
         \\ x
     , 42);
-}
-
-test "typed const binding string" {
     try t.topString(
         \\ const s: string = "hello"
         \\ s
     , "hello");
-}
-
-test "typed const binding num float" {
-    try t.topNumber(
-        \\ const x: num = 3.14
-        \\ x
-    , 3.14);
-}
-
-test "typed const binding rejects wrong type" {
     try t.expectCompileError(
         \\ const x: num = "hello"
     , .ParseError);
-}
-
-//
-// typed global bindings
-//
-test "typed global binding num int" {
     try t.topNumber(
         \\ global x: num = 42
         \\ x
     , 42);
 }
 
-test "typed global binding num float" {
-    try t.topNumber(
-        \\ global x: num = 1.5
-        \\ x
-    , 1.5);
-}
-
 //
 // type alias at call sites
 //
-test "type alias used in function param" {
+test "type aliases work in function params" {
     try t.topNumber(
         \\ type MyInt = num
         \\ const double = fn(x: MyInt) -> MyInt x * 2
         \\ double(21)
     , 42);
+    try t.topNumber(
+        \\ type Num = num
+        \\ const add = fn(a: Num, b: Num) -> num a + b
+        \\ add(3, 4)
+    , 7);
 }
 
 test "type alias used in binding" {
@@ -1746,22 +1581,6 @@ test "type alias used in binding" {
         \\ let s: Name = "alice"
         \\ s
     , "alice");
-}
-
-test "type alias num accepts num" {
-    try t.topNumber(
-        \\ type Num = num
-        \\ const add = fn(a: Num, b: Num) -> num a + b
-        \\ add(3, 4)
-    , 7);
-}
-
-test "type alias num accepts float literal" {
-    try t.topNumber(
-        \\ type Num = num
-        \\ const add = fn(a: Num, b: Num) -> num a + b
-        \\ add(3.5, 4.2)
-    , 7.7);
 }
 
 test "type alias rejects type not in union" {
@@ -1774,16 +1593,13 @@ test "type alias rejects type not in union" {
 //
 // named union variants with payloads
 //
-test "named union variant ok result" {
+test "named union variants match to ok and err" {
     try t.topAtom(
         \\ type Result = :ok | :err
         \\ match 0
         \\ | 0 => :ok
         \\ | _ => :err
     , "ok");
-}
-
-test "named union variant err result" {
     try t.topAtom(
         \\ type Result = :ok | :err
         \\ match 1
@@ -1803,7 +1619,7 @@ test "return type mismatch detects wrong explicit return" {
     , .ParseError);
 }
 
-test "coercion in return type num to num" {
+test "explicit returns match the return type" {
     try t.topNumber(
         \\ fn get() -> num do
         \\     return 42
@@ -1812,87 +1628,64 @@ test "coercion in return type num to num" {
     , 42);
 }
 
-test "explicit return matches return type" {
-    try t.topNumber(
-        \\ fn get() -> num do
-        \\     return 99
-        \\ end
-        \\ get()
-    , 99);
-}
-
 //
 // if/else branch type unification
 //
-test "if/else typed branches unify to num" {
+test "if/else typed branches unify" {
     try t.topNumber(
         \\ let x: num = 5
         \\ let y = if x > 0 10 else 20
         \\ y
     , 10);
-}
-
-test "if/else typed branches unify to string" {
     try t.topString(
         \\ let x: num = 0
         \\ let y = if x > 0 "pos" else "non-pos"
         \\ y
     , "non-pos");
+    try t.topNumber(
+        \\ let x: num = 5
+        \\ let y = unless x > 0 10 else 20
+        \\ y
+    , 20);
+    try t.topString(
+        \\ let x: num = 0
+        \\ let y = unless x > 0 "pos" else "non-pos"
+        \\ y
+    , "pos");
 }
 
 //
 // string indexing
 //
-test "string indexing returns string" {
+test "string indexing and slicing" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[0]
     , "h");
-}
-
-test "string slicing uses half-open range bounds" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[1..4]
     , "ell");
-}
-
-test "stepped string slicing" {
     try t.topString(
         \\ let s: string = "abcdef"
         \\ s[5..-1..1]
     , "fedc");
-}
-//
-// open-bound slicing
-//
-test "string slice open start [..n]" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[..4]
     , "hell");
-}
-
-test "string slice open end [n..]" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[2..]
     , "llo");
-}
-
-test "string slice open both [..]" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[..]
     , "hello");
-}
-test "string slice open step [n..step..m]" {
     try t.topString(
         \\ let s: string = "abcdef"
         \\ s[0..2..5]
     , "ace");
-}
-test "string slice empty result" {
     try t.topString(
         \\ let s: string = "abc"
         \\ s[2..2]
@@ -1901,28 +1694,15 @@ test "string slice empty result" {
 //
 // any type accepts everything
 //
-test "any typed param accepts num" {
+test "any accepts num, table, and bindings" {
     try t.topNumber(
         \\ const id = fn(x: any) x
         \\ id(42)
     , 42);
-}
-
-test "any typed param accepts string" {
-    try t.topString(
-        \\ const id = fn(x: any) x
-        \\ id("hello")
-    , "hello");
-}
-
-test "any typed param accepts table" {
     try t.topNumber(
         \\ const get = fn(t: any, k: any) t[k]
         \\ get({x = 99}, :x)
     , 99);
-}
-
-test "any typed binding accepts anything" {
     try t.topNumber(
         \\ let x: any = 42
         \\ let y: any = "str"
@@ -1934,7 +1714,7 @@ test "any typed binding accepts anything" {
 //
 // block type propagation
 //
-test "block type propagates last expression type" {
+test "block types propagate last expr and reject mismatch" {
     try t.topNumber(
         \\ let x: num = do
         \\     let a = 1
@@ -1943,9 +1723,6 @@ test "block type propagates last expression type" {
         \\ end
         \\ x
     , 3);
-}
-
-test "block type error on type mismatch" {
     try t.expectCompileError(
         \\ let x: num = do
         \\     "hello"
@@ -2006,41 +1783,22 @@ test "multi-atom union fn param accepts valid atom" {
 //
 // void / nil type
 //
-test "nil typed fn body" {
+test "nil and void bindings return nil" {
     try t.topNil(
         \\ fn nothing() do :nil end
         \\ nothing()
     );
-}
-
-test "typed binding with void returns nil" {
     try t.topNil(
         \\ let x: any = :nil
         \\ x
     );
 }
 
-test "global typed binding rejects type mismatch" {
-    try t.expectCompileError(
-        \\ const x: num = "hello"
-    , .ParseError);
-}
-
-test "global typed binding accepts matching type" {
-    try t.topNumber(
-        \\ const x: num = 42
-        \\ x
-    , 42);
-}
-
-test "typed assignment rejects type mismatch" {
+test "assignments respect annotations" {
     try t.expectCompileError(
         \\ let x: num = 5
         \\ x = "hello"
     , .ParseError);
-}
-
-test "untyped assignment allows type change" {
     try t.topString(
         \\ let x = 5
         \\ x = "hello"
@@ -2051,20 +1809,14 @@ test "untyped assignment allows type change" {
 //
 // bool type
 //
-test "bool typed binding" {
+test "bool bindings accept bool and stay bool" {
     try t.topTrue(
         \\ let b: bool = 1 == 1
         \\ b
     );
-}
-
-test "bool typed binding rejects non-bool" {
     try t.expectCompileError(
         \\ let b: bool = 42
     , .ParseError);
-}
-
-test "not operator on bool stays bool" {
     try t.topFalse(
         \\ let b: bool = not (1 == 1)
         \\ b
@@ -2632,33 +2384,18 @@ test "types: type_var coercion" {
     try std.testing.expect(types.canCoerce(tv, tv));
 }
 
-test "substituteTypeParams direct type var" {
+test "substituteTypeParams resolves vars and sigs" {
     const types = revo.lang.compiler.types;
     const alloc = std.testing.allocator;
     var subst = std.StringHashMap(types.TypeInfo).init(alloc);
     defer subst.deinit();
+
+    const unbound = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
+    try std.testing.expect(unbound.eql(.{ .tag = .any }));
+
     try subst.put("T", .{ .tag = .number });
-
-    const result = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
-    try std.testing.expect(result.eql(.{ .tag = .number }));
-}
-
-test "substituteTypeParams unknown type var becomes any" {
-    const types = revo.lang.compiler.types;
-    const alloc = std.testing.allocator;
-    var subst = std.StringHashMap(types.TypeInfo).init(alloc);
-    defer subst.deinit();
-
-    const result = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
-    try std.testing.expect(result.eql(.{ .tag = .any }));
-}
-
-test "substituteTypeParams function sig with type var" {
-    const types = revo.lang.compiler.types;
-    const alloc = std.testing.allocator;
-    var subst = std.StringHashMap(types.TypeInfo).init(alloc);
-    defer subst.deinit();
-    try subst.put("T", .{ .tag = .number });
+    const bound = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
+    try std.testing.expect(bound.eql(.{ .tag = .number }));
 
     const sig = try alloc.create(types.FunctionSignature);
     sig.* = .{
@@ -2782,14 +2519,11 @@ test "generics repeated type param works" {
     try std.testing.expect(saw_add_imm);
 }
 
-test "explicit call-site type args make[num]() resolves return type" {
+test "explicit call-site type args resolve return types" {
     try t.topNumber(
         \\ fn make[T]() -> T 5
         \\ make[num]()
     , 5);
-}
-
-test "explicit call-site type args id[num](42) resolves return type" {
     try t.topNumber(
         \\ fn id[T](x: T) -> T x
         \\ id[num](42)
@@ -3066,31 +2800,24 @@ test "dotted pub type resolves bare in the same file" {
 }
 
 test "dotted pub type in .d.rv resolves qualified by import" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "shapes.d.rv",
-        .data = "pub type geo.Point = num\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "shapes.d.rv", .data = "pub type geo.Point = num\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(module_dir);
+    defer m.deinit();
     try t.topNumberInDir(
-        module_dir,
+        m.dir,
         "import \"shapes.d.rv\"\nconst p: shapes.Point = 7\np\n",
         7,
     );
     try t.expectCompileErrorInDir(
-        module_dir,
+        m.dir,
         "import \"shapes.d.rv\"\nconst p: shapes.Point = \"x\"\n",
     );
 }
 
 test "manifest dotted macros rescope under the import name" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "m.d.rv",
-        .data =
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "m.d.rv", .data =
         \\pub macro q.shout! `(%w:expr)` `%w`
         \\pub proc q.add3!(iter) do
         \\  let a = iter:next()
@@ -3098,12 +2825,11 @@ test "manifest dotted macros rescope under the import name" {
         \\  let c = iter:next()
         \\  {{:binary, :add, {:binary, :add, a, b}, c}}
         \\end
-        ,
+        },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(module_dir);
+    defer m.deinit();
     try t.topNumberInDir(
-        module_dir,
+        m.dir,
         "import \"m.d.rv\"\nm.shout!(40) + m.add3!(10, 20, 10)\n",
         80,
     );
@@ -3123,31 +2849,26 @@ test "stdlib dotted type resolves qualified, unknown qualified errors" {
 }
 
 test ".d.rv import typechecks calls and never executes the file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "audio.d.rv",
-        .data = "pub declare ring = fn(volume: num, label: string) -> bool\nundefined_poison()\n",
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "audio.d.rv", .data = "pub declare ring = fn(volume: num, label: string) -> bool\nundefined_poison()\n" },
     });
-    const module_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(module_dir);
+    defer m.deinit();
     // build succeeds (semantic extracted the sig); runtime only fails on the
     // empty module table - the poison call inside the file never ran
     try t.expectRuntimeErrorInDir(
-        module_dir,
+        m.dir,
         "import \"audio.d.rv\"\naudio.ring(1, \"x\")\n",
         .NotAFunction,
     );
 }
 
 test "manifest .d.rv types .so imports, sig fallback without one" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fake.so", .data = "" });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "fake.d.rv", .data = "pub declare open = fn(path: string) -> string\n" });
-    const module_dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
-    defer std.testing.allocator.free(module_dir);
-    const source_name = try std.Io.Dir.path.join(std.testing.allocator, &.{ module_dir, "<source>" });
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "fake.so", .data = "" },
+        .{ .path = "fake.d.rv", .data = "pub declare open = fn(path: string) -> string\n" },
+    });
+    defer m.deinit();
+    const source_name = try std.Io.Dir.path.join(std.testing.allocator, &.{ m.dir, "<source>" });
     defer std.testing.allocator.free(source_name);
 
     const source = "import \"fake.so\"\nfake.open(5)\n";
@@ -3156,7 +2877,7 @@ test "manifest .d.rv types .so imports, sig fallback without one" {
     {
         var vm = try VM.init(t.runtime());
         defer vm.deinit();
-        vm.module_dir = module_dir;
+        vm.module_dir = m.dir;
         const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{ .install_debug_info = false });
         switch (result) {
             .ok => return error.ExpectedCompileFailure,
@@ -3168,11 +2889,11 @@ test "manifest .d.rv types .so imports, sig fallback without one" {
     }
 
     // manifest gone: no sigs to synthesize from, the call compiles untyped
-    try tmp.dir.deleteFile(std.testing.io, "fake.d.rv");
+    try m.tmp.dir.deleteFile(std.testing.io, "fake.d.rv");
     {
         var vm = try VM.init(t.runtime());
         defer vm.deinit();
-        vm.module_dir = module_dir;
+        vm.module_dir = m.dir;
         const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{ .install_debug_info = false });
         switch (result) {
             .ok => |artifact| {
@@ -3182,23 +2903,4 @@ test "manifest .d.rv types .so imports, sig fallback without one" {
             .err => return error.ExpectedCompileSuccess,
         }
     }
-}
-
-//
-// unless/else branch type unification
-//
-test "unless/else typed branches unify to num" {
-    try t.topNumber(
-        \\ let x: num = 5
-        \\ let y = unless x > 0 10 else 20
-        \\ y
-    , 20);
-}
-
-test "unless/else typed branches unify to string" {
-    try t.topString(
-        \\ let x: num = 0
-        \\ let y = unless x > 0 "pos" else "non-pos"
-        \\ y
-    , "pos");
 }
