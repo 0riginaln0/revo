@@ -392,45 +392,18 @@ fn parseExpression(self: *Parser, min_bp: u8) anyerror!*Node {
             _ = self.advance();
 
             const into_what = self.peek().type;
-            switch (into_what) {
-                // `x |> :method(args)` => `x:method(args)`
-                // .hash => {
-                //     const hash_tok = self.advance();
-                //     const method_name = hash_tok.text[1..];
-                //     var args: []*Node = &.{};
-                //     if (self.check(.lparen)) {
-                //         _ = try self.expect(.lparen);
-                //         args = try self.parseDelimitedExprList(.rparen);
-                //         _ = try self.expect(.rparen);
-                //     }
-                //     const callee = try self.allocExpr(hash_tok.span(), .{
-                //         .field = .{ .object = left, .name = method_name },
-                //     });
-                //     left = try self.allocExpr(
-                //         Span.merge(left.span, if (args.len > 0) args[args.len - 1].span else hash_tok.span()),
-                //         .{ .call = .{ .callee = callee, .args = args, .implicit_self = true } },
-                //     );
-                //     continue;
-                // },
-                // `x |> match ...` -- pipe into match expression
-                .kw_match => {
-                    left = try self.parseMatch(self.advance(), left);
-                    continue;
-                },
-                // `x |> fn(p) body` or `x |> f(y)`; desugar to call with x as first arg
-                else => {
-                    const right = if (into_what == .kw_fn)
-                        try self.parseFnWithBodyMin(self.advance(), bp + 1)
-                    else
-                        // parse the whole rhs at "tighter than pipe" so
-                        // placeholders can live inside infix chains, e.g.
-                        // `x |> "aaa" ~ _:upper()`; chained pipes and
-                        // or/orelse/assign still bind looser and stay outside
-                        try self.parseExpression(BP.pipe + 1);
-                    left = try self.desugarPipe(left, right);
-                    continue;
-                },
-            }
+
+            const right = if (into_what == .kw_fn)
+                try self.parseFnWithBodyMin(self.advance(), bp + 1)
+            else
+                // parse the whole rhs at "tighter than pipe" so
+                // placeholders can live inside infix chains, e.g.
+                // `x |> "aaa" ~ _:upper()`; chained pipes and
+                // or/orelse/assign still bind looser and stay outside
+                try self.parseExpression(BP.pipe + 1);
+
+            left = try self.desugarPipe(left, right);
+            continue;
         }
 
         // postfix: try operator `x?`

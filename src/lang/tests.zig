@@ -2897,6 +2897,13 @@ test "pipe: implicit match subject" {
     , 42);
 }
 
+test "pipe: match with explicit subject acts like parens" {
+    try t.topNumber(
+        \\ :ok |> match "hi"
+        \\   | "hi" => 3
+    , 3);
+}
+
 // pipe placeholders
 
 test "pipe: explicit placeholder arg position" {
