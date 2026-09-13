@@ -119,6 +119,18 @@ tuples and structs are gone now, most breaking change yet
   dead arms warn as unreachable,
   patterns the subject can't meet warn as never-matching
 
+- non-exhaustive matches suggest the missing arm
+
+  ```ruby
+  match x
+  | {:ok, v} => v
+  # help: add an explicit nil arm
+  #   + | {:err, _} => :nil
+  ```
+  named when the shape is known, `_` otherwise\
+  cli prints it as help output,\
+  lsp offers it as a quickfix anywhere inside the match
+
 - diagnostics have severity (err, warning, note, help) and slug codes. works for lsp as well
 
 

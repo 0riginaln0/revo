@@ -1061,6 +1061,67 @@ pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []cons
     }
 }
 
+///
+/// source pattern covering one uncovered tag!!!
+///
+/// : `:tag` for bare atoms and bools
+/// , `{:tag, _, ...}` for tuple variants
+/// , null when the shape is not nameable (numbers, strings, dynamic tables) and `_` must cover it
+///
+/// no idea what to do for nums and strings
+///
+/// tags are bare names as returned by uncoveredTags
+/// caller owns the returned slice
+///
+pub fn suggestArmPattern(alloc: std.mem.Allocator, subject: TypeInfo, tag: []const u8) !?[]const u8 {
+    switch (subject.tag) {
+        .@"union" => |us| {
+            for (us) |v| {
+                if (!unionVariantTagEql(v, tag)) continue;
+                if (v.types.len == 0) return null;
+                if (v.types[0].tag == .atom) {
+                    return try std.fmt.allocPrint(alloc, ":{s}", .{tag});
+                }
+                if (v.types[0].tag == .table) {
+                    const fields = v.types[0].tag.table.fields orelse return null;
+                    if (fields.len == 0 or fields[0].field_type.tag != .atom) return null;
+                    //
+                    // positional payload only;
+                    // named fields need a record pattern we canr dérive
+                    // , so `_` covers them
+                    var n: usize = 0;
+                    var idx: usize = 1;
+                    for (fields[1..]) |f| {
+                        var buf: [16]u8 = undefined;
+                        const want = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch break;
+                        if (!std.mem.eql(u8, f.name, want)) break;
+                        n += 1;
+                        idx += 1;
+                    }
+
+                    if (n != fields.len - 1) return null;
+                    if (n == 0) return try std.fmt.allocPrint(alloc, "{{:{s}}}", .{tag});
+
+                    var buf = try std.ArrayList(u8).initCapacity(alloc, 8 + n * 3);
+                    errdefer buf.deinit(alloc);
+
+                    try buf.appendSlice(alloc, "{:");
+                    try buf.appendSlice(alloc, tag);
+
+                    for (0..n) |_| try buf.appendSlice(alloc, ", _");
+                    try buf.append(alloc, '}');
+                    return try buf.toOwnedSlice(alloc);
+                }
+                return null;
+            }
+            return null;
+        },
+        .bool => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
+        .atom => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
+        else => return null,
+    }
+}
+
 test matchCoversAll {
     // wildcard n never
     const types = revo.lang.compiler.types;
@@ -2426,6 +2487,40 @@ test "match warning codes" {
         \\ match x
         \\ | {:ok, v} => v
     , "non-exhaustive-match");
+}
+
+test "match suggestion" {
+    // uncovered tag becomes a named arm, not a wildcard
+    try t.expectSuggestion(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "| {:err, _} => :nil");
+
+    // the suggested arm closes the warning
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => :nil
+    );
+
+    // infinite domains fall back to a wildcard arm
+    try t.expectSuggestion(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "| _ => :nil");
+
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
 }
 
 test "error codes" {

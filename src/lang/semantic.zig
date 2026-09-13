@@ -977,6 +977,72 @@ const SemanticChecker = struct {
                         );
                     };
                     try self.appendWarn(msg, node.span, "non-exhaustive match", "non-exhaustive-match");
+                    // suggest the actual arms:
+                    // a miss evaluates to nil already,
+                    // one per uncovered tag when nameable
+                    // , plain `_` otherwise
+                    if (v.arms.len > 0) {
+                        const last = v.arms[v.arms.len - 1];
+                        const ins = @min(last.then.span.end, self.source.len);
+                        var anchor: ?usize = null;
+                        for (last.matchers) |matcher| {
+                            if (matcher == .expr) {
+                                anchor = matcher.expr.span.start;
+                                break;
+                            }
+                        }
+
+                        const anchor_off = @min(anchor orelse last.then.span.start, self.source.len);
+                        var line_start = anchor_off;
+                        while (line_start > 0 and self.source[line_start - 1] != '\n') : (line_start -= 1) {}
+                        var indent_end = line_start;
+
+                        while //
+                        (indent_end < anchor_off and (self.source[indent_end] == ' ' //
+                        or self.source[indent_end] == '\t')) //
+                        : (indent_end += 1) {}
+
+                        var sug_line: u32 = 1;
+                        var sug_col: u32 = 1;
+                        var idx: usize = 0;
+
+                        while (idx < ins and idx < self.source.len) : (idx += 1) {
+                            if (self.source[idx] == '\n') {
+                                sug_line += 1;
+                                sug_col = 1;
+                            } else {
+                                sug_col += 1;
+                            }
+                        }
+
+                        var patterns = std.ArrayList([]const u8).initCapacity(self.alloc, tags.items.len) catch break :blk unified;
+                        defer patterns.deinit(self.alloc);
+                        for (tags.items) |tag| {
+                            if (try types_mod.suggestArmPattern(self.alloc, subject_type, tag)) |pat| {
+                                try patterns.append(self.alloc, pat);
+                            }
+                        }
+                        if (patterns.items.len == 0) {
+                            try patterns.append(self.alloc, "_");
+                        }
+
+                        var replacement = std.ArrayList(u8).initCapacity(self.alloc, 32) catch break :blk unified;
+                        defer replacement.deinit(self.alloc);
+                        const indent = self.source[line_start..indent_end];
+
+                        for (patterns.items) |pat| {
+                            try replacement.appendSlice(self.alloc, "\n");
+                            try replacement.appendSlice(self.alloc, indent);
+                            try replacement.appendSlice(self.alloc, "| ");
+                            try replacement.appendSlice(self.alloc, pat);
+                            try replacement.appendSlice(self.alloc, " => :nil");
+                        }
+                        try self.warn_parts.append(self.alloc, .{ .suggestion = .{
+                            .span = .{ .start = ins, .end = ins, .line = sug_line, .column = sug_col },
+                            .message = "add an explicit nil arm",
+                            .replacement = try replacement.toOwnedSlice(self.alloc),
+                        } });
+                    }
                 }
                 break :blk unified;
             },

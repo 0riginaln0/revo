@@ -131,6 +131,7 @@ const Handler = struct {
             .workspaceSymbolProvider = .{ .bool = true },
             .completionProvider = .{ .triggerCharacters = &.{"."} },
             .renameProvider = .{ .rename_options = .{ .prepareProvider = true } },
+            .codeActionProvider = .{ .bool = true },
             .inlayHintProvider = .{ .inlay_hint_options = .{} },
             .signatureHelpProvider = T.SignatureHelp.Options{
                 .triggerCharacters = &.{},
@@ -519,6 +520,58 @@ const Handler = struct {
         return T.WorkspaceEdit{ .changes = changes };
     }
 
+    /// quickfixes for diagnostics carrying suggestions, recomputed cache-hot
+    pub fn @"textDocument/codeAction"(
+        h: *Handler,
+        arena: std.mem.Allocator,
+        params: T.CodeAction.Params,
+    ) !?[]const T.CodeAction.Result {
+        const file_id = h.uri_to_file.get(params.textDocument.uri) orelse return null;
+        const snap = h.ws.snapshot(file_id) orelse return null;
+        var bundle = try h.ws.diagnosticsWithWarnings(arena, file_id, .{});
+        defer {
+            if (bundle.err) |e| lang.deinitError(arena, e);
+            if (bundle.warnings) |*w| w.deinit(arena);
+        }
+        const w = bundle.warnings orelse return null;
+        var out = try std.ArrayList(T.CodeAction.Result).initCapacity(arena, 2);
+        // trigger on the diagnostic span, not the empty insertion point,
+        // so the fix shows wherever the cursor sits inside the match
+        var diag_range: ?T.Range = null;
+        for (w.parts) |part| {
+            switch (part) {
+                .span => |sp| {
+                    if (sp.role != .primary) continue;
+                    diag_range = .{
+                        .start = offsetToLspPos(snap.text, sp.span.start, h.enc),
+                        .end = offsetToLspPos(snap.text, sp.span.end, h.enc),
+                    };
+                },
+                .suggestion => |sug| {
+                    const edit_range = T.Range{
+                        .start = offsetToLspPos(snap.text, sug.span.start, h.enc),
+                        .end = offsetToLspPos(snap.text, sug.span.end, h.enc),
+                    };
+                    if (!rangesOverlap(params.range, diag_range orelse edit_range)) continue;
+                    var changes = std.json.ArrayHashMap([]const T.TextEdit){ .map = .empty };
+                    try changes.map.put(arena, try arena.dupe(u8, params.textDocument.uri), try arena.dupe(T.TextEdit, &.{.{
+                        .range = edit_range,
+                        .newText = try arena.dupe(u8, sug.replacement),
+                    }}));
+                    try out.append(arena, .{ .code_action = .{
+                        .title = try arena.dupe(u8, sug.message),
+                        .kind = .quickfix,
+                        .isPreferred = true,
+                        .edit = .{ .changes = changes },
+                    } });
+                },
+                else => {},
+            }
+        }
+        if (out.items.len == 0) return null;
+        return try out.toOwnedSlice(arena);
+    }
+
     /// return type inlay hints for visible bindings
     pub fn @"textDocument/inlayHint"(
         h: *Handler,
@@ -847,6 +900,9 @@ fn reportToDiags(arena: std.mem.Allocator, report: lang.diagnostic.Report, uri: 
                 }
                 try cur_tips.append(arena, text);
             },
+            // suggestions are code actions, not diagnostic text,
+            // the quickfix title already carries them
+            .suggestion => {},
             .trace => {},
         }
 
@@ -907,6 +963,17 @@ fn clientToWs(text: []const u8, p: T.Position, enc: lsp.offsets.Encoding) Worksp
 fn wsToClient(text: []const u8, p: Workspace.Position, enc: lsp.offsets.Encoding) T.Position {
     const byte_pos: T.Position = .{ .line = p.line - 1, .character = p.character - 1 };
     return lsp.offsets.convertPositionEncoding(text, byte_pos, .@"utf-8", enc);
+}
+
+/// client ranges overlap, line-major 0-based compare
+fn rangesOverlap(a: T.Range, b: T.Range) bool {
+    const posLe = struct {
+        fn le(x: T.Position, y: T.Position) bool {
+            if (x.line != y.line) return x.line < y.line;
+            return x.character <= y.character;
+        }
+    }.le;
+    return posLe(a.start, b.end) and posLe(b.start, a.end);
 }
 
 /// convert 1-based workspace position to byte offset

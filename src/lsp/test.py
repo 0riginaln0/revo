@@ -7,6 +7,7 @@ import pytest_lsp
 from lsprotocol.types import (
     ClientCapabilities,
     CodeActionContext,
+    CodeActionKind,
     CodeActionParams,
     CompletionParams,
     DefinitionParams,
@@ -728,6 +729,8 @@ async def test_match_warning_severity_and_code(client: LanguageClient):
         diags[0].severity}"
     assert diags[0].code == "non-exhaustive-match", f"expected code, got {
         diags[0].code}"
+    assert "add an explicit nil arm" not in diags[0].message, f"suggestion leaked into diag: {
+        diags[0].message!r}"
 
 
 @pytest.mark.asyncio(loop_scope="module")

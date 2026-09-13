@@ -59,7 +59,15 @@ pub const Part = union(enum) {
     tip: []const u8,
     warn: []const u8,
     note: []const u8,
+    suggestion: Suggestion,
     trace: TraceFrame,
+};
+
+/// an actionable edit: replacement text for span, empty span inserts
+pub const Suggestion = struct {
+    span: ast.Span,
+    message: []const u8 = "",
+    replacement: []const u8,
 };
 
 /// arena-backed
@@ -87,6 +95,10 @@ pub const Report = struct {
             .tip => |tip| alloc.free(tip),
             .warn => |warn| alloc.free(warn),
             .note => |note| alloc.free(note),
+            .suggestion => |sug| {
+                if (sug.message.len != 0) alloc.free(sug.message);
+                if (sug.replacement.len != 0) alloc.free(sug.replacement);
+            },
             .span => |span| {
                 if (span.message.len != 0) alloc.free(span.message);
                 if (span.source_name) |sn| alloc.free(sn);
@@ -113,6 +125,12 @@ pub const Report = struct {
             .tip => |tip| part.* = .{ .tip = try alloc.dupe(u8, tip) },
             .warn => |warn| part.* = .{ .warn = try alloc.dupe(u8, warn) },
             .note => |note| part.* = .{ .note = try alloc.dupe(u8, note) },
+            .suggestion => |sug| {
+                var c = sug;
+                if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
+                if (c.replacement.len != 0) c.replacement = try alloc.dupe(u8, c.replacement);
+                part.* = .{ .suggestion = c };
+            },
             .span => |span| {
                 var c = span;
                 if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
@@ -254,6 +272,15 @@ pub fn renderReport(
             .note => |note| {
                 if (header_seen) try writer.writeByte('\n');
                 try printHeader(writer, .note, null, note);
+                header_seen = true;
+            },
+            .suggestion => |sug| {
+                if (header_seen) try writer.writeByte('\n');
+                try printHeader(writer, .help, null, sug.message);
+                // replacement carries its own newline + indent for the edit,
+                // show it trimmed so the `+` line reads as a diff
+                const shown = std.mem.trim(u8, sug.replacement, " \t\r\n");
+                try writer.print("  + {s}\n", .{shown});
                 header_seen = true;
             },
             .trace => |frame| {
@@ -824,6 +851,10 @@ test "report copy preserves multiple error parts" {
             .tip => |tip| alloc.free(tip),
             .warn => |warn| alloc.free(warn),
             .note => |note| alloc.free(note),
+            .suggestion => |sug| {
+                if (sug.message.len != 0) alloc.free(sug.message);
+                if (sug.replacement.len != 0) alloc.free(sug.replacement);
+            },
             .trace => |trace| {
                 alloc.free(trace.function_name);
                 if (trace.source_name) |sn| alloc.free(sn);
@@ -896,4 +927,38 @@ test "warnings report renders severity and code" {
     defer copied.deinit(alloc);
     try std.testing.expect(copied.severity == .warning);
     try std.testing.expectEqualStrings("non-exhaustive-match", copied.code.?);
+}
+
+test "suggestion renders as help with replacement" {
+    const alloc = std.testing.allocator;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    defer buf.deinit();
+
+    const report: Report = .{
+        .severity = .warning,
+        .code = "non-exhaustive-match",
+        .message = "match is not exhaustive",
+        .source_name = "<source>",
+        .source = "match x\n",
+        .parts = &.{
+            .{ .warn = "match is not exhaustive" },
+            .{ .suggestion = .{
+                .span = .{ .start = 7, .end = 7, .line = 1, .column = 8 },
+                .message = "add an explicit nil arm",
+                .replacement = "\n| _ => :nil",
+            } },
+        },
+    };
+
+    try renderReport(alloc, &buf.writer, report);
+    const output = buf.written();
+    try std.testing.expect(std.mem.find(u8, output, "help:") != null);
+    try std.testing.expect(std.mem.find(u8, output, "add an explicit nil arm") != null);
+    try std.testing.expect(std.mem.find(u8, output, "+ | _ => :nil") != null);
+
+    var copied = try report.copy(alloc);
+    defer copied.deinit(alloc);
+    const sug = copied.parts[1].suggestion;
+    try std.testing.expectEqualStrings("add an explicit nil arm", sug.message);
+    try std.testing.expectEqualStrings("\n| _ => :nil", sug.replacement);
 }

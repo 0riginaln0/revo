@@ -215,6 +215,33 @@ pub fn expectWarningCode(source: []const u8, code: []const u8) !void {
     try std.testing.expectEqualStrings(code, got);
 }
 
+pub fn expectSuggestion(source: []const u8, snippet: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    var w: ?lang.diagnostic.Report = null;
+    const result = try lang.buildWithWarnings(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    }, &w);
+    defer if (w) |*wr| wr.deinit(alloc);
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+        },
+        .err => |lang_err| {
+            revo.printBuildError(alloc, .{ .text = source }, lang_err);
+            vm.runtime.resetDiagArena();
+            return error.ExpectedCompileSuccess;
+        },
+    }
+    const wr = w orelse return error.ExpectedWarning;
+    for (wr.parts) |part| {
+        if (part == .suggestion and std.mem.find(u8, part.suggestion.replacement, snippet) != null) return;
+    }
+    return error.ExpectedSuggestion;
+}
+
 pub fn expectNoWarning(source: []const u8) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();

@@ -35,6 +35,7 @@ const CacheEntry = struct {
     version: u32,
     opts: lang.BuildOptions,
     artifact: lang.Artifact,
+    warnings: ?lang.diagnostic.Report = null,
     symbols: []Symbol,
 };
 
@@ -72,8 +73,7 @@ pub const Analysis = struct {
     snapshot: Snapshot,
     artifact: ?lang.Artifact = null,
     diagnostics: ?lang.Error = null,
-    /// non-failing warnings
-    /// only set on success, dropped on err or cachehit
+    /// non-failing warnings; only set on success, dropped on error
     warnings: ?lang.diagnostic.Report = null,
     cached: bool = false,
     symbols: []Symbol = &.{},
@@ -437,12 +437,27 @@ pub fn analyzeDetailed(
         if (cached.version == snap.version and sameOpts(cached.opts, opts)) {
             const artifact = try copyArtifact(alloc, cached.artifact);
             errdefer deinitArtifact(alloc, artifact);
+            var warnings: ?lang.diagnostic.Report = null;
+            errdefer if (warnings) |*w| w.deinit(alloc);
+            if (cached.warnings) |cached_w| {
+                var wcopy = try cached_w.copy(alloc);
+                wcopy.source_name = alloc.dupe(u8, snap.name) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                wcopy.source = alloc.dupe(u8, snap.text) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                warnings = wcopy;
+            }
             if (opts.install_debug_info) {
                 try vm.setProgramDebugInfo(artifact.spans, snap.text, snap.name);
             }
             return .{
                 .snapshot = snap,
                 .artifact = artifact,
+                .warnings = warnings,
                 .cached = true,
                 .symbols = try copySymbols(alloc, cached.symbols),
                 .dependencies = try self.copyDeps(alloc, id),
@@ -497,23 +512,31 @@ pub fn analyzeDetailed(
 
             const cache_symbols = try copySymbols(self.alloc, symbols);
             errdefer freeSymbols(self.alloc, cache_symbols);
-            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols);
-
-            const copy = try copyArtifact(alloc, artifact);
-            errdefer deinitArtifact(alloc, copy);
 
             // warnings are owned by vm.runtime.alloc
-            // re-own for the caller
+            // re-own for the caller and the cache
+            var cache_warnings: ?lang.diagnostic.Report = null;
+            errdefer if (cache_warnings) |*w| w.deinit(self.alloc);
             var warnings = if (warn_report) |wr| blk_w: {
                 var owned = try wr.copy(alloc);
                 owned.source_name = try alloc.dupe(u8, snap.name);
                 owned.source = try alloc.dupe(u8, snap.text);
+
+                cache_warnings = try wr.copy(self.alloc);
+                cache_warnings.?.source_name = try self.alloc.dupe(u8, snap.name);
+                cache_warnings.?.source = try self.alloc.dupe(u8, snap.text);
 
                 var mutable = wr;
                 mutable.deinit(vm.runtime.alloc);
 
                 break :blk_w owned;
             } else null;
+
+            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols, cache_warnings);
+            cache_warnings = null;
+
+            const copy = try copyArtifact(alloc, artifact);
+            errdefer deinitArtifact(alloc, copy);
 
             errdefer if (warnings) |*w| w.deinit(alloc);
             break :blk .{
@@ -1484,16 +1507,19 @@ fn putCache(
     opts: lang.BuildOptions,
     artifact: lang.Artifact,
     symbols: []Symbol,
+    warnings: ?lang.diagnostic.Report,
 ) !void {
     const entry = CacheEntry{
         .version = version,
         .opts = opts,
         .artifact = artifact,
+        .warnings = warnings,
         .symbols = symbols,
     };
     if (self.cache.getPtr(id)) |slot| {
         deinitArtifact(self.alloc, slot.artifact);
         freeSymbols(self.alloc, slot.symbols);
+        if (slot.warnings) |*w| w.deinit(self.alloc);
         slot.* = entry;
     } else {
         try self.cache.put(id, entry);
@@ -1517,8 +1543,10 @@ fn invalidateCacheImpl(
     visited.put(id, {}) catch return;
 
     if (self.cache.fetchRemove(id)) |kv| {
-        deinitArtifact(self.alloc, kv.value.artifact);
-        freeSymbols(self.alloc, kv.value.symbols);
+        var val = kv.value;
+        deinitArtifact(self.alloc, val.artifact);
+        freeSymbols(self.alloc, val.symbols);
+        if (val.warnings) |*w| w.deinit(self.alloc);
     }
     if (self.inspect_cache.fetchRemove(id)) |kv| {
         freeSymbols(self.alloc, kv.value.symbols);
@@ -1850,6 +1878,7 @@ fn clearCache(self: *Workspace) void {
     while (it.next()) |entry| {
         deinitArtifact(self.alloc, entry.value_ptr.artifact);
         freeSymbols(self.alloc, entry.value_ptr.symbols);
+        if (entry.value_ptr.warnings) |*w| w.deinit(self.alloc);
     }
     var inspect_it = self.inspect_cache.iterator();
     while (inspect_it.next()) |entry| {
