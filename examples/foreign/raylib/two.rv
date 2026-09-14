@@ -1,0 +1,57 @@
+#!/usr/bin/env revo
+build first:
+
+```bash
+zig build
+cp ./zig-out/lib/libraylib_revo.dylib ./raylib.so
+cp ./zig-out/lib/libraylib_revo.so ./raylib.so
+```
+
+or just
+```bash
+./run.sh
+```
+!#
+
+const rl = import "raylib.so"
+
+let WINDOW_HEIGHT = 300
+let WINDOW_WIDTH = 400
+rl.init_window(WINDOW_WIDTH, WINDOW_HEIGHT, "Revo Raylib")
+
+let x = 0
+let dx = 150.0
+let y = 0
+let dy = 160.0
+let cube_size = 30
+let cube_color = { r = 0, g = 0, b = 0, a = 255 }
+let background_color = { r = 255, g = 255, b = 255, a = 255 }
+let frame_time = 0
+
+while not rl.window_should_close() do
+  rl.begin_drawing()
+
+  rl.clear_background(255, 255, 255)
+
+  cube_color.r = x % 255
+  cube_color.g = y % 255
+  cube_color.b = x + y % 255
+
+  rl.draw_rectangle(x, y, cube_size, cube_size, 0, 0, 0)
+
+  rl.draw_text("hello from revo", 150, 150, 8, 100, 120, 100)
+
+  rl.end_drawing()
+
+  if (x + cube_size >= WINDOW_WIDTH or x < 0) do
+     dx = dx * -1
+  end
+
+  if (y + cube_size >= WINDOW_HEIGHT or y < 0) do
+     dy = dy * -1
+  end
+
+  frame_time = rl.get_frame_time()
+  x = x + dx * frame_time
+  y = y + dy * frame_time
+end
