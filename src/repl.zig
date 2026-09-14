@@ -274,7 +274,7 @@ pub const Session = struct {
     fn printResult(self: *Session, out: *std.Io.Writer) !void {
         var w = std.Io.Writer.Allocating.init(self.gpa);
         defer w.deinit();
-        try self.vm.mainResult().write(&w.writer, self.vm, .debug);
+        try self.vm.mainResult().write(&w.writer, self.vm, .pretty);
         try out.writeAll(w.written());
         try out.writeAll("\n");
     }
