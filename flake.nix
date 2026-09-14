@@ -37,7 +37,7 @@
                   pname = "revo-deps";
                   version = "git";
                   fetchAll = true;
-                  hash = "sha256-gw4SJ2EImQt3e7X1g4smnCcCDDa5j7BFnfM3tgB5YHg=";
+                  hash = "sha256-4yAeCfuXlDzgA/S6N8FolHxFM6Ibm2m/b35yIZJHQb4=";
                   # NOTE: this hash has to be updated whenever dependencies are updated
                 };
               in
@@ -101,7 +101,6 @@
           default = pkgs.mkShellNoCC {
             packages = with pkgs; [
               zig
-              zig-zlint
               zls
             ];
           };
