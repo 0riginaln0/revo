@@ -31,7 +31,7 @@ pub const Extracted = struct {
 };
 
 /// a `#! ... !#` block before any code is the module's own doc
-fn moduleDoc(src: []const u8) ![]const u8 {
+pub fn moduleDoc(src: []const u8) ![]const u8 {
     const result = try Lexer.lexReportAt(std.heap.page_allocator, src, .{});
     const tokens = switch (result) {
         .ok => |t| t,
@@ -262,7 +262,7 @@ fn renderTextGlobals(alloc: std.mem.Allocator, w: *Writer, specs: []*const FnSpe
     try style(w, reset);
     try w.writeAll("\n");
     for (planned.items) |p| {
-        try renderTextFn(alloc, w, p.spec, false, 2, 4);
+        try renderFn(alloc, w, p.spec, .{ .sig_indent = 2, .doc_indent = 4 });
         try renderTextNestedMethods(alloc, w, specs, p.spec.name, 4, 6, consumed);
     }
 }
@@ -300,7 +300,7 @@ fn renderTextModules(alloc: std.mem.Allocator, w: *Writer, specs: []*const FnSpe
         }
 
         for (planned.items) |p| {
-            try renderTextFn(alloc, w, p.spec, false, 4, 6);
+            try renderFn(alloc, w, p.spec, .{ .sig_indent = 4, .doc_indent = 6 });
             try renderTextNestedMethods(alloc, w, specs, p.spec.name, 6, 8, consumed);
         }
     }
@@ -334,7 +334,7 @@ fn renderTextMethods(alloc: std.mem.Allocator, w: *Writer, specs: []*const FnSpe
         try style(w, reset);
         try w.writeAll("\n");
 
-        for (planned.items) |p| try renderTextFn(alloc, w, p.spec, true, 4, 6);
+        for (planned.items) |p| try renderFn(alloc, w, p.spec, .{ .strip_method = true, .sig_indent = 4, .doc_indent = 6 });
     }
 }
 
@@ -352,26 +352,42 @@ fn renderTextNestedMethods(
     if (planned.items.len == 0) return;
 
     try consumed.put(alloc, target_name, {});
-    for (planned.items) |p| try renderTextFn(alloc, w, p.spec, true, sig_indent, doc_indent);
+    for (planned.items) |p| try renderFn(alloc, w, p.spec, .{ .strip_method = true, .sig_indent = sig_indent, .doc_indent = doc_indent });
 }
 
-fn renderTextFn(alloc: std.mem.Allocator, w: *Writer, spec: *const FnSpec, strip_method: bool, sig_indent: usize, doc_indent: usize) !void {
+pub const FnOpts = struct {
+    strip_method: bool = false,
+    sig_indent: usize = 0,
+    doc_indent: usize = 0,
+    /// full `mod.name` head for type aliases instead of bare `name`
+    qualified_type: bool = false,
+    /// blank line separating manual entries; repl lookups skip it
+    leading_newline: bool = true,
+    /// docs + metatable notes; false gives a signature index line
+    show_doc: bool = true,
+};
+
+pub fn renderFn(alloc: std.mem.Allocator, w: *Writer, spec: *const FnSpec, opts: FnOpts) !void {
     var sig_buf = std.Io.Writer.Allocating.init(alloc);
     defer sig_buf.deinit();
-    if (strip_method) {
+    if (opts.strip_method) {
         try api.renderSignatureStripMethod(&sig_buf.writer, spec.*);
     } else {
         try api.renderSignature(&sig_buf.writer, spec.*);
     }
     const sig = sig_buf.written();
-    try w.writeAll("\n");
-    try writeIndent(w, sig_indent);
+    if (opts.leading_newline) try w.writeAll("\n");
+    try writeIndent(w, opts.sig_indent);
     if (spec.is_type) {
         try style(w, cyan);
-        try w.print("{s}", .{spec.name});
+        if (opts.qualified_type) {
+            try w.writeAll(sig);
+        } else {
+            try w.print("{s}", .{spec.name});
+        }
         try style(w, reset);
         try w.writeAll("\n");
-        try writeIndent(w, doc_indent);
+        try writeIndent(w, opts.doc_indent);
         try style(w, dim);
         try w.writeAll("(value)");
         try style(w, reset);
@@ -388,9 +404,10 @@ fn renderTextFn(alloc: std.mem.Allocator, w: *Writer, spec: *const FnSpec, strip
         try w.writeAll(sig[name_end..]);
         try w.writeAll("\n");
     }
+    if (!opts.show_doc) return;
 
     if (api.coreKey(spec)) |k| {
-        try writeIndent(w, doc_indent);
+        try writeIndent(w, opts.doc_indent);
         try style(w, dim);
         try w.writeAll("metatable key: ");
         try style(w, reset);
@@ -401,9 +418,9 @@ fn renderTextFn(alloc: std.mem.Allocator, w: *Writer, spec: *const FnSpec, strip
     }
 
     if (spec.doc.len > 0) {
-        try writeIndentedDoc(w, spec.doc, doc_indent);
+        try writeIndentedDoc(w, spec.doc, opts.doc_indent);
     } else {
-        try writeIndent(w, doc_indent);
+        try writeIndent(w, opts.doc_indent);
         try style(w, dim);
         try w.writeAll("undocumented :(");
         try style(w, reset);

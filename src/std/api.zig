@@ -245,6 +245,77 @@ pub fn findFn(name: []const u8) ?*const FnSpec {
     return null;
 }
 
+/// qualified lookup for help + repl
+/// `fs.open`, `file.stat`, `string:len`
+pub fn findQualified(name: []const u8) ?*const FnSpec {
+    var sep: ?usize = null;
+    var i = name.len;
+    while (i > 0) {
+        i -= 1;
+        if (name[i] == '.' or name[i] == ':') {
+            sep = i;
+            break;
+        }
+    }
+    if (sep) |s| {
+        if (s == 0 or s + 1 >= name.len) return null;
+        const mod = name[0..s];
+        const member = name[s + 1 ..];
+
+        for (full_specs) |group| for (group) |*spec| {
+            if (!std.mem.eql(u8, spec.name, member)) continue;
+
+            switch (spec.head.kind) {
+                .module => if (spec.head.module) |m| {
+                    if (std.mem.eql(u8, m, mod)) return spec;
+                },
+                .method => if (spec.head.target_name) |t| {
+                    if (std.mem.eql(u8, t, mod)) return spec;
+                },
+                .global => {},
+            }
+        };
+        return null;
+    }
+    for (full_specs) |group| for (group) |*spec| {
+        if (spec.head.kind != .global) continue;
+        if (std.mem.eql(u8, spec.name, name)) return spec;
+    };
+    return null;
+}
+
+/// leading `#! ... !#` doc of group declaring module `mod`
+/// , "" when nothing declares it
+///   ; borrowed from embedded src
+pub fn moduleDoc(mod: []const u8) []const u8 {
+    const src = blk: {
+        var gi: usize = 0;
+        for (full_specs) |specs| {
+            while (gi < groups.len and groups[gi].impls.len == 0)
+                gi += 1;
+
+            if (gi >= groups.len) return "";
+            const src = groups[gi].src;
+            gi += 1;
+
+            for (specs) |*s| {
+                switch (s.head.kind) {
+                    .module => if (s.head.module) |m| {
+                        if (std.mem.eql(u8, m, mod)) break :blk src;
+                    },
+                    .method => if (s.head.target_name) |t| {
+                        if (std.mem.eql(u8, t, mod)) break :blk src;
+                    },
+                    .global => {},
+                }
+            }
+        }
+        return "";
+    };
+
+    return revo.lang.docs.moduleDoc(src) catch "";
+}
+
 /// `fs.open(path: string) -> !table` for fns,
 ///   the bare head for type-only aliases
 /// . computed from the stored type, never stored

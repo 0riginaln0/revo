@@ -17,8 +17,6 @@ const IsoclineContext = struct {
     gpa: Allocator,
     workspace: *revo.lang.Workspace,
     last_file: *?revo.lang.FileId,
-    current_input: std.ArrayList(u8),
-    cursor_pos: usize,
 };
 
 var isocline_ctx: ?IsoclineContext = null;
@@ -77,16 +75,28 @@ fn splashSeed(vm: *VM, banner_buffer: *[128]u8, out: *std.Io.Writer) usize {
     return @intCast(rng.next());
 }
 
-fn isoclineCompleter(cenv: ?*isocline_c.ic_completion_env_t, prefix: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
+fn replCompletions(
+    alloc: Allocator,
+    ws: *revo.lang.Workspace,
+    last_file: ?revo.lang.FileId,
+    input: []const u8,
+    cursor: usize,
+) ![]revo.lang.Workspace.Completion {
+    const fid = last_file orelse try ws.open("<repl>", input, .{});
+    return ws.completions(alloc, fid, input, cursor);
+}
+
+fn isoclineCompleter(cenv: ?*isocline_c.ic_completion_env_t, prefix: [*c]const u8) callconv(.c) void {
     if (cenv == null) return;
     const ctx = isocline_ctx orelse return;
-
-    const plen = std.mem.len(prefix);
-    const pslice = prefix[0..plen];
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
+
+    // prefix is the input right up to the cursor
+    const plen = std.mem.len(prefix);
+    const upto = prefix[0..plen];
 
     const commands = &[_][]const u8{
         ":q",
@@ -96,35 +106,23 @@ fn isoclineCompleter(cenv: ?*isocline_c.ic_completion_env_t, prefix: [*c]const u
         ":outline",
     };
     for (commands) |cmd| {
-        if (std.mem.startsWith(u8, cmd, pslice)) {
-            var buf: [64]u8 = undefined;
-            const cmd_c = std.fmt.bufPrintSentinel(&buf, "{s}", .{cmd[plen..]}, 0) catch continue;
-            _ = isocline_c.ic_add_completion_ex(cenv, cmd_c, cmd_c, null);
+        if (std.mem.startsWith(u8, cmd, upto)) {
+            const cmd_c = alloc.dupeZ(u8, cmd) catch continue;
+            _ = isocline_c.ic_add_completion_prim(cenv, cmd_c.ptr, cmd_c.ptr, null, @intCast(plen), 0);
         }
     }
 
-    // use workspace completions with stashed input line
-    const input_slice = ctx.current_input.items;
-    const cursor_pos = ctx.cursor_pos;
-    const file_id = ctx.last_file.* orelse return;
-    const completions = ctx.workspace.completions(alloc, file_id, input_slice, cursor_pos) catch return;
+    const completions = replCompletions(alloc, ctx.workspace, ctx.last_file.*, upto, upto.len) catch return;
+    var start = upto.len;
+
+    while (start > 0 and revo.lang.Lexer.isIdentContinue(upto[start - 1])) start -= 1;
+    const delete_before: c_long = @intCast(upto.len - start);
+
     for (completions) |item| {
-        if (plen > item.label.len) continue;
-        var label_buf: [256]u8 = undefined;
-        const label_c = std.fmt.bufPrintSentinel(&label_buf, "{s}", .{item.label[plen..]}, 0) catch continue;
-
-        var detail_buf: [256]u8 = undefined;
-        const detail_c: [*c]const u8 = if (item.detail) |d|
-            std.fmt.bufPrintSentinel(&detail_buf, "{s}", .{d}, 0) catch null
-        else
-            null;
-        var doc_buf: [512]u8 = undefined;
-        const doc_c: [*c]const u8 = if (item.documentation) |d|
-            std.fmt.bufPrintSentinel(&doc_buf, "{s}", .{d}, 0) catch null
-        else
-            null;
-
-        _ = isocline_c.ic_add_completion_ex(cenv, label_c, detail_c orelse label_c, doc_c);
+        const rep_c = alloc.dupeZ(u8, item.label) catch continue;
+        const disp_c = if (item.detail) |d| alloc.dupeZ(u8, d) catch continue else rep_c;
+        const help_c: [*c]const u8 = if (item.documentation) |d| alloc.dupeZ(u8, d) catch null else null;
+        _ = isocline_c.ic_add_completion_prim(cenv, rep_c.ptr, disp_c.ptr, help_c, delete_before, 0);
     }
 }
 
@@ -133,13 +131,6 @@ fn isoclineHighlighter(henv: ?*isocline_c.ic_highlight_env_t, input: [*c]const u
     const input_len = std.mem.len(input);
     if (input_len == 0) return;
     const input_slice = input[0..input_len];
-
-    // stash input for the completer (cursor at end of current input)
-    if (isocline_ctx) |*ctx| {
-        ctx.current_input.clearRetainingCapacity();
-        ctx.current_input.appendSlice(ctx.gpa, input_slice) catch {};
-        ctx.cursor_pos = input_len;
-    }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -323,7 +314,8 @@ pub const Session = struct {
         }
     }
 
-    /// :h <name> - session decls first, then stdlib
+    /// :h <name>
+    /// session decls first, then stdlib
     fn helpTopic(self: *Session, out: *std.Io.Writer, name: []const u8) !bool {
         if (self.last_file) |fid| {
             if (try self.workspace.hoverByName(self.gpa, fid, name)) |text| {
@@ -333,19 +325,44 @@ pub const Session = struct {
                 return true;
             }
         }
-        if (revo.std_lib.api.find(name)) |spec| {
-            var buf = std.Io.Writer.Allocating.init(self.gpa);
-            defer buf.deinit();
-            try revo.std_lib.api.renderSignature(&buf.writer, spec.*);
-            try out.writeAll(buf.written());
-            try out.writeAll("\n");
-            if (spec.doc.len > 0) {
-                try out.writeAll(spec.doc);
-                try out.writeAll("\n");
-            }
+        if (revo.std_lib.api.findQualified(name)) |spec| {
+            try revo.lang.docs.renderFn(self.gpa, out, spec, .{ .leading_newline = false, .qualified_type = true });
             return true;
         }
+        if (std.mem.findScalar(u8, name, '.') == null and std.mem.findScalar(u8, name, ':') == null) {
+            if (try self.helpModule(out, name)) return true;
+        }
         return false;
+    }
+
+    /// :h <module> 
+    /// group doc plus one signature per member
+    fn helpModule(self: *Session, out: *std.Io.Writer, name: []const u8) !bool {
+        var found = false;
+        for (revo.std_lib.api.full_specs) |group| for (group) |*spec| {
+            const is_mod = switch (spec.head.kind) {
+                .module => spec.head.module != null and std.mem.eql(u8, spec.head.module.?, name),
+                .method => spec.head.target_name != null and std.mem.eql(u8, spec.head.target_name.?, name),
+                .global => false,
+            };
+            if (!is_mod) continue;
+            if (!found) {
+                found = true;
+                const doc = revo.std_lib.api.moduleDoc(name);
+                if (doc.len > 0) {
+                    try revo.pretty.style(out, "\x1b[2m");
+                    try out.writeAll(doc);
+                    try revo.pretty.style(out, "\x1b[0m");
+                    try out.writeAll("\n\n");
+                }
+            }
+            try revo.lang.docs.renderFn(self.gpa, out, spec, .{
+                .leading_newline = false,
+                .qualified_type = true,
+                .show_doc = false,
+            });
+        };
+        return found;
     }
 
     pub fn step(self: *Session, out: *std.Io.Writer, raw_line: []const u8) !bool {
@@ -495,8 +512,6 @@ pub fn run(vm: *VM, gpa: Allocator, init: std.process.Init) !void {
             .gpa = gpa,
             .workspace = &session.workspace,
             .last_file = &session.last_file,
-            .current_input = try std.ArrayList(u8).initCapacity(gpa, 256),
-            .cursor_pos = 0,
         };
 
         var b: [512]u8 = undefined;
@@ -511,7 +526,7 @@ pub fn run(vm: *VM, gpa: Allocator, init: std.process.Init) !void {
         _ = isocline_c.ic_enable_inline_help(true);
         _ = isocline_c.ic_enable_completion_preview(true);
         _ = isocline_c.ic_enable_hint(true);
-        isocline_c.ic_set_default_completer(@ptrCast(&isoclineCompleter), null);
+        isocline_c.ic_set_default_completer(&isoclineCompleter, null);
         isocline_c.ic_set_default_highlighter(@ptrCast(&isoclineHighlighter), null);
 
         for (&[_][]const u8{ "keyword", "string", "number", "function", "hash" }) |s| {
@@ -521,8 +536,6 @@ pub fn run(vm: *VM, gpa: Allocator, init: std.process.Init) !void {
             _ = isocline_c.ic_style_def(s_c.ptr, def.ptr);
         }
     }
-
-    defer if (build_options.isocline) isocline_ctx.?.current_input.deinit(gpa);
 
     while (true) {
         if (sigint_received.load(.seq_cst)) {
