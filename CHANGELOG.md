@@ -108,8 +108,8 @@ tuples and structs are gone now, most breaking change yet
     | 1, 2 => :right
     ```
 
-    it tries each pattern in order, firsr hit wins\
-    bindings share one slot per name across the alternatives
+  it tries each pattern in order, firsr hit wins\
+  bindings share one slot per name across the alternatives
 
 - a match miss falls through to nil, and the type knows it;\
   partial matches union `:nil` into the result type
@@ -135,7 +135,6 @@ tuples and structs are gone now, most breaking change yet
 
 - diagnostics have severity (err, warning, note, help) and slug codes. works for lsp as well
 
-
 - std:
   - `stats` module -- build a table for statistics
   - `frame` module -- dataframe-like structure
@@ -159,12 +158,29 @@ tuples and structs are gone now, most breaking change yet
 
 ### Removed
 
+- loop-accumulator promotion pass
+  only fired on simple linear `r = r + 1` chains and i didnt know what i was doing when i made it
 - struct type, `struct Name { ... }`, is gone
   `struct` is a plain identifier again
   use tables with closures instead: `{ name = "ana", greet = fn(self) ... }`
 
 ### Changed
 
+- lang/ import untangle, breaking if you reached into it
+  - one explicit `CheckCtx` interface (`compiler/types.zig`) replaces the four
+    duck-typed scopes; inference fns take it instead of `anytype`
+  - `type_serde` is text-only now: eval moved next to inference in
+    `compiler/types.zig`, TypeExpr printing/cloning lives in `ast.zig`
+  - `parseSource`/`parseSourceReport` moved to `Parser` (pure frontend entry,
+    no prelude); `pipeline.parse` keeps the stdlib merge
+  - `compiler/type_check.zig` is gone, its methods live on `Compiler`
+  - semantic failures carry their own `semantic.Failure` instead of borrowing
+    the lowering kind; test helpers split by stage (`expectSemanticError`,
+    `expectSemanticFailure`)
+  - pipeline split into `pipeline/` companions (`module_scope`, `import_preload`)
+  - integration tests moved from `compiler/types.zig` to `tests.zig`
+  - `lang.types` is `lang.compiler.types` now, `lang.ir` no longer hangs off
+    `compiler`, `parser` binding is `Parser` like `Lexer`
 - loops (`loop`, `while`, `for`) always evaluate to `:loop` unless explicitly broken out of (`break/l(v)`)
 
   we needed this because body values no longer thread through;\

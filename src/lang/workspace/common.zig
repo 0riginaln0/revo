@@ -1,0 +1,215 @@
+//! shared memory + report helpers for ws providers
+//!
+//! copy/free routines every provider needs so none of them
+//! duplicate ownership logic
+
+const std = @import("std");
+
+const revo = @import("revo");
+
+const ast = @import("../ast.zig");
+const diagnostic = @import("../diagnostic.zig");
+const pipeline = @import("../pipeline.zig");
+const type_serde = @import("../type_serde.zig");
+const types = @import("../compiler/types.zig");
+
+const W = @import("../Workspace.zig");
+const Workspace = W.Workspace;
+const Symbol = W.Symbol;
+const FnSig = W.FnSig;
+
+pub fn sameOpts(a: pipeline.BuildOptions, b: pipeline.BuildOptions) bool {
+    inline for (std.meta.fields(pipeline.BuildOptions)) |f| {
+        if (@field(a, f.name) != @field(b, f.name)) return false;
+    }
+    return true;
+}
+
+pub fn copyArtifact(alloc: std.mem.Allocator, artifact: pipeline.Artifact) !pipeline.Artifact {
+    return .{
+        .instructions = try alloc.dupe(revo.Instruction, artifact.instructions),
+        .spans = try alloc.dupe(ast.Span, artifact.spans),
+    };
+}
+
+pub fn deinitArtifact(alloc: std.mem.Allocator, artifact: pipeline.Artifact) void {
+    alloc.free(artifact.instructions);
+    alloc.free(artifact.spans);
+}
+
+/// merge two error reports into one (dedup span parts by range+message)
+pub fn mergeReports(alloc: std.mem.Allocator, a: pipeline.Error, b: pipeline.Error) !diagnostic.Report {
+    const a_report = switch (a) {
+        .parse => |f| f.report,
+        .expand => |f| f.report,
+        .lower => |f| f.report,
+        .semantic => |f| f.report,
+    };
+    const b_report = switch (b) {
+        .parse => |f| f.report,
+        .expand => |f| f.report,
+        .lower => |f| f.report,
+        .semantic => |f| f.report,
+    };
+    const total = a_report.parts.len + b_report.parts.len;
+    var all_parts = try std.ArrayList(diagnostic.Part).initCapacity(alloc, total);
+    for (a_report.parts) |p| all_parts.appendAssumeCapacity(p);
+    for (b_report.parts) |p| {
+        var dup = false;
+        if (p == .span) {
+            for (a_report.parts) |ap| {
+                if (ap == .span and
+                    ap.span.span.start == p.span.span.start and
+                    ap.span.span.end == p.span.span.end and
+                    std.mem.eql(u8, ap.span.message, p.span.message))
+                {
+                    dup = true;
+                    break;
+                }
+            }
+        }
+        if (p == .@"error") {
+            for (a_report.parts) |ap| {
+                if (ap == .@"error" and std.mem.eql(u8, ap.@"error", p.@"error")) {
+                    dup = true;
+                    break;
+                }
+            }
+        }
+        if (!dup) all_parts.appendAssumeCapacity(p);
+    }
+    const message = if (a_report.message.len > 0)
+        try alloc.dupe(u8, a_report.message)
+    else if (b_report.message.len > 0)
+        try alloc.dupe(u8, b_report.message)
+    else
+        "";
+    return .{
+        .parts = try all_parts.toOwnedSlice(alloc),
+        .message = message,
+        .code = a_report.code orelse b_report.code,
+        .source_name = try alloc.dupe(u8, a_report.source_name orelse b_report.source_name orelse ""),
+        .source = try alloc.dupe(u8, a_report.source orelse b_report.source orelse ""),
+    };
+}
+
+pub fn copyError(
+    alloc: std.mem.Allocator,
+    err: pipeline.Error,
+    source_name: []const u8,
+    source: []const u8,
+) !pipeline.Error {
+    return switch (err) {
+        .parse => |failure| blk: {
+            var report = try failure.report.copy(alloc);
+            report.source_name = try alloc.dupe(u8, source_name);
+            report.source = try alloc.dupe(u8, source);
+            break :blk .{ .parse = .{ .kind = failure.kind, .report = report } };
+        },
+        .expand => |failure| blk: {
+            var report = try failure.report.copy(alloc);
+            report.source_name = try alloc.dupe(u8, source_name);
+            report.source = try alloc.dupe(u8, source);
+            break :blk .{ .expand = .{ .report = report } };
+        },
+        .lower => |failure| blk: {
+            var report = try failure.report.copy(alloc);
+            report.source_name = try alloc.dupe(u8, source_name);
+            report.source = try alloc.dupe(u8, source);
+            break :blk .{ .lower = .{ .kind = failure.kind, .report = report } };
+        },
+        .semantic => |failure| blk: {
+            var report = try failure.report.copy(alloc);
+            report.source_name = try alloc.dupe(u8, source_name);
+            report.source = try alloc.dupe(u8, source);
+            break :blk .{ .semantic = .{ .kind = failure.kind, .report = report } };
+        },
+    };
+}
+
+pub fn copySymbols(alloc: std.mem.Allocator, symbols: []const Symbol) ![]Symbol {
+    const dupes = try alloc.dupe(Symbol, symbols);
+    for (dupes) |*s| {
+        s.name = try alloc.dupe(u8, s.name);
+        if (s.type_name) |ti| {
+            s.type_name = try types.clone(ti, alloc);
+        }
+        if (s.field_values) |fvs| {
+            s.field_values = try cloneFieldPreviews(alloc, fvs);
+        }
+    }
+    return dupes;
+}
+
+pub fn cloneFieldPreviews(alloc: std.mem.Allocator, fvs: []const type_serde.FieldPreview) ![]type_serde.FieldPreview {
+    const owned = try alloc.alloc(type_serde.FieldPreview, fvs.len);
+    for (fvs, owned) |fv, *dst| dst.* = .{
+        .name = try alloc.dupe(u8, fv.name),
+        .preview = try alloc.dupe(u8, fv.preview),
+    };
+    return owned;
+}
+
+pub fn freeSymbols(alloc: std.mem.Allocator, symbols: []Symbol) void {
+    for (symbols) |*sym| {
+        alloc.free(sym.name);
+        if (sym.type_name) |*ti| types.deinitType(ti, alloc);
+        if (sym.field_values) |fvs| {
+            for (fvs) |fv| {
+                alloc.free(fv.name);
+                alloc.free(fv.preview);
+            }
+            alloc.free(fvs);
+        }
+    }
+    alloc.free(symbols);
+}
+
+pub fn freeSigMap(alloc: std.mem.Allocator, map: *const std.StringHashMapUnmanaged(FnSig)) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        alloc.free(entry.key_ptr.*);
+        for (entry.value_ptr.params) |*p| {
+            if (p.name.len > 0) alloc.free(p.name);
+            if (p.type_name) |*ti| types.deinitType(ti, alloc);
+        }
+        alloc.free(entry.value_ptr.params);
+        if (entry.value_ptr.return_type) |*rt| types.deinitType(rt, alloc);
+        if (entry.value_ptr.type_params_text) |t| alloc.free(t);
+    }
+    const mut = @constCast(map);
+    mut.deinit(alloc);
+}
+
+/// `[T, U]` or null when empty
+/// caller owns the result
+pub fn formatTypeParams(alloc: std.mem.Allocator, type_params: []const []const u8) !?[]const u8 {
+    if (type_params.len == 0) return null;
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    errdefer buf.deinit();
+    try buf.writer.writeByte('[');
+
+    for (type_params, 0..) |tp, i| {
+        if (i > 0) try buf.writer.writeAll(", ");
+        try buf.writer.writeAll(tp);
+    }
+
+    try buf.writer.writeByte(']');
+    const owned: []const u8 = try buf.toOwnedSlice();
+    return owned;
+}
+
+/// get known global names from the vm
+pub fn getKnownGlobals(ws: *Workspace, alloc: std.mem.Allocator) ![]const []const u8 {
+    const vm = ws.vm orelse return &.{};
+    var list = try std.ArrayList([]const u8).initCapacity(alloc, 64);
+    var cit = vm.const_globals.keyIterator();
+    while (cit.next()) |atom_id| {
+        try list.append(alloc, vm.stringValue(atom_id.*));
+    }
+    var git = vm.globals.iterator();
+    while (git.next()) |entry| {
+        try list.append(alloc, vm.stringValue(entry.key_ptr.*));
+    }
+    return list.toOwnedSlice(alloc);
+}

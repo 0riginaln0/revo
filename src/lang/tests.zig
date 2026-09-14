@@ -5,7 +5,6 @@
 //
 const std = @import("std");
 const alloc = std.testing.allocator;
-const io = std.testing.io;
 
 const revo = @import("revo");
 const lang = revo.lang;
@@ -310,7 +309,7 @@ test "exponent" {
 }
 
 test "exponent errors" {
-    try t.expectCompileError("'a' ^ 2", .ParseError);
+    try t.expectSemanticError("'a' ^ 2");
     try t.expectRuntimeError("fn f(a, b) do a ^ b end f(2, 'x')", .IncompatibleTypes);
     try t.expectRuntimeError("(-2) ^ 0.5", .IncompatibleTypes);
     try t.expectRuntimeError("fn f(a, b) do a ^ b end f(-2.0, 0.5)", .IncompatibleTypes);
@@ -1438,11 +1437,10 @@ test "compile report carries span and message" {
 }
 
 test "compile report includes function call argument detail" {
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ const id = fn(x: int) x
         \\ id("nope")
     ,
-        .ParseError,
         2,
         5,
         "arg 1 (`x`) to `id` wants number, got string",
@@ -1460,11 +1458,11 @@ test "runtime report carries span and message" {
 }
 
 test "semantic catches undefined variable" {
-    try t.expectCompileError("missing_name", .ParseError);
+    try t.expectSemanticError("missing_name");
 }
 
 test "semantic catches undefined function call" {
-    try t.expectCompileError("pritn(\"hi\")", .ParseError);
+    try t.expectSemanticError("pritn(\"hi\")");
 }
 test "runtime report includes not-a-function detail" {
     try t.expectRuntimeFailure(
@@ -1487,10 +1485,10 @@ test "method call on missing field reports field name and object" {
 }
 
 test "runtime report includes wrong arity detail" {
-    try t.expectCompileError(
+    try t.expectSemanticError(
         \\ const id = fn(x) x
         \\ id()
-    , .ParseError);
+    );
 }
 test "runtime renderer includes source path" {
     var vm = try VM.init(t.runtime());
@@ -2073,15 +2071,25 @@ test "match ascriptions" {
 }
 
 test "ascriptions in value position are rejected" {
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ const t = {x: number}
         \\ t
     ,
-        .ParseError,
         1,
         13,
         "type ascriptions only go in match patterns",
     );
+}
+
+test "global destructure binds ascribed items" {
+    try t.topNumber(
+        \\ global {a, b: number} = {1, 2}
+        \\ a + b
+    , 3);
+    try t.topNumber(
+        \\ global {{x: number}, y} = {{1}, 2}
+        \\ x + y
+    , 3);
 }
 
 //
@@ -2173,26 +2181,23 @@ test "table let binding with ascriptions binds inner" {
 }
 
 test "table binding ascription mismatch is a compile error" {
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ let {x: number, y} = {:ok, 2}
     ,
-        .ParseError,
         1,
         7,
         "`x` wants number, got :ok",
     );
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ let {x, y: string} = {:ok, 2}
     ,
-        .ParseError,
         1,
         10,
         "`y` wants string, got number",
     );
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ let {{x: number}, y} = {{:ok}, 2}
     ,
-        .ParseError,
         1,
         8,
         "`x` wants number, got :ok",
@@ -2236,7 +2241,16 @@ test "typed binding label names the expected type" {
     switch (result) {
         .ok => return error.ExpectedCompileFailure,
         .err => |failure| switch (failure) {
-            .lower, .semantic => |diag| {
+            .lower => |diag| {
+                const primary = lang.diagnostic.primarySpan(diag.report).?;
+                try std.testing.expectEqualStrings("wants number, got string", primary.message);
+                try std.testing.expectEqualStrings(
+                    "`x` wants number, got string",
+                    lang.diagnostic.firstError(diag.report).?,
+                );
+                vm.runtime.resetDiagArena();
+            },
+            .semantic => |diag| {
                 const primary = lang.diagnostic.primarySpan(diag.report).?;
                 try std.testing.expectEqualStrings("wants number, got string", primary.message);
                 try std.testing.expectEqualStrings(
@@ -2266,7 +2280,15 @@ test "compiler reports multiple semantic errors in one pass" {
     switch (result) {
         .ok => return error.ExpectedCompileFailure,
         .err => |failure| switch (failure) {
-            .lower, .semantic => |diag| {
+            .lower => |diag| {
+                var error_count: usize = 0;
+                for (diag.report.parts) |part| {
+                    if (part == .@"error") error_count += 1;
+                }
+                try std.testing.expect(error_count >= 2);
+                vm.runtime.resetDiagArena();
+            },
+            .semantic => |diag| {
                 var error_count: usize = 0;
                 for (diag.report.parts) |part| {
                     if (part == .@"error") error_count += 1;
@@ -2295,7 +2317,15 @@ test "typed call reports multiple bad arguments" {
     switch (result) {
         .ok => return error.ExpectedCompileFailure,
         .err => |failure| switch (failure) {
-            .lower, .semantic => |diag| {
+            .lower => |diag| {
+                var error_count: usize = 0;
+                for (diag.report.parts) |part| {
+                    if (part == .@"error") error_count += 1;
+                }
+                try std.testing.expect(error_count >= 2);
+                vm.runtime.resetDiagArena();
+            },
+            .semantic => |diag| {
                 var error_count: usize = 0;
                 for (diag.report.parts) |part| {
                     if (part == .@"error") error_count += 1;
@@ -2359,12 +2389,11 @@ test "function with multiple parameters" {
 }
 
 test "typed function alias call is checked" {
-    try t.expectCompileFailure(
+    try t.expectSemanticFailure(
         \\ const id = fn(x: int) x
         \\ const f = id
         \\ f("nope")
     ,
-        .ParseError,
         3,
         4,
         "arg 1 (`x`) to `f` wants number, got string",
@@ -2576,11 +2605,11 @@ test "channel select w/ multiple waiters" {
 }
 
 test "macro inner binding invisible outside" {
-    try t.expectCompileError(
+    try t.expectSemanticError(
         \\ macro mac! `(%x:expr)` `let hidden = 99 :%x`
         \\ mac!(42)
         \\ hidden
-    , .ParseError);
+    );
 }
 
 test "proc macro call with multiple args does not analyze arguments" {
@@ -2784,18 +2813,19 @@ test "compiler: named parameters" {
 }
 
 test "compiler: named parameters errors" {
+    // unknown names surface at lowering, duplicates and mixing at semantic
     try t.expectCompileError(
         \\ const add = fn(x: int, y: int) do x + y end
         \\ add(x = 5, z = 3)
     , .ParseError);
-    try t.expectCompileError(
+    try t.expectSemanticError(
         \\ const add = fn(x: int, y: int) do x + y end
         \\ add(x = 5, x = 3)
-    , .ParseError);
-    try t.expectCompileError(
+    );
+    try t.expectSemanticError(
         \\ const add = fn(x: int, y: int) do x + y end
         \\ add(x = 5, 3)
-    , .ParseError);
+    );
 }
 
 test "named parameters with generics" {
@@ -2856,14 +2886,14 @@ test "optional params multiple" {
 }
 
 test "optional params arity errors" {
-    try t.expectCompileError(
+    try t.expectSemanticError(
         \\ const f = fn(a, ?b) a
         \\ f()
-    , .ParseError);
-    try t.expectCompileError(
+    );
+    try t.expectSemanticError(
         \\ const f = fn(a, ?b) a
         \\ f(1, 2, 3)
-    , .ParseError);
+    );
 }
 
 test "optional params with typed function" {
@@ -3368,3 +3398,1675 @@ test "import typed function with no type annotations falls through" {
         \\ plain.double(21)
     , 42);
 }
+
+//
+// typed lowering through the vm; integration coverage for the
+// type universe, kept with the language suite instead of types.zig
+//
+const types = lang.compiler.types;
+
+//
+// type system
+//
+
+test "typed num/string bindings accept and reject" {
+    try t.topNumber(
+        \\ let x: num = 42
+        \\ x
+    , 42);
+    try t.expectSemanticError(
+        \\ let x: num = "hello"
+    );
+    try t.expectSemanticError(
+        \\ let x: string = 42
+    );
+}
+
+test "typed binding table<num> accepts positional table literal" {
+    try t.topNumber(
+        \\ let nums: table<num> = { 1, 2, 3 }
+        \\ 1
+    , 1);
+}
+
+test "typed binding table<string, num> accepts keyed table literal" {
+    try t.topNumber(
+        \\ let pairs: table<string, num> = { a = 1, b = 2 }
+        \\ 1
+    , 1);
+}
+
+test "records accept matching shapes" {
+    try t.topNumber(
+        \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
+        \\ u.age
+    , 30);
+    try t.topString(
+        \\ let u: { name: string } = { name = "alice", age = 30 }
+        \\ u.name
+    , "alice");
+    try t.topNumber(
+        \\ let u: { name: string, age: num } = { name = "alice", age = 30 }
+        \\ u.age + 12
+    , 42);
+    try t.topString(
+        \\ fn greet(u: { name: string }) u.name
+        \\ greet({ name = "bob", age = 40 })
+    , "bob");
+    try t.topNumber(
+        \\ type User = { name: string, age: num }
+        \\ let u: User = { name = "alice", age = 30 }
+        \\ u.age
+    , 30);
+    try t.topString(
+        \\ let t: { user: { name: string } } = { user = { name = "alice" } }
+        \\ t.user.name
+    , "alice");
+    try t.topNumber(
+        \\ let u: {} = { a = 1 }
+        \\ 1
+    , 1);
+    try t.topNumber(
+        \\ let t0: {number, number} = {1, 2}
+        \\ 1
+    , 1);
+    try t.topString(
+        \\ let t1: {number, number, name: string} = {1, 2, name = "me"}
+        \\ t1.name
+    , "me");
+    try t.topAtom(
+        \\ let tb: {number, number, :err, atom} = {1, 2, :err, :NotFound}
+        \\ :NotFound
+    , "NotFound");
+}
+
+test "records reject mismatched shapes" {
+    try t.expectSemanticError(
+        \\ let u: { name: string, age: num } = { name = "alice" }
+    );
+    try t.expectSemanticError(
+        \\ let u: { name: string } = { name = 42 }
+    );
+    try t.expectSemanticError(
+        \\ let u: { name: string } = { name = "alice" }
+        \\ let x: num = u.name
+    );
+    try t.expectSemanticError(
+        \\ fn greet(u: { name: string, age: num }) u.name
+        \\ greet({ name = "bob" })
+    );
+    try t.expectSemanticError(
+        \\ let t: { user: { name: string } } = { user = { name = 42 } }
+    );
+    try t.expectSemanticError(
+        \\ let a: { name: num } = {}
+    );
+    try t.expectSemanticError(
+        \\ let a: { name: num } = { 1, 2, 3 }
+    );
+    try t.expectSemanticError(
+        \\ let a: {number, string} = {1, 2}
+    );
+    try t.expectSemanticError(
+        \\ let t1: {number, number, name: string} = {1, 2}
+    );
+}
+
+test "fn alias enforces arity at call sites" {
+    try t.expectSemanticError(
+        \\ type F = fn(num, num) -> num
+        \\ fn apply(f: F) f(1)
+    );
+}
+
+test "unknown table field reads are errors" {
+    try t.expectSemanticError(
+        \\ let t = { name = "me" }
+        \\ t.a
+    );
+    try t.expectSemanticError(
+        \\ let t = { name = "me" }
+        \\ t[:a]
+    );
+    try t.expectSemanticError(
+        \\ let t = { name = "me" }
+        \\ t["a"]
+    );
+}
+
+test "assigned and dynamic fields are not flagged" {
+    // static assign extends the known shape
+    try t.topNumber(
+        \\ let t = {}
+        \\ t.a = 41
+        \\ t.a
+    , 41);
+    // dynamic keys make the shape unknown: optimistic, no error
+    try t.topNumber(
+        \\ const k = "a"
+        \\ const t = {}
+        \\ t[k] = 41
+        \\ t[k]
+    , 41);
+    // mutations through closures escape analysis: optimistic, no error
+    try t.topNumber(
+        \\ const out = {}
+        \\ const f = fn(k) out[k] = 1
+        \\ f("a")
+        \\ out["a"]
+    , 1);
+    // foreign tables have unknown shapes: optimistic, no error
+    try t.topNumber(
+        \\ fn f(t: table) t.a
+        \\ f({a = 41})
+    , 41);
+}
+
+test "typed function params accept correct types" {
+    try t.topNumber(
+        \\ const add = fn(a: num, b: num) a + b
+        \\ add(3, 4)
+    , 7);
+}
+
+test "typed function rejects wrong arg types" {
+    try t.expectSemanticError(
+        \\ const add = fn(a: num, b: num) a + b
+        \\ add(3, "wrong")
+    );
+    try t.expectSemanticError(
+        \\ const add = fn(a: num, b: num) a + b
+        \\ add("wrong", 4)
+    );
+}
+
+test "atom union alias accepts literal and alias value in calls" {
+    try t.topAtom(
+        \\ type A = :one | :two
+        \\ fn pick(how: A) -> any do
+        \\   how
+        \\ end
+        \\ let pred: A = :one
+        \\ pick(pred)
+    , "one");
+
+    try t.topAtom(
+        \\ type A = :one | :two
+        \\ fn pick(how: A) -> any do
+        \\   how
+        \\ end
+        \\ let pred: A = :one
+        \\ pick(:two)
+    , "two");
+}
+
+test "binary num + num emits add" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let a: num = 5
+        \\ let b: num = 3
+        \\ a + b
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add) saw_add = true;
+    }
+    try std.testing.expect(saw_add);
+}
+
+test "negate num emits negate" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let x: num = 5
+        \\ let y = -x
+        \\ y
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_neg = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .negate) saw_neg = true;
+    }
+    try std.testing.expect(saw_neg);
+}
+
+test "comparison num == num emits eq_int" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let a: num = 5
+        \\ let b: num = 5
+        \\ a == b
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_eq = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .eq_int) saw_eq = true;
+    }
+    try std.testing.expect(saw_eq);
+}
+
+test "untyped code still works" {
+    try t.topNumber("1 + 2 * 3", 7);
+    try t.topNumber(
+        \\ let x = 10
+        \\ x + 5
+    , 15);
+    try t.topString(
+        \\ let s = "hello"
+        \\ s
+    , "hello");
+}
+
+test "nested function with typed params" {
+    try t.topNumber(
+        \\ const outer = fn(x: num) do
+        \\     const inner = fn(y: num) y * 2
+        \\     inner(x) + 1
+        \\ end
+        \\ outer(5)
+    , 11);
+}
+
+test "function call with multiple typed params" {
+    try t.topNumber(
+        \\ const calc = fn(a: num, b: num, c: num) do
+        \\     a + b + c
+        \\ end
+        \\ calc(1, 2.5, 3)
+    , 6.5);
+}
+
+test "return type validation accepts correct type" {
+    try t.topNumber(
+        \\ const get_num = fn() -> num do
+        \\     return 42
+        \\ end
+        \\ get_num()
+    , 42);
+}
+
+//
+// typed const bindings
+//
+test "typed const and global bindings accept and reject" {
+    try t.topNumber(
+        \\ const x: num = 42
+        \\ x
+    , 42);
+    try t.topString(
+        \\ const s: string = "hello"
+        \\ s
+    , "hello");
+    try t.expectSemanticError(
+        \\ const x: num = "hello"
+    );
+    try t.topNumber(
+        \\ global x: num = 42
+        \\ x
+    , 42);
+}
+
+//
+// type alias at call sites
+//
+test "type aliases work in function params" {
+    try t.topNumber(
+        \\ type MyInt = num
+        \\ const double = fn(x: MyInt) -> MyInt x * 2
+        \\ double(21)
+    , 42);
+    try t.topNumber(
+        \\ type Num = num
+        \\ const add = fn(a: Num, b: Num) -> num a + b
+        \\ add(3, 4)
+    , 7);
+}
+
+test "type alias used in binding" {
+    try t.topString(
+        \\ type Name = string
+        \\ let s: Name = "alice"
+        \\ s
+    , "alice");
+}
+
+test "type alias rejects type not in union" {
+    try t.expectSemanticError(
+        \\ type MyInt = num
+        \\ const x: MyInt = "string"
+    );
+}
+
+//
+// named union variants with payloads
+//
+test "named union variants match to ok and err" {
+    try t.topAtom(
+        \\ type Result = :ok | :err
+        \\ match 0
+        \\ | 0 => :ok
+        \\ | _ => :err
+    , "ok");
+    try t.topAtom(
+        \\ type Result = :ok | :err
+        \\ match 1
+        \\ | 0 => :ok
+        \\ | _ => :err
+    , "err");
+}
+
+//
+// return type validation
+//
+test "return type mismatch detects wrong explicit return" {
+    try t.expectSemanticError(
+        \\ fn get() -> num do
+        \\     return "hello"
+        \\ end
+    );
+}
+
+test "explicit returns match the return type" {
+    try t.topNumber(
+        \\ fn get() -> num do
+        \\     return 42
+        \\ end
+        \\ get()
+    , 42);
+}
+
+//
+// if/else branch type unification
+//
+test "if/else typed branches unify" {
+    try t.topNumber(
+        \\ let x: num = 5
+        \\ let y = if x > 0 10 else 20
+        \\ y
+    , 10);
+    try t.topString(
+        \\ let x: num = 0
+        \\ let y = if x > 0 "pos" else "non-pos"
+        \\ y
+    , "non-pos");
+    try t.topNumber(
+        \\ let x: num = 5
+        \\ let y = unless x > 0 10 else 20
+        \\ y
+    , 20);
+    try t.topString(
+        \\ let x: num = 0
+        \\ let y = unless x > 0 "pos" else "non-pos"
+        \\ y
+    , "pos");
+}
+
+//
+// string indexing
+//
+test "string indexing and slicing" {
+    try t.topString(
+        \\ let s: string = "hello"
+        \\ s[0]
+    , "h");
+    try t.topString(
+        \\ let s: string = "hello"
+        \\ s[1..4]
+    , "ell");
+    try t.topString(
+        \\ let s: string = "abcdef"
+        \\ s[5..-1..1]
+    , "fedc");
+    try t.topString(
+        \\ let s: string = "hello"
+        \\ s[..4]
+    , "hell");
+    try t.topString(
+        \\ let s: string = "hello"
+        \\ s[2..]
+    , "llo");
+    try t.topString(
+        \\ let s: string = "hello"
+        \\ s[..]
+    , "hello");
+    try t.topString(
+        \\ let s: string = "abcdef"
+        \\ s[0..2..5]
+    , "ace");
+    try t.topString(
+        \\ let s: string = "abc"
+        \\ s[2..2]
+    , "");
+}
+//
+// any type accepts everything
+//
+test "any accepts num, table, and bindings" {
+    try t.topNumber(
+        \\ const id = fn(x: any) x
+        \\ id(42)
+    , 42);
+    try t.topNumber(
+        \\ const get = fn(t: any, k: any) t[k]
+        \\ get({x = 99}, :x)
+    , 99);
+    try t.topNumber(
+        \\ let x: any = 42
+        \\ let y: any = "str"
+        \\ let z: any = {a = 1}
+        \\ x
+    , 42);
+}
+
+//
+// block type propagation
+//
+test "block types propagate last expr and reject mismatch" {
+    try t.topNumber(
+        \\ let x: num = do
+        \\     let a = 1
+        \\     let b = 2
+        \\     a + b
+        \\ end
+        \\ x
+    , 3);
+    try t.expectSemanticError(
+        \\ let x: num = do
+        \\     "hello"
+        \\ end
+    );
+}
+
+//
+// chained typed ops preserve specialization
+//
+test "chained typed math emits add and mul" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let a: num = 1
+        \\ let b: num = 2
+        \\ let c: num = 3
+        \\ a + b * c
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add = false;
+    var saw_mul = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add) saw_add = true;
+        if (inst.op == .mul) saw_mul = true;
+    }
+    try std.testing.expect(saw_add);
+    try std.testing.expect(saw_mul);
+}
+
+//
+// type alias union with multiple atom variants
+//
+test "multi-atom union alias in match" {
+    try t.topAtom(
+        \\ type Color = :red | :green | :blue
+        \\ match :red
+        \\ | :red => :green
+        \\ | :green => :red
+        \\ | _ => :blue
+    , "green");
+}
+
+test "multi-atom union fn param accepts valid atom" {
+    try t.topAtom(
+        \\ type Color = :red | :green
+        \\ fn pick(c: Color) c
+        \\ pick(:green)
+    , "green");
+}
+
+//
+// void / nil type
+//
+test "nil and void bindings return nil" {
+    try t.topNil(
+        \\ fn nothing() do :nil end
+        \\ nothing()
+    );
+    try t.topNil(
+        \\ let x: any = :nil
+        \\ x
+    );
+}
+
+test "assignments respect annotations" {
+    try t.expectSemanticError(
+        \\ let x: num = 5
+        \\ x = "hello"
+    );
+    try t.topString(
+        \\ let x = 5
+        \\ x = "hello"
+        \\ x
+    , "hello");
+}
+
+//
+// bool type
+//
+test "bool bindings accept bool and stay bool" {
+    try t.topTrue(
+        \\ let b: bool = 1 == 1
+        \\ b
+    );
+    try t.expectSemanticError(
+        \\ let b: bool = 42
+    );
+    try t.topFalse(
+        \\ let b: bool = not (1 == 1)
+        \\ b
+    );
+}
+
+test "implicit return validates block-local variable type" {
+    try t.expectSemanticError(
+        \\ fn f() -> num do
+        \\   let x = "hello"
+        \\   x
+        \\ end
+    );
+}
+
+test "loop expression infers correct return type" {
+    try t.expectSemanticError(
+        \\ fn f() -> string do
+        \\   for i in 0..10 do i end
+        \\ end
+    );
+}
+
+test "upvalue assignment respects type annotation" {
+    try t.expectSemanticError(
+        \\ const outer = fn() do
+        \\     let x: num = 5
+        \\     const inner = fn() do x = "hello" end
+        \\ end
+    );
+}
+
+test "dynamic callee validates argument types" {
+    try t.expectCompileError(
+        \\ const f: function = fn(x: num) x
+        \\ f("hello")
+    , .ParseError);
+}
+test "for loop expression produces loop atom" {
+    try t.topAtom(
+        \\ fn f() do
+        \\   for i in 0..5 do i end
+        \\ end
+        \\ f()
+    , "loop");
+    try t.topNumber(
+        \\ fn f() -> num do
+        \\   for/l i in 0..5 do
+        \\     if i == 4 break/l(i)
+        \\   end
+        \\ end
+        \\ f()
+    , 4);
+}
+
+test "type alias gets unaliased" {
+    try t.topTrue(
+        \\ type Als =
+        \\       {:aa, num}
+        \\     | {:bb, num}
+        \\
+        \\ let x: Als = {:aa, 55}
+        \\ let y: Als = {:bb, 100.1}
+        \\
+        \\ x[1] + y[1] == 155.1
+    );
+}
+test "comp block infers num from literal" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let x = comp 42
+        \\ x + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "never collapses in if and orelse inference" {
+    // `panic` is `never`: a branch that diverges contributes no type
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .number }, types.inferIfType(.{ .tag = .never }, .{ .tag = .number }));
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .number }, types.inferIfType(.{ .tag = .number }, .{ .tag = .never }));
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .never }, types.inferIfType(.{ .tag = .never }, .{ .tag = .never }));
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .number }, types.inferOrelseType(.{ .tag = .never }, .{ .tag = .number }));
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .number }, types.inferOrelseType(.{ .tag = .number }, .{ .tag = .never }));
+    // unknown left stays unknown: the value may be anything or diverge
+    try std.testing.expectEqual(types.TypeInfo{ .tag = .any }, types.inferOrelseType(.{ .tag = .any }, .{ .tag = .never }));
+}
+
+test "never arms don't poison match result type" {
+    // the panic arm is `never`: the match result is the `:ok` payload (num),
+    // so `?` on it is rejected as a non-result (it would pass as `.any`)
+    try t.expectSemanticError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let r = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic(e)
+        \\ r?
+    );
+}
+
+test "match narrowing works for call subjects" {
+    // the subject is a call, not an ident: `v` still narrows to the payload
+    // type (from the fn's declared return) and `v + 1` emits add_imm
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ fn g() -> Res do {:ok, 42} end
+        \\ match g()
+        \\ | {:ok, v} => v + 1
+        \\ | {:err, _} => 0
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "match narrowing enables specialized add_imm from table union payload" {
+    // `v` narrows to num so `v + 1` emits add_imm
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v + 1
+        \\ | {:err, _} => 0
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "match ascriptions narrow to the annotated type" {
+    // `v: num` narrows even with an `any` subject
+    //   ; so `v + 1` emits add_imm
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ let x: any = {41}
+        \\ match x
+        \\ | {v: num} => v + 1
+        \\ | _ => 0
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "non-exhaustive match" {
+    try t.expectSemanticError(
+        \\ let n: num = 1
+        \\ let x: num = match n
+        \\ | 1 => 2
+        \\ | 2 => 3
+    );
+
+    // partial result match carries :nil in its type
+    try t.expectSemanticError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+    );
+
+    // wildcard match has no :nil
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | 1 => 10
+        \\ | _ => 20
+        \\ x
+    , 20);
+
+    // exhaustive bool match has no :nil
+    try t.topNumber(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ x
+    , 10);
+
+    // exhaustive result match has no :nil
+    try t.topNumber(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y: num = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ y
+    , 42);
+
+    // ascribed arm can cover the subject
+    try t.topNumber(
+        \\ let n: num = 5
+        \\ let x: num = match n
+        \\ | v: num => v
+        \\ x
+    , 5);
+
+    // exhaustive bool match is precise, not any
+    // `let s: string` only fails when x is exactly num; any would compile
+    try t.expectSemanticError(
+        \\ let b = 1 == 1
+        \\ let x: num = match b
+        \\ | :true => 10
+        \\ | :false => 20
+        \\ let s: string = x
+    );
+
+    // exhaustive result match is precise, not any
+    try t.expectSemanticError(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ let y = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+        \\ let s: string = y
+    );
+
+    // never arm does not widen match to any
+    try t.expectSemanticError(
+        \\ type R = {:ok, num} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ let s: string = a
+    );
+
+    // any payload propagates through match
+    // annotation wins over the literal:
+    // x may later hold {:ok, "str"},
+    //   so v is any and the match is any
+    //
+    // narrowing to num would be unsound
+    try t.topNumber(
+        \\ type R = {:ok, any} | {:err, string}
+        \\ let x: R = {:ok, 1}
+        \\ let a = match x
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic()
+        \\ a
+    , 1);
+
+    // non-exhaustive match still yields :nil at runtime
+    try t.topNil(
+        \\ match 99
+        \\ | 1 => 2
+        \\ | 2 => 3
+    );
+}
+
+test "non exhaustiveness warnings" {
+    // non-exhaustive match warns w uncovered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , ":err");
+
+    // partial literal match warns for subject type
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "number");
+
+    // exhaustive match warns nothing
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
+
+    // wildcard match warns nothing"
+    try t.expectNoWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+        \\ | _ => 3
+    );
+}
+
+test "dead match arms" {
+    // wildcard first cuts later arms off
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable");
+
+    // duplicate literal
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 10
+        \\ | 1 => 20
+        \\ | _ => 0
+    , "unreachable");
+
+    // covered tag
+    try t.expectWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, _} => 1
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    , "unreachable");
+
+    // bool-exhaustive arms kill the wildcard
+    try t.expectWarning(
+        \\ let b = 1 == 1
+        \\ match b
+        \\ | :true => 1
+        \\ | :false => 2
+        \\ | _ => 3
+    , "unreachable");
+
+    // disjoint pattern never fires
+    try t.expectWarning(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "never matches");
+}
+
+test "comma arms" {
+    try t.topString(
+        \\ match 2
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "hit");
+    try t.topString(
+        \\ match 3
+        \\ | 1, 2 => "hit"
+        \\ | _ => "miss"
+    , "miss");
+    // share bindings
+    try t.topString(
+        \\ type R = {:ok, string} | {:err, string}
+        \\ let x: R = {:err, "boom"}
+        \\ match x
+        \\ | {:ok, v}, {:err, v} => v
+        \\ | _ => "none"
+    , "boom");
+    // comma arm with guard
+    try t.topString(
+        \\ match 7
+        \\ | 1, 2 => "low"
+        \\ | v when v > 5 => "high"
+        \\ | _ => "mid"
+    , "high");
+}
+
+test "match warning codes" {
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | _ => 1
+        \\ | 1 => 2
+    , "unreachable-match-arm");
+
+    try t.expectWarningCode(
+        \\ let n: num = 1
+        \\ match n
+        \\ | :ok => 1
+        \\ | _ => 2
+    , "impossible-match-arm");
+
+    try t.expectWarningCode(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "non-exhaustive-match");
+}
+
+test "match suggestion" {
+    // uncovered tag becomes a named arm, not a wildcard
+    try t.expectSuggestion(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+    , "| {:err, _} => :nil");
+
+    // the suggested arm closes the warning
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => :nil
+    );
+
+    // infinite domains fall back to a wildcard arm
+    try t.expectSuggestion(
+        \\ let n: num = 1
+        \\ match n
+        \\ | 1 => 2
+    , "| _ => :nil");
+
+    try t.expectNoWarning(
+        \\ type Res = {:ok, num} | {:err, string}
+        \\ let x: Res = {:ok, 42}
+        \\ match x
+        \\ | {:ok, v} => v
+        \\ | {:err, _} => 0
+    );
+}
+
+test "error codes" {
+    // type mismatch carries its code
+    try t.expectErrorCode(
+        \\ let x: num = "hi"
+    , "type-mismatch");
+
+    // unknown name carries its code
+    try t.expectErrorCode("aaa\n", "unknown-name");
+}
+
+test "return type propagation: const binding with annotated fn" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ const add = fn(a: num, b: num) a + b
+        \\ let x = add(3, 4)
+        \\ x + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "return type propagation: fn five() 5" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn five() 5
+        \\ let x = five()
+        \\ x + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "annotated function return type propagates to caller via pointer" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn add(a: num, b: num) a + b
+        \\ let x = add(3, 4)
+        \\ x + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+//
+// generics / type_var tests
+//
+
+fn testRuntime() revo.Runtime {
+    return .{
+        .alloc = std.testing.allocator,
+        .io = std.testing.io,
+        .diag_alloc = std.testing.allocator,
+        .diag_arena = null,
+    };
+}
+
+test "types: type_var equality" {
+    const TI = lang.compiler.types.TypeInfo;
+    const a = TI{ .tag = .{ .type_var = "T" } };
+    const b = TI{ .tag = .{ .type_var = "T" } };
+    const c = TI{ .tag = .{ .type_var = "U" } };
+    try std.testing.expect(a.eql(b));
+    try std.testing.expect(!a.eql(c));
+    try std.testing.expect(!a.eql(.{ .tag = .number }));
+}
+
+test "types: type_var coercion" {
+    const tv = types.TypeInfo{ .tag = .{ .type_var = "T" } };
+    try std.testing.expect(types.canCoerce(tv, .{ .tag = .number }));
+    try std.testing.expect(types.canCoerce(.{ .tag = .number }, tv));
+    try std.testing.expect(types.canCoerce(tv, .{ .tag = .any }));
+    try std.testing.expect(types.canCoerce(.{ .tag = .any }, tv));
+    try std.testing.expect(types.canCoerce(tv, tv));
+}
+
+test "substituteTypeParams resolves vars and sigs" {
+    var subst = std.StringHashMap(types.TypeInfo).init(alloc);
+    defer subst.deinit();
+
+    const unbound = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
+    try std.testing.expect(unbound.eql(.{ .tag = .any }));
+
+    try subst.put("T", .{ .tag = .number });
+    const bound = try types.substituteTypeParams(alloc, types.TypeInfo{ .tag = .{ .type_var = "T" } }, subst);
+    try std.testing.expect(bound.eql(.{ .tag = .number }));
+
+    const sig = try alloc.create(types.FunctionSignature);
+    sig.* = .{
+        .params = &.{types.TypeInfo{ .tag = .{ .type_var = "T" } }},
+        .return_type = types.TypeInfo{ .tag = .{ .type_var = "T" } },
+        .param_names = &.{"x"},
+    };
+    const input = types.TypeInfo{ .tag = .{ .function = sig } };
+    const result = try types.substituteTypeParams(alloc, input, subst);
+    try std.testing.expect(result.tag == .function);
+    try std.testing.expect(result.tag.function.params.len == 1);
+    try std.testing.expect(result.tag.function.params[0].eql(.{ .tag = .number }));
+    try std.testing.expect(result.tag.function.return_type.eql(.{ .tag = .number }));
+    alloc.destroy(sig);
+    alloc.free(result.tag.function.params);
+    alloc.destroy(result.tag.function);
+}
+
+test "generics identity fn enables add_imm" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn id[T](x: T) x
+        \\ let y = id(42)
+        \\ y + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "generics identity fn with string compiles and runs" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn id[T](x: T) x
+        \\ id("hello")
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+}
+
+test "generics compound return type {:ok, T} propagates inner type" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn wrap[T](x: T) -> {:ok, T} {:ok, x}
+        \\ let r = wrap(42)
+        \\ r[1] + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+}
+
+test "generics multiple type params with table return compile" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn pair[T, U](a: T, b: U) -> {T, U}
+        \\ pair(1, "hi")
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+}
+
+test "generics non-inferrable type param (return-only) compiles" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn make[T]() 5
+        \\ make()
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+}
+
+test "generics repeated type param works" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ fn same[T](a: T, b: T) a
+        \\ let x = same(42, 99)
+        \\ x + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "explicit call-site type args resolve return types" {
+    try t.topNumber(
+        \\ fn make[T]() -> T 5
+        \\ make[num]()
+    , 5);
+    try t.topNumber(
+        \\ fn id[T](x: T) -> T x
+        \\ id[num](42)
+    , 42);
+}
+
+test "return-only type param stays any without explicit args" {
+    // T appears only in the return, so a bare call leaves it unbound (any)
+    // and a string binding compiles; it still runs fine
+    try t.topNumber(
+        \\ fn make[T](x) -> T return x
+        \\ let y = make(1)
+        \\ let s: string = y
+        \\ y
+    , 1);
+    // shape-bound params still infer without any explicit args
+    try t.expectSemanticError(
+        \\ fn id[T](x: T) x
+        \\ let y = id(42)
+        \\ let s: string = y
+    );
+}
+
+test "implicit generics" {
+    try t.topNumber(
+        \\ fn v2_new(x, y) { x = x, y = y }
+        \\ let t = v2_new(1, 2)
+        \\ t.x + t.y
+    , 3);
+    try t.expectSemanticError(
+        \\ fn v2_new(x, y) { x = x, y = y }
+        \\ let t = v2_new(1, 2)
+        \\ let s: string = t.x
+    );
+    try t.expectSemanticError(
+        \\ fn v2_new(x, y) { x = x, y = y }
+        \\ let u: { x: string } = v2_new(1, 2)
+    );
+    //
+    // atom and string args keep precise types
+    try t.topString(
+        \\ fn v2_new(x, y) { x = x, y = y }
+        \\ let t = v2_new(:hi, "str here")
+        \\ t.y
+    , "str here");
+    try t.expectSemanticError(
+        \\ fn v2_new(x, y) { x = x, y = y }
+        \\ let t = v2_new(:hi, "str here")
+        \\ let n: num = t.x
+    );
+    //
+    // unannotated identity specializes return
+    try t.topNumber(
+        \\ fn id(x) x
+        \\ let y = id(42)
+        \\ y + 1
+    , 43);
+    try t.expectSemanticError(
+        \\ fn id(x) x
+        \\ let y = id(42)
+        \\ let s: string = y
+    );
+    //
+    // constructor field specializes"
+    try t.topString(
+        \\ fn Hi(field) { field = field, get_field = fn(self) self.field }
+        \\ const t = Hi("hi")
+        \\ t.field
+    , "hi");
+    try t.expectSemanticError(
+        \\ fn Hi(field) { field = field, get_field = fn(self) self.field }
+        \\ const t = Hi("hi")
+        \\ let n: num = t.field
+    );
+}
+
+//
+// stdlib signatures flow from the semantic checker through the
+// annotation bridge into the compiler
+//
+
+test "stdlib sigs: method return types reach the compiler" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ "abc":len() + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "stdlib sigs: global return types reach the compiler" {
+    // semantic knows cwd/read from the os iface; misuse that compiled
+    // against .any now errors before codegen
+    try t.expectSemanticError(
+        \\ let x = cwd()
+        \\ let n: num = x
+    );
+    try t.expectSemanticError(
+        \\ let x = read({delimiter = :eof})
+        \\ let n: num = x?
+    );
+}
+
+test "stdlib sigs source fn shadows stdlib global" {
+    try t.topNumber(
+        \\ const cwd = fn(x: num) x + 1
+        \\ cwd(41)
+    , 42);
+    try t.expectSemanticError(
+        \\ const cwd = fn(x: num) x + 1
+        \\ cwd("nope")
+    );
+}
+
+test "stdlib sigs variadic global keeps accepting extra args" {
+    try t.topString("fmt(\"%v\", 1, 2, 3)", "1");
+    try t.expectSemanticError(
+        \\ fmt()
+    );
+}
+
+test "stdlib sigs untyped call still validates arg count" {
+    try t.expectSemanticError(
+        \\ cwd("nope", "more")
+    );
+}
+
+test "stdlib sigs: module field calls resolve to spec sigs" {
+    try t.topAtom("fs.exists?(\"/definitely/not/a/real/path_xyz\")", "false");
+    try t.topNumber(
+        \\ table.len({1, 2}) + 1
+    , 3);
+    try t.topTrue("let b: bool = fs.exists?(\"/tmp\")");
+}
+
+test "stdlib sigs: module result flows through match" {
+    try t.topAtom(
+        \\ let r = fs.open("/definitely/not/a/real/path_xyz")
+        \\ match r | {:ok, f} => :found | {:err, e} => e
+    , "FileNotFound");
+}
+
+test "stdlib sigs: local binding shadows stdlib module" {
+    // `fs` here is a local table, not the module
+    // no stdlib sig is applied, and the missing field fails at compile time
+    // (it can never work, so no point waiting for runtime)
+    // so this is EXACTLY what we want. it gets erased
+    try t.expectSemanticError(
+        \\ let fs = {}
+        \\ fs.exists?("/tmp")
+    );
+}
+test "stdlib sigs: orelse unwraps results" {
+    try t.topTrue("fs.exists?(\"/tmp\")");
+    try t.topNumber("{:err, \"boom\"} orelse 5", 5);
+}
+
+test "stdlib sigs: try rejects non-result unions" {
+    // `?` on it is a lie
+    try t.expectSemanticError(
+        \\ "abc":find("b")?
+    );
+}
+
+test "stdlib sigs: match narrows call-subject payloads" {
+    // the subject is a call, not an ident: the payload still narrows to
+    // bool, so the match result is bool (not a result) and `?` is rejected
+    try t.expectSemanticError(
+        \\ (match fs.open("/tmp")
+        \\ | {:ok, v} => v
+        \\ | {:err, e} => panic(e))?
+    );
+}
+
+test "eu.rv: result types flow end to end" {
+    // the predicate binds as bool, while result calls still bind as !T
+    // and flow through match on both arms
+    try t.topTrue(
+        \\ let x: bool = fs.exists?("/tmp")
+        \\ x
+    );
+    try t.topAtom(
+        \\ let r = fs.open("/definitely/not/a/real/path_xyz")
+        \\ match r | {:err, e} => e | _ => :found
+    , "FileNotFound");
+    try t.topAtom(
+        \\ let x: {:ok, table} | {:err, any} = fs.open("/tmp")
+        \\ match x | {:ok, t} => :found | {:err, e} => e
+    , "found");
+}
+
+test "error-union sugar and the literal form are the same union" {
+    // `!table` and `{:ok, table} | {:err, any}` are structurally identical, so
+    // a value typed with one can be bound to a slot typed with the other
+    try t.topAtom(
+        \\ let x: {:ok, table} | {:err, any} = {:ok, {}}
+        \\ let y: !table = x
+        \\ match y | {:ok, t} => :found | {:err, e} => e
+    , "found");
+}
+
+//
+// ambient declares
+//
+
+test "declare typed const is usable in type positions" {
+    try t.topNumber(
+        \\ declare MAX_ITEMS = num
+        \\ const x: MAX_ITEMS = 5
+        \\ x
+    , 5);
+}
+
+test "declare fn calls typecheck and run into undefined variable" {
+    try t.expectRuntimeError(
+        \\ declare lamp = fn(volume: num, label: string) -> bool
+        \\ lamp(1, "x")
+    , .UndefinedVariable);
+}
+
+test "declare fn return type reaches the compiler" {
+    var vm = try VM.init(testRuntime());
+    defer vm.deinit();
+
+    const built = try lang.build(&vm, .{
+        .text =
+        \\ declare add = fn(a: num, b: num) -> num
+        \\ add(1, 2) + 1
+        ,
+    }, .{});
+    try std.testing.expect(built == .ok);
+    defer vm.runtime.alloc.free(built.ok.instructions);
+    defer vm.runtime.alloc.free(built.ok.spans);
+
+    var saw_add_imm = false;
+    for (built.ok.instructions) |inst| {
+        if (inst.op == .add_imm) saw_add_imm = true;
+    }
+    try std.testing.expect(saw_add_imm);
+}
+
+test "declare rejects duplicate names" {
+    try t.expectSemanticError(
+        \\ declare MAX_ITEMS = num
+        \\ declare MAX_ITEMS = num
+    );
+}
+
+test "declare rejects non-top-level placement" {
+    try t.expectSemanticError(
+        \\ fn f() do
+        \\     declare y = num
+        \\ end
+    );
+}
+
+test "dotted pub type resolves bare in the same file" {
+    try t.topNumber(
+        \\ pub type geo.Port = num
+        \\ const p: Port = 8080
+        \\ p
+    , 8080);
+}
+
+test "dotted pub type in .d.rv resolves qualified by import" {
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "shapes.d.rv", .data = "pub type geo.Point = num\n" },
+    });
+    defer m.deinit();
+    try t.topNumberInDir(
+        m.dir,
+        "import \"shapes.d.rv\"\nconst p: shapes.Point = 7\np\n",
+        7,
+    );
+    try t.expectCompileErrorInDir(
+        m.dir,
+        "import \"shapes.d.rv\"\nconst p: shapes.Point = \"x\"\n",
+    );
+}
+
+test "manifest dotted macros rescope under the import name" {
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "m.d.rv", .data =
+        \\pub macro q.shout! `(%w:expr)` `%w`
+        \\pub proc q.add3!(iter) do
+        \\  let a = iter:next()
+        \\  let b = iter:next()
+        \\  let c = iter:next()
+        \\  {{:binary, :add, {:binary, :add, a, b}, c}}
+        \\end
+        },
+    });
+    defer m.deinit();
+    try t.topNumberInDir(
+        m.dir,
+        "import \"m.d.rv\"\nm.shout!(40) + m.add3!(10, 20, 10)\n",
+        80,
+    );
+}
+
+test "stdlib dotted type resolves qualified, unknown qualified errors" {
+    try t.topNumber(
+        \\ const u: uri.Hi = {n = "x"}
+        \\ 1
+    , 1);
+    try t.expectSemanticError(
+        \\ const u: uri.Hi = 2
+    );
+    try t.expectSemanticError(
+        \\ const u: uri.Bogus = 1
+    );
+}
+
+test ".d.rv import typechecks calls and never executes the file" {
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "audio.d.rv", .data = "pub declare ring = fn(volume: num, label: string) -> bool\nundefined_poison()\n" },
+    });
+    defer m.deinit();
+    // build succeeds (semantic extracted the sig); runtime only fails on the
+    // empty module table - the poison call inside the file never ran
+    try t.expectRuntimeErrorInDir(
+        m.dir,
+        "import \"audio.d.rv\"\naudio.ring(1, \"x\")\n",
+        .NotAFunction,
+    );
+}
+
+test "manifest .d.rv types .so imports, sig fallback without one" {
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "fake.so", .data = "" },
+        .{ .path = "fake.d.rv", .data = "pub declare open = fn(path: string) -> string\n" },
+    });
+    defer m.deinit();
+    const source_name = try std.Io.Dir.path.join(std.testing.allocator, &.{ m.dir, "<source>" });
+    defer std.testing.allocator.free(source_name);
+
+    const source = "import \"fake.so\"\nfake.open(5)\n";
+
+    // manifest present: the wrong-arg call is a compile error
+    {
+        var vm = try VM.init(t.runtime());
+        defer vm.deinit();
+        vm.module_dir = m.dir;
+        const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{ .install_debug_info = false });
+        switch (result) {
+            .ok => return error.ExpectedCompileFailure,
+            .err => |f| switch (f) {
+                .semantic, .lower => vm.runtime.resetDiagArena(),
+                .expand, .parse => return error.ExpectedCompileFailure,
+            },
+        }
+    }
+
+    // manifest gone: no sigs to synthesize from, the call compiles untyped
+    try m.tmp.dir.deleteFile(std.testing.io, "fake.d.rv");
+    {
+        var vm = try VM.init(t.runtime());
+        defer vm.deinit();
+        vm.module_dir = m.dir;
+        const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{ .install_debug_info = false });
+        switch (result) {
+            .ok => |artifact| {
+                std.testing.allocator.free(artifact.instructions);
+                std.testing.allocator.free(artifact.spans);
+            },
+            .err => return error.ExpectedCompileSuccess,
+        }
+    }
+}
+

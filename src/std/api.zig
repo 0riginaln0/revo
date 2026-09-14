@@ -291,14 +291,14 @@ fn renderSignatureInner(w: *std.Io.Writer, spec: FnSpec, strip_method: bool) !vo
         try w.writeAll(p.name);
         if (p.type_name) |tn| {
             try w.writeAll(": ");
-            try revo.lang.type_serde.printTypeExpr(tn, w);
+            try revo.lang.ast.printTypeExpr(tn, w);
         }
         if (p.variadic) try w.writeAll("...");
     }
     try w.writeAll(")");
     if (f.return_type) |r| {
         try w.writeAll(" -> ");
-        try revo.lang.type_serde.printTypeExpr(r, w);
+        try revo.lang.ast.printTypeExpr(r, w);
     }
 }
 
@@ -347,7 +347,7 @@ pub const FnSpec = struct {
         for (self.type_params) |tp| alloc.free(tp);
         alloc.free(self.type_params);
 
-        revo.lang.type_serde.freeTypeExpr(alloc, self.type);
+        revo.lang.ast.freeTypeExpr(alloc, self.type);
         alloc.free(self.doc);
     }
 };
@@ -504,8 +504,8 @@ fn declSpecInner(alloc: std.mem.Allocator, alias: ast.TypeAlias, doc: ?[]const u
     for (alias.declare_tps, owned_tps) |tp, *dst| dst.* = try alloc.dupe(u8, tp);
     errdefer for (owned_tps) |tp| alloc.free(tp);
 
-    const type_tree = try revo.lang.type_serde.cloneTypeExpr(alloc, alias.type_expr);
-    errdefer revo.lang.type_serde.freeTypeExpr(alloc, type_tree);
+    const type_tree = try revo.lang.ast.cloneTypeExpr(alloc, alias.type_expr);
+    errdefer revo.lang.ast.freeTypeExpr(alloc, type_tree);
 
     const is_type = force_type or type_tree.kind != .function;
     var doc_text: []const u8 = "";
@@ -514,7 +514,7 @@ fn declSpecInner(alloc: std.mem.Allocator, alias: ast.TypeAlias, doc: ?[]const u
         defer doc_buf.deinit();
         try doc_buf.writer.writeAll("alias for\n```revo\n");
 
-        try revo.lang.type_serde.printTypeExpr(type_tree, &doc_buf.writer);
+        try revo.lang.ast.printTypeExpr(type_tree, &doc_buf.writer);
         try doc_buf.writer.writeAll("\n```");
 
         if (doc) |d| {
@@ -570,7 +570,7 @@ fn declSpecRaw(alloc: std.mem.Allocator, alias: ast.TypeAlias, doc: ?[]const u8)
         .name = try alloc.dupe(u8, alias.name),
         .head = .{ .kind = .global },
         .type_params = &.{},
-        .type = try revo.lang.type_serde.cloneTypeExpr(alloc, alias.type_expr),
+        .type = try revo.lang.ast.cloneTypeExpr(alloc, alias.type_expr),
         .is_type = true,
         .doc = doc_text,
         .f = undefined,
@@ -816,10 +816,10 @@ test "parseGroup round trip: sig, params, doc, variadic, core key" {
     try testing.expectEqualStrings("unwrap_err", unwrap_err.name);
     var ubuf = std.Io.Writer.Allocating.init(testing.allocator);
     defer ubuf.deinit();
-    try revo.lang.type_serde.printTypeExpr(unwrap_err.type.kind.function.params[0].type_name.?, &ubuf.writer);
+    try revo.lang.ast.printTypeExpr(unwrap_err.type.kind.function.params[0].type_name.?, &ubuf.writer);
     try testing.expectEqualStrings("{:err, T}", ubuf.written());
     ubuf.clearRetainingCapacity();
-    try revo.lang.type_serde.printTypeExpr(unwrap_err.type.kind.function.return_type.?, &ubuf.writer);
+    try revo.lang.ast.printTypeExpr(unwrap_err.type.kind.function.return_type.?, &ubuf.writer);
     try testing.expectEqualStrings("T", ubuf.written());
     try testing.expect(!isVariadic(&unwrap_err));
 
@@ -844,7 +844,7 @@ test "parseGroup round trip: sig, params, doc, variadic, core key" {
     try testing.expect(isVariadic(&maybe));
     var mbuf = std.Io.Writer.Allocating.init(testing.allocator);
     defer mbuf.deinit();
-    try revo.lang.type_serde.printTypeExpr(maybe.type.kind.function.params[0].type_name.?, &mbuf.writer);
+    try revo.lang.ast.printTypeExpr(maybe.type.kind.function.params[0].type_name.?, &mbuf.writer);
     try testing.expectEqualStrings("table", mbuf.written());
 }
 
@@ -882,7 +882,7 @@ test "parseGroup collects pub type as type-only alias" {
     try testing.expect(port.is_type);
     var pbuf = std.Io.Writer.Allocating.init(testing.allocator);
     defer pbuf.deinit();
-    try revo.lang.type_serde.printTypeExpr(port.type, &pbuf.writer);
+    try revo.lang.ast.printTypeExpr(port.type, &pbuf.writer);
     try testing.expectEqualStrings("num", pbuf.written());
 
     const open = specs[1];

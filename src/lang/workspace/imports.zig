@@ -1,0 +1,238 @@
+//! import resolution: paths, dep ids, module symbols
+
+const std = @import("std");
+
+const revo = @import("revo");
+
+const ast = @import("../ast.zig");
+const common = @import("common.zig");
+const Parser = @import("../Parser.zig");
+const pipeline = @import("../pipeline.zig");
+const txt = @import("text.zig");
+const types = @import("../compiler/types.zig");
+
+const W = @import("../Workspace.zig");
+const Workspace = W.Workspace;
+const FileId = W.FileId;
+const Symbol = W.Symbol;
+
+/// import path to an open file, checking both source dir and project root
+pub fn resolveOpenImport(
+    self: *Workspace,
+    source_name: []const u8,
+    raw_path: []const u8,
+    mode: pipeline.RunMode,
+    project_root: []const u8,
+) ?FileId {
+    if (resolveImportPath(self, source_name, raw_path)) |resolved| {
+        defer self.alloc.free(resolved);
+        if (self.file_names.get(resolved)) |id| return id;
+    }
+    if (mode == .project and project_root.len > 0) {
+        if (resolveImportPath(self, project_root, raw_path)) |resolved| {
+            defer self.alloc.free(resolved);
+            if (self.file_names.get(resolved)) |id| return id;
+        }
+    }
+    return null;
+}
+
+/// resolve a relative import path to an absolute one; appends .rv if missing
+fn resolveImportPath(
+    self: *Workspace,
+    source_name: []const u8,
+    raw_path: []const u8,
+) ?[]const u8 {
+    const base_dir = std.Io.Dir.path.dirname(source_name) orelse ".";
+    // strip leading ./ from relative paths so join produces a clean path
+    var clean = raw_path;
+    while (clean.len >= 2 and clean[0] == '.' and clean[1] == '/') clean = clean[2..];
+    const joined = if (std.Io.Dir.path.isAbsolute(clean))
+        self.alloc.dupe(u8, clean) catch return null
+    else
+        std.Io.Dir.path.join(self.alloc, &.{ base_dir, clean }) catch return null;
+    const ext = std.Io.Dir.path.extension(joined);
+    if (ext.len != 0 and isLibExtension(ext)) {
+        // a shared library import is described by its sibling manifest
+        const manifest = revo.extensionManifestPath(self.alloc, joined) catch {
+            self.alloc.free(joined);
+            return null;
+        };
+        self.alloc.free(joined);
+        return manifest;
+    }
+    if (ext.len != 0) return joined;
+    const with_ext = std.fmt.allocPrint(self.alloc, "{s}.rv", .{joined}) catch {
+        self.alloc.free(joined);
+        return null;
+    };
+    self.alloc.free(joined);
+    return with_ext;
+}
+
+/// shared library extensions; the type interface for these is a sibling manifest
+fn isLibExtension(ext: []const u8) bool {
+    return std.mem.eql(u8, ext, ".so") or
+        std.mem.eql(u8, ext, ".dylib") or
+        std.mem.eql(u8, ext, ".dll");
+}
+
+/// given a file and the name of an import binding, return the symbols
+/// exported by the imported module. relies on file stem matching the
+/// auto-derived import binding name (the common case for bare imports)
+pub fn importedModuleSymbols(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    file_id: FileId,
+    name: []const u8,
+) ![]const Symbol {
+    const dep_id = resolveDepId(self, alloc, file_id, name) orelse return &.{};
+    return symbolsFromDep(self, alloc, dep_id);
+}
+
+/// copy symbols from a resolved dep file id (caller frees)
+pub fn symbolsFromDep(self: *Workspace, alloc: std.mem.Allocator, dep_id: FileId) ![]const Symbol {
+    var dep_analysis = try self.inspectDetailed(alloc, dep_id, .{});
+    defer dep_analysis.deinit(alloc);
+
+    const src = dep_analysis.symbols;
+    var out = try std.ArrayList(Symbol).initCapacity(alloc, src.len);
+
+    // params resolve for hover/definition but are not module members;
+    // without this they render their definition line as phantom members
+    for (src) |s| {
+        if (s.kind == .param) continue;
+        try out.append(alloc, .{
+            .name = try alloc.dupe(u8, s.name),
+            .kind = s.kind,
+            .range = s.range,
+            .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
+            .field_values = if (s.field_values) |fvs| try common.cloneFieldPreviews(alloc, fvs) else null,
+        });
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+/// TODO: botch. kill commit after e6f877ea when structural tables exist
+/// walk asdf of file_id looking for `const <name> = import '<path>'`
+/// and return the resolved import path (caller frees)
+pub fn findImportPathForBinding(self: *Workspace, alloc: std.mem.Allocator, file_id: FileId, name: []const u8) ?[]const u8 {
+    const snap = self.snapshot(file_id) orelse return null;
+    // the buffer usually ends mid-access (`mod.<cursor>`)
+    //   , which never parses
+    //     : retry once without the last line, where imports live
+    const texts: [2][]const u8 = .{ snap.text, txt.stripLastLine(snap.text) };
+    for (texts) |text| {
+        const parsed = Parser.parseSourceReport(alloc, text) catch continue;
+        const root = switch (parsed) {
+            .ok => |n| n,
+            .err => continue,
+        };
+        defer alloc.destroy(root);
+        const result = FindImportVisitor.find(root, name) orelse continue;
+        return alloc.dupe(u8, result) catch null;
+    }
+    return null;
+}
+
+const FindImportVisitor = struct {
+    target: []const u8,
+    result: ?[]const u8,
+
+    fn find(root: *const ast.Node, name: []const u8) ?[]const u8 {
+        var visitor = FindImportVisitor{ .target = name, .result = null };
+        ast.walkAST(FindImportVisitor, &visitor, root);
+        return visitor.result;
+    }
+
+    pub fn visit(self: *@This(), node: *const ast.Node) void {
+        if (self.result != null) return;
+        if (node.expr == .decl) {
+            const d = node.expr.decl;
+            if (d.inner.expr == .binding) {
+                const b = d.inner.expr.binding;
+                if (b.target.expr == .ident and std.mem.eql(u8, b.target.expr.ident, self.target)) {
+                    if (b.value.expr == .import_stmt) {
+                        self.result = b.value.expr.import_stmt.path;
+                    }
+                }
+            }
+        }
+        // bare `import "path"`: auto-bound name is the path stem
+        if (node.expr == .import_stmt) {
+            const stmt = node.expr.import_stmt;
+            if (std.mem.eql(u8, autoImportName(stmt.path), self.target)) {
+                self.result = stmt.path;
+            }
+        }
+        ast.walkAST(FindImportVisitor, self, node);
+    }
+};
+
+/// auto-bound name for a bare `import "path"`, mirroring Parser
+fn autoImportName(path: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, path, ".d.rv")) return path[0 .. path.len - ".d.rv".len];
+    return std.Io.Dir.path.stem(path);
+}
+
+pub fn resolveDepId(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    file_id: FileId,
+    mod_name: []const u8,
+) ?FileId {
+    const deps = self.dependencyClosure(alloc, file_id) catch return null;
+    defer alloc.free(deps);
+    for (deps) |dep_id| {
+        const dep_snap = self.snapshot(dep_id) orelse continue;
+        if (txt.moduleFileNameMatches(dep_snap.name, mod_name)) return dep_id;
+    }
+
+    // fallback: resolve via const binding import path
+    const import_path = findImportPathForBinding(self, alloc, file_id, mod_name) orelse return null;
+    defer alloc.free(import_path);
+    const snap = self.snapshot(file_id) orelse return null;
+    const file_entry = self.entryPtr(file_id) catch return null;
+
+    return resolveOpenImportOrOpen(self, snap.name, import_path, .project, file_entry.project_root);
+}
+
+/// resolve an import and open the file from disk if not already open, checking
+/// both the source dir and project root; returns null if not found or unreadable
+pub fn resolveOpenImportOrOpen(
+    self: *Workspace,
+    source_name: []const u8,
+    raw_path: []const u8,
+    mode: pipeline.RunMode,
+    project_root: []const u8,
+) ?FileId {
+    if (resolveImportPath(self, source_name, raw_path)) |resolved| {
+        defer self.alloc.free(resolved);
+        if (self.file_names.get(resolved)) |id| return id;
+        if (openFromDisk(self, resolved)) |id| return id;
+    }
+    if (mode == .project and project_root.len > 0) {
+        if (resolveImportPath(self, project_root, raw_path)) |resolved| {
+            defer self.alloc.free(resolved);
+            if (self.file_names.get(resolved)) |id| return id;
+            if (openFromDisk(self, resolved)) |id| return id;
+        }
+    }
+    return null;
+}
+
+/// read a file from disk and open it in the workspace. requires vm with I/O.
+fn openFromDisk(self: *Workspace, path: []const u8) ?FileId {
+    const vm = self.vm orelse return null;
+    const io = vm.runtime.io;
+    const text = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        self.alloc,
+        .limited(std.math.maxInt(usize)),
+    ) catch return null;
+
+    defer self.alloc.free(text);
+    _ = self.open(path, text, .{}) catch return null;
+    return self.file_names.get(path);
+}

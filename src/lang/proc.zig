@@ -1,15 +1,14 @@
 const std = @import("std");
 
 const diagnostic = @import("./diagnostic.zig");
-const lang = @import("./root.zig");
 const revo = @import("revo");
 const Data = revo.Data;
 
-const ast = lang.ast;
+const ast = @import("ast.zig");
 const Expr = ast.Expr;
 const Node = ast.Node;
 const Span = ast.Span;
-const compiler = lang.compiler;
+const compiler = @import("compiler/root.zig");
 
 pub const ExpandError = error{
     InvalidProcReturn,
@@ -68,12 +67,6 @@ fn buildReport(
         .source_name = report_source_name,
         .source = source,
     };
-}
-
-pub fn expandExpr(vm: *revo.VM, allocator: std.mem.Allocator, expr: *Node) ExpandError!*Node {
-    var env = ProcEnv.init(allocator);
-    defer env.deinit();
-    return expandInEnv(vm, allocator, expr, &env, .expand);
 }
 
 pub fn expandExprWithSource(
@@ -1216,10 +1209,11 @@ test "proc macro can use comp inside body" {
 
 test "recursive proc macro is rejected for now" {
     if (true) return error.SkipZigTest; // noisy
+    const pipeline = @import("pipeline.zig");
     var vm = try revo.VM.init(testing.runtime());
     defer vm.deinit();
 
-    try std.testing.expectError(error.RecursiveProcMacro, lang.build(&vm, .{
+    try std.testing.expectError(error.RecursiveProcMacro, pipeline.build(&vm, .{
         .text =
         \\ proc loop!(iter) do
         \\   comp (1 + 1)

@@ -159,7 +159,7 @@ pub fn readRegsAll(inst: *const ir.IrInst, out: []Register) usize {
 const std = @import("std");
 
 const revo = @import("revo");
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("../compiler/root.zig").Compiler;
 const Opcode = revo.opcode.Opcode;
 const Register = revo.opcode.Register;
 const ir = @import("root.zig");
@@ -414,9 +414,9 @@ pub fn dceIr(self: *Compiler) !void {
     try ir.compactIr(self, n, live);
 }
 
-const testing = revo.lang.testing;
+const pipeline = @import("../pipeline.zig");
+const testing = @import("../testing.zig");
 const t = testing;
-const lang = revo.lang;
 const VM = revo.VM;
 
 fn testRuntime() revo.Runtime {
@@ -432,7 +432,7 @@ test "dce: arithmetic with unused result is eliminated" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\let _ = 1 + 2
         \\42
     }, .{});
@@ -565,7 +565,7 @@ test "dce: side-effecting calls are never eliminated" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\fn f() 42
         \\let _ = f()
         \\1
@@ -588,7 +588,7 @@ test "dce: dead move after break is eliminated" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\loop do
         \\  break
         \\  99
@@ -609,7 +609,7 @@ test "dce: dead statements after a break are eliminated" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\do
         \\  1 + 2
         \\  42
@@ -630,7 +630,7 @@ test "dce: folded constants and dead operands are both removed" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\let _ = (1 + 2) * 3
         \\42
     }, .{});

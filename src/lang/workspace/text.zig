@@ -1,0 +1,353 @@
+//! text and position utilities for the workspace
+//! owns the shared vocabulary (FileId, Position, Range, Location) so
+//! providers import one leaf instead of the whole workspace
+
+const std = @import("std");
+
+const ast = @import("../ast.zig");
+const Lexer = @import("../Lexer.zig");
+const Parser = @import("../Parser.zig");
+
+pub const FileId = u32;
+
+pub const Position = struct {
+    line: u32,
+    character: u32,
+};
+
+pub const Range = struct {
+    start: Position,
+    end: Position,
+};
+
+pub const Location = struct {
+    file_id: FileId,
+    name: []const u8,
+    range: Range,
+};
+
+/// extract a single source line by line index (1-based)
+pub fn sourceLine(src: []const u8, line: u32) []const u8 {
+    var pos: usize = 0;
+    var cur: u32 = 1;
+    while (cur < line and pos < src.len) {
+        if (src[pos] == '\n') cur += 1;
+        pos += 1;
+    }
+    const end = std.mem.findScalarPos(u8, src, pos, '\n') orelse src.len;
+    return src[pos..end];
+}
+
+pub fn positionToOffset(src: []const u8, pos: Position) ?usize {
+    var line: u32 = 1;
+    var col: u32 = 1;
+    for (src, 0..) |ch, idx| {
+        if (line == pos.line and col == pos.character) return idx;
+        if (ch == '\n') {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    if (line == pos.line and col == pos.character) return src.len;
+    return null;
+}
+
+pub fn offsetToPosition(src: []const u8, offset: usize) Position {
+    var line: u32 = 1;
+    var col: u32 = 1;
+    var i: usize = 0;
+    while (i < offset and i < src.len) : (i += 1) {
+        if (src[i] == '\n') {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    return .{ .line = line, .character = col };
+}
+
+pub fn wordAtPosition(src: []const u8, pos: Position) ?[]const u8 {
+    const offset = positionToOffset(src, pos) orelse return null;
+    if (offset >= src.len) return null;
+    var start = offset;
+    while (start > 0 and isWordChar(src[start - 1])) start -= 1;
+    var end = offset;
+    while (end < src.len and isWordChar(src[end])) end += 1;
+    if (end <= start) return null;
+    return src[start..end];
+}
+
+pub fn isWordChar(c: u8) bool {
+    // `?`/`!` suffix names (`exists?`) are single identifiers
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '?' or c == '!';
+}
+
+/// the whole word under pos, wherever the cursor sits inside it
+pub fn wordRangeAt(src: []const u8, pos: Position) ?Range {
+    const offset = positionToOffset(src, pos) orelse return null;
+    if (offset >= src.len) return null;
+    var start = offset;
+    while (start > 0 and isWordChar(src[start - 1])) start -= 1;
+    var end = offset;
+    while (end < src.len and isWordChar(src[end])) end += 1;
+    if (end <= start) return null;
+    return .{
+        .start = offsetToPosition(src, start),
+        .end = offsetToPosition(src, end),
+    };
+}
+
+pub fn positionBefore(a: Position, b: Position) bool {
+    return a.line < b.line or (a.line == b.line and a.character <= b.character);
+}
+
+pub fn containsId(items: []const FileId, id: FileId) bool {
+    for (items) |item|
+        if (item == id) return true;
+
+    return false;
+}
+
+/// does a dep file serve as the module named `name`? plain modules match by
+/// stem (`foo.rv` -> `foo`), lib manifests by `<name>.d.rv`
+pub fn moduleFileNameMatches(snap_name: []const u8, name: []const u8) bool {
+    const base = std.Io.Dir.path.basename(snap_name);
+    const ext = std.Io.Dir.path.extension(snap_name);
+    if (std.mem.eql(u8, std.Io.Dir.path.stem(snap_name), name)) return true;
+    if (ext.len > 0 and std.mem.endsWith(u8, base, ".d.rv") and
+        std.mem.eql(u8, base[0 .. base.len - 5], name)) return true;
+    return false;
+}
+
+/// text before the final newline
+/// : the in-progress line cannot parse
+///   , so dep lookups during completion ignore it
+pub fn stripLastLine(src: []const u8) []const u8 {
+    const trimmed = std.mem.trimEnd(u8, src, "\r\n");
+    const idx = std.mem.findScalarLast(u8, trimmed, '\n') orelse return "";
+    return trimmed[0..idx];
+}
+
+/// strip leading `pub ` from a line
+pub fn stripPub(line: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, line, "pub ")) return line[4..];
+    return line;
+}
+
+/// if the word at pos is a member of an import binding (`mod.member`),
+/// return the module name
+pub fn moduleMemberAt(src: []const u8, pos: Position) ?[]const u8 {
+    const offset = positionToOffset(src, pos) orelse return null;
+    var start = offset;
+    while (start > 0 and isWordChar(src[start - 1])) start -= 1;
+    if (start >= offset) return null;
+    var i = start;
+    while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\t')) i -= 1;
+    if (i == 0 or src[i - 1] != '.') return null;
+    i -= 1;
+    while (i > 0 and (src[i - 1] == ' ' or src[i - 1] == '\t')) i -= 1;
+    var mod_start = i;
+    while (mod_start > 0 and isWordChar(src[mod_start - 1])) mod_start -= 1;
+    if (mod_start >= i) return null;
+    return src[mod_start..i];
+}
+
+/// result from text scan for a call at cursor
+pub const CallAtPos = struct {
+    name: []const u8,
+    active_param: u32,
+};
+
+/// scan backward from pos to find the enclosing function call, return
+/// the callee name and which argument the cursor is inside
+pub fn findCallAtPosition(src: []const u8, pos: Position) ?CallAtPos {
+    const offset = positionToOffset(src, pos) orelse return null;
+    if (offset == 0 or offset > src.len) return null;
+
+    var depth: i32 = 0;
+    var i = offset;
+    if (i == src.len) i -= 1;
+    while (i > 0) : (i -= 1) {
+        switch (src[i]) {
+            ')' => depth += 1,
+            '(' => {
+                if (depth == 0) {
+                    var start = i;
+                    while (start > 0 and isWordChar(src[start - 1])) start -= 1;
+                    if (start < i) {
+                        const name = src[start..i];
+                        var active: u32 = 0;
+                        var j = i + 1;
+                        var inner_depth: i32 = 0;
+                        while (j < offset) : (j += 1) {
+                            switch (src[j]) {
+                                '(' => inner_depth += 1,
+                                ')' => inner_depth -= 1,
+                                ',' => {
+                                    if (inner_depth == 0) active += 1;
+                                },
+                                else => {},
+                            }
+                        }
+                        return .{ .name = name, .active_param = active };
+                    }
+                }
+                if (depth > 0) depth -= 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// walk ast to build a map of byte offset -> semantic token type
+pub fn buildASTSpanMap(arena: std.mem.Allocator, source: []const u8) ?std.AutoHashMap(usize, u32) {
+    const parsed = Parser.parseSourceReport(arena, source) catch return null;
+    const root = switch (parsed) {
+        .ok => |n| n,
+        .err => return null,
+    };
+    var map = std.AutoHashMap(usize, u32).init(arena);
+    walkRoles(root, &map) catch return null;
+    return map;
+}
+
+fn walkRoles(n: *const ast.Node, m: *std.AutoHashMap(usize, u32)) !void {
+    switch (n.expr) {
+        .call => |c| {
+            try walkRoles(c.callee, m);
+            switch (c.callee.expr) {
+                .ident => try m.put(c.callee.span.start, @intFromEnum(Lexer.TokenClass.function)),
+                .field => |f| try m.put(c.callee.span.end - f.name.len, @intFromEnum(Lexer.TokenClass.function)),
+                else => {},
+            }
+            if (c.implicit_self and c.callee.expr == .field)
+                try m.put(c.callee.span.end - c.callee.expr.field.name.len - 1, @intFromEnum(Lexer.TokenClass.function));
+            for (c.args) |a| try walkRoles(a, m);
+        },
+        .binding => |b| {
+            if (b.target.expr == .ident)
+                try m.put(b.target.span.start, if (b.value.expr == .fn_expr) @intFromEnum(Lexer.TokenClass.function) else @intFromEnum(Lexer.TokenClass.variable));
+            try walkRoles(b.value, m);
+        },
+        .field => |f| {
+            try m.put(n.span.end - f.name.len, @intFromEnum(Lexer.TokenClass.variable));
+            try walkRoles(f.object, m);
+        },
+        .unary => |u| try walkRoles(u.expr, m),
+        .binary => |b| {
+            try walkRoles(b.left, m);
+            try walkRoles(b.right, m);
+        },
+        .and_expr => |v| {
+            try walkRoles(v.left, m);
+            try walkRoles(v.right, m);
+        },
+        .or_expr => |v| {
+            try walkRoles(v.left, m);
+            try walkRoles(v.right, m);
+        },
+        .orelse_expr => |v| {
+            try walkRoles(v.left, m);
+            try walkRoles(v.right, m);
+        },
+        .if_expr => |v| {
+            try walkRoles(v.condition, m);
+            try walkRoles(v.then_expr, m);
+            if (v.else_expr) |e| try walkRoles(e, m);
+        },
+        .unless_expr => |v| {
+            try walkRoles(v.condition, m);
+            try walkRoles(v.then_expr, m);
+            if (v.else_expr) |e| try walkRoles(e, m);
+        },
+        .index => |idx| {
+            try walkRoles(idx.object, m);
+            try walkRoles(idx.key, m);
+        },
+        .return_expr => |v| {
+            if (v) |e| try walkRoles(e, m);
+        },
+        .break_expr => |v| {
+            if (v.value) |e| try walkRoles(e, m);
+        },
+        .match_expr => |v| {
+            try walkRoles(v.subject, m);
+            for (v.arms) |arm| {
+                for (arm.matchers) |matcher| {
+                    if (matcher == .expr) try walkRoles(matcher.expr, m);
+                }
+                if (arm.guard) |g| try walkRoles(g, m);
+                try walkRoles(arm.then, m);
+            }
+        },
+        .for_loop => |v| {
+            try walkRoles(v.iter, m);
+            try walkRoles(v.body, m);
+        },
+        .while_loop => |v| {
+            try walkRoles(v.predicate, m);
+            try walkRoles(v.body, m);
+        },
+        .loop_expr => |v| try walkRoles(v.body, m),
+        .labeled_block => |v| try walkRoles(v.body, m),
+        .range_literal => |v| {
+            try walkRoles(v.start, m);
+            try walkRoles(v.end, m);
+        },
+        .table => |entries| {
+            for (entries) |e| {
+                if (e.key) |k| try walkRoles(k, m);
+                try walkRoles(e.value, m);
+            }
+        },
+        .comp_block => |v| try walkRoles(v.expr, m),
+        .block => |exprs| {
+            for (exprs) |e| try walkRoles(e, m);
+        },
+        .try_expr => |inner| try walkRoles(inner, m),
+        .test_block => |v| try walkRoles(v.body, m),
+        .test_suite => |v| try walkRoles(v.body, m),
+        .assign_expr => |a| try walkRoles(a.value, m),
+        .compound_assign => |a| {
+            try walkRoles(a.target, m);
+            try walkRoles(a.value, m);
+        },
+        .decl => |d| try walkRoles(d.inner, m),
+        .fn_expr => |f| try walkRoles(f.body, m),
+        else => {},
+    }
+}
+
+test "offset roundtrips through position" {
+    const src = "ab\ncd";
+    try std.testing.expectEqual(@as(?usize, 0), positionToOffset(src, .{ .line = 1, .character = 1 }));
+    try std.testing.expectEqual(@as(?usize, 3), positionToOffset(src, .{ .line = 2, .character = 1 }));
+    try std.testing.expectEqual(Position{ .line = 2, .character = 1 }, offsetToPosition(src, 3));
+}
+
+test "sourceLine picks 1-based lines" {
+    const src = "one\ntwo\nthree";
+    try std.testing.expectEqualStrings("two", sourceLine(src, 2));
+}
+
+test "word utils include ? suffix" {
+    const src = "exists? foo";
+    try std.testing.expectEqualStrings("exists?", wordAtPosition(src, .{ .line = 1, .character = 2 }).?);
+    const r = wordRangeAt(src, .{ .line = 1, .character = 2 }).?;
+    try std.testing.expectEqual(@as(u32, 1), r.start.character);
+    try std.testing.expectEqual(@as(u32, 8), r.end.character);
+}
+
+test "stripLastLine drops in-progress line" {
+    try std.testing.expectEqualStrings("a", stripLastLine("a\nb"));
+}
+
+test "module file matches stem and manifest" {
+    try std.testing.expect(moduleFileNameMatches("foo.rv", "foo"));
+    try std.testing.expect(moduleFileNameMatches("foo.d.rv", "foo"));
+    try std.testing.expect(!moduleFileNameMatches("bar.rv", "foo"));
+}

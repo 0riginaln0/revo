@@ -2,17 +2,16 @@ const std = @import("std");
 
 const revo = @import("revo");
 const Data = revo.Data;
-const Compiler = revo.lang.compiler.Compiler;
+const root = @import("root.zig");
+const Compiler = root.Compiler;
 
 const ast = @import("../ast.zig");
 const Node = ast.Node;
 const Opcode = revo.opcode.Opcode;
+const flow = @import("flow.zig");
 const ir = @import("../ir/root.zig");
-const root = @import("root.zig");
 const state = @import("state.zig");
 const toRegister = state.toRegister;
-const type_check = @import("type_check.zig");
-const type_serde = @import("../type_serde.zig");
 const types_mod = @import("types.zig");
 
 pub const BindingKind = enum { global, let, con };
@@ -64,9 +63,9 @@ pub fn compileLocalBinding(
     state.markLocalInitialized(self, slot);
 
     const inferred_type = if (type_name) |tn|
-        try type_serde.evalTypeExpr(self, tn)
+        try types_mod.evalTypeExpr(self.check(), tn)
     else
-        type_check.inferExprType(self, value);
+        self.inferExprType( value);
 
     try state.setLocalTypeHint(self, name, inferred_type);
     if (type_name != null) {
@@ -94,11 +93,7 @@ pub fn bindDeclaredPattern(
         },
         .table_pattern => |items| {
             for (items, 0..) |item, idx| {
-                const mv_dst = try state.pushRegister(self);
-                try self.spans.append(self.alloc, self.active_span);
-                _ = try self.record(.move, &.{.{ .reg = try toRegister(source_idx) }}, true, mv_dst, 0);
-                try self.emit(.load_small_int, idx);
-                try self.emit(.table_get, 0);
+                try flow.fetchPatternElem(self, .{ .reg = source_idx }, idx);
                 try bindDeclaredPattern(self, item, self.active_registers - 1, kind);
             }
         },
@@ -171,25 +166,15 @@ pub fn bindPattern(
                 switch (item.expr) {
                     .ident => |name| {
                         if (ast.isDiscardName(name)) continue;
-                        const mv_dst2 = try state.pushRegister(self);
-                        try self.spans.append(self.alloc, self.active_span);
-                        _ = try self.record(.move, &.{.{ .reg = try toRegister(source_idx) }}, true, mv_dst2, 0);
-
-                        try self.emit(.load_small_int, idx);
-                        try self.emit(.table_get, 0);
+                        try flow.fetchPatternElem(self, .{ .reg = source_idx }, idx);
 
                         try self.emit(
                             if (is_mutable) .store_global else .store_global_const,
                             try self.vm.internAtom(name),
                         );
                     },
-                    .table_pattern => {
-                        const mv_dst2 = try state.pushRegister(self);
-                        try self.spans.append(self.alloc, self.active_span);
-                        _ = try self.record(.move, &.{.{ .reg = try toRegister(source_idx) }}, true, mv_dst2, 0);
-
-                        try self.emit(.load_small_int, idx);
-                        try self.emit(.table_get, 0);
+                    .table_pattern, .ascribed => {
+                        try flow.fetchPatternElem(self, .{ .reg = source_idx }, idx);
 
                         try bindPattern(self, item, self.active_registers - 1, kind);
                     },
@@ -211,11 +196,88 @@ pub fn compileAssign(
         .table_pattern => |items| {
             try validateTablePatternShape(self, items, value, "assignment");
         },
-        else => return compileAssignSimple(self, target, value),
+        else => return compileAssignInner(self, target, value, null),
     }
     try self.compile(value, true);
     const src_idx = self.active_registers - 1;
     return bindPattern(self, target, src_idx, .let);
+}
+
+pub fn compileCompound(
+    self: *Compiler,
+    target: *const Node,
+    op: ast.BinOp,
+    value: *const Node,
+) !void {
+    return compileAssignInner(self, target, value, op);
+}
+
+/// shared assign core: with op the old value loads first and folds through
+/// computeCompoundNew, without op the value compiles directly.
+/// either way NEW ends on stack top and the tail stores it
+fn compileAssignInner(
+    self: *Compiler,
+    target: *const Node,
+    value: *const Node,
+    op: ?ast.BinOp,
+) !void {
+    switch (target.expr) {
+        .ident => |name| {
+            if (op) |o| {
+                try self.compile(target, true);
+                try computeCompoundNew(self, o, target, value);
+            } else try self.compile(value, true);
+            try storeIdentTop(self, name, target, value);
+        },
+        .field => |field| {
+            const key_atom = try self.vm.internAtom(field.name);
+            try self.compile(field.object, true);
+            try self.regDupe();
+            if (op) |o| {
+                try self.emit(.table_get_atom, key_atom);
+                try computeCompoundNew(self, o, target, value);
+            } else try self.compile(value, true);
+
+            try finishAtomStore(self, field.object, key_atom, field.name, value);
+        },
+        .index => |index| {
+            try self.compile(index.object, true);
+            if (index.key.expr == .hash) {
+                const key_atom = try self.vm.internAtom(index.key.expr.hash);
+                try self.regDupe();
+                if (op) |o| {
+                    try self.emit(.table_get_atom, key_atom);
+                    try computeCompoundNew(self, o, target, value);
+                } else try self.compile(value, true);
+
+                try finishAtomStore(self, index.object, key_atom, index.key.expr.hash, value);
+            } else {
+                // evaluate object + key once; re-materialize them after the
+                // set so the get doesn't re-evaluate either operand
+                try self.compile(index.key, true);
+                const obj_inst = self.value_stack.items[self.value_stack.items.len - 2];
+                const key_inst = self.value_stack.items[self.value_stack.items.len - 1];
+                if (op) |o| {
+                    // keep the originals alive across the load: the get
+                    // consumes its operands, and the later set needs them again
+                    try pushPairMoves(self, obj_inst, key_inst);
+                    try self.emit(.table_get, 0);
+                    try computeCompoundNew(self, o, target, value);
+                } else try self.compile(value, true);
+
+                try finishIndexStore(self, index.object, index.key, obj_inst, key_inst, value);
+            }
+        },
+        else => {
+            // all bullshit like == or |
+            const msg = try std.fmt.allocPrint(
+                self.alloc,
+                "bad assignment target: {s}",
+                .{@tagName(target.expr)},
+            );
+            return self.fail(.InvalidAssignmentTarget, target, msg);
+        },
+    }
 }
 
 pub fn validateTablePatternShape(
@@ -243,53 +305,6 @@ pub fn validateTablePatternShape(
     return self.fail(.ParseError, value, msg);
 }
 
-fn compileAssignSimple(
-    self: *Compiler,
-    target: *const Node,
-    value: *const Node,
-) !void {
-    switch (target.expr) {
-        .ident => |name| {
-            try self.compile(value, true);
-            try storeIdentTop(self, name, target, value);
-        },
-        .field => |field| {
-            try self.compile(field.object, true);
-            try self.regDupe();
-            try self.compile(value, true);
-
-            try finishAtomStore(self, field.object, try self.vm.internAtom(field.name), field.name, value);
-        },
-        .index => |index| {
-            try self.compile(index.object, true);
-            if (index.key.expr == .hash) {
-                const key_atom = try self.vm.internAtom(index.key.expr.hash);
-                try self.regDupe();
-                try self.compile(value, true);
-
-                try finishAtomStore(self, index.object, key_atom, index.key.expr.hash, value);
-            } else {
-                // evaluate object + key once; re-materialize them after the
-                // set so the get doesn't re-evaluate either operand
-                try self.compile(index.key, true);
-                const obj_inst = self.value_stack.items[self.value_stack.items.len - 2];
-                const key_inst = self.value_stack.items[self.value_stack.items.len - 1];
-                try self.compile(value, true);
-
-                try finishIndexStore(self, index.object, index.key, obj_inst, key_inst, value);
-            }
-        },
-        else => {
-            const msg = try std.fmt.allocPrint(
-                self.alloc,
-                "bad assignment target: {s}",
-                .{@tagName(target.expr)},
-            );
-            return self.fail(.InvalidAssignmentTarget, target, msg);
-        },
-    }
-}
-
 /// NEW is on stack top
 /// . dup it and store to an ident with the same
 ///   const and declared checks as plain assignment
@@ -300,7 +315,7 @@ fn storeIdentTop(self: *Compiler, name: []const u8, target: *const Node, hint_no
             return self.fail(.CompileError, target, "reassignment to constant!");
 
         try self.emit(.store_local, slot);
-        const inferred_type = type_check.inferExprType(self, hint_node);
+        const inferred_type = self.inferExprType( hint_node);
 
         try state.setLocalTypeHint(self, name, inferred_type);
     } else if (try state.resolveUpvalue(self, name)) |slot| {
@@ -370,8 +385,8 @@ fn finishIndexStore(self: *Compiler, object: *const Node, key: *const Node, obj_
 /// OLD is on stack top. folds int rhs into an immediate when both sides
 /// are numeric, else compiles rhs and emits the binop.
 fn computeCompoundNew(self: *Compiler, op: ast.BinOp, target: *const Node, value: *const Node) !void {
-    const left_type = type_check.inferExprType(self, target);
-    const right_type = type_check.inferExprType(self, value);
+    const left_type = self.inferExprType( target);
+    const right_type = self.inferExprType( value);
     const both_numeric = op != .concat and left_type.tag == .number and right_type.tag == .number;
     if (both_numeric) {
         if (root.immOpFor(op)) |op_imm| {
@@ -399,58 +414,6 @@ fn pushPairMoves(self: *Compiler, obj_inst: *ir.IrInst, key_inst: *ir.IrInst) !v
     try moveInstTo(self, obj_dst, obj_inst);
 }
 
-pub fn compileCompound(
-    self: *Compiler,
-    target: *const Node,
-    op: ast.BinOp,
-    value: *const Node,
-) !void {
-    switch (target.expr) {
-        .ident => |name| {
-            try self.compile(target, true);
-            try computeCompoundNew(self, op, target, value);
-            try storeIdentTop(self, name, target, value);
-        },
-        .field => |field| {
-            const key_atom = try self.vm.internAtom(field.name);
-            try self.compile(field.object, true);
-            try self.regDupe();
-            try self.emit(.table_get_atom, key_atom);
-            try computeCompoundNew(self, op, target, value);
-            try finishAtomStore(self, field.object, key_atom, field.name, value);
-        },
-        .index => |index| {
-            try self.compile(index.object, true);
-            if (index.key.expr == .hash) {
-                const key_atom = try self.vm.internAtom(index.key.expr.hash);
-                try self.regDupe();
-                try self.emit(.table_get_atom, key_atom);
-                try computeCompoundNew(self, op, target, value);
-                try finishAtomStore(self, index.object, key_atom, index.key.expr.hash, value);
-            } else {
-                try self.compile(index.key, true);
-                const obj_inst = self.value_stack.items[self.value_stack.items.len - 2];
-                const key_inst = self.value_stack.items[self.value_stack.items.len - 1];
-                // keep the originals alive across the load: the get
-                // consumes its operands, and the later set needs them again
-                try pushPairMoves(self, obj_inst, key_inst);
-                try self.emit(.table_get, 0);
-                try computeCompoundNew(self, op, target, value);
-                try finishIndexStore(self, index.object, index.key, obj_inst, key_inst, value);
-            }
-        },
-        else => {
-            // all bullshit like == or |
-            const msg = try std.fmt.allocPrint(
-                self.alloc,
-                "bad assignment target: {s}",
-                .{@tagName(target.expr)},
-            );
-            return self.fail(.InvalidAssignmentTarget, target, msg);
-        },
-    }
-}
-
 // push a move of an earlier stack value into a specific top register
 fn moveInstTo(self: *Compiler, dst: revo.opcode.Register, src: *ir.IrInst) !void {
     try self.spans.append(self.alloc, self.active_span);
@@ -466,7 +429,7 @@ fn widenLocalTableHint(self: *Compiler, object: *const Node, field_name: []const
     const name = object.expr.ident;
     const hint = state.resolveLocalTypeHint(self, name) orelse return;
     if (hint.tag != .table) return;
-    const field_type = type_check.inferExprType(self, value);
+    const field_type = self.inferExprType( value);
     const old = if (hint.tag.table.fields) |fs| fs else &[_]types_mod.RecordField{};
     var widened = hint;
     if (types_mod.findFieldIndex(old, field_name)) |i| {

@@ -1,11 +1,10 @@
 // zlint-disable line-length -- yeah
-const lang = @import("./root.zig");
 const std = @import("std");
 
-const ast = lang.ast;
+const ast = @import("ast.zig");
 const Node = ast.Node;
 const Span = ast.Span;
-const pipeline = lang.pipeline;
+const Parser = @import("Parser.zig");
 
 pub const ExpandError = error{
     UnsupportedMacroPattern,
@@ -195,166 +194,6 @@ fn substitutePlaceholders(
     return ast.walkExpr(allocator, expr, SubstCtx, .{ .span = span, .replacements = replacements });
 }
 
-pub const AstSubstituter = struct {
-    allocator: std.mem.Allocator,
-    replacements: *const std.StringHashMap(*Node),
-
-    pub fn substitute(self: *const AstSubstituter, node: *Node) ExpandError!*Node {
-        return switch (node.expr) {
-            .ident => |name| self.replacements.get(name) orelse node,
-            .unary => |u| try self.alloc(node.span, .{
-                .unary = .{ .op = u.op, .expr = try self.substitute(u.expr) },
-            }),
-            .binary => |b| try self.alloc(node.span, .{
-                .binary = .{
-                    .op = b.op,
-                    .left = try self.substitute(b.left),
-                    .right = try self.substitute(b.right),
-                },
-            }),
-            .and_expr => |v| try self.alloc(node.span, .{
-                .and_expr = .{
-                    .left = try self.substitute(v.left),
-                    .right = try self.substitute(v.right),
-                },
-            }),
-            .or_expr => |v| try self.alloc(node.span, .{
-                .or_expr = .{
-                    .left = try self.substitute(v.left),
-                    .right = try self.substitute(v.right),
-                },
-            }),
-            .call => |c| blk: {
-                var args = try std.ArrayList(*Node).initCapacity(self.allocator, c.args.len);
-                defer args.deinit(self.allocator);
-                for (c.args) |arg| try args.append(self.allocator, try self.substitute(arg));
-                break :blk try self.alloc(node.span, .{
-                    .call = .{
-                        .callee = try self.substitute(c.callee),
-                        .args = try args.toOwnedSlice(self.allocator),
-                        .implicit_self = c.implicit_self,
-                        .type_args = c.type_args,
-                    },
-                });
-            },
-            .field => |f| try self.alloc(node.span, .{
-                .field = .{ .object = try self.substitute(f.object), .name = f.name },
-            }),
-            .index => |i| try self.alloc(node.span, .{
-                .index = .{ .object = try self.substitute(i.object), .key = try self.substitute(i.key) },
-            }),
-            .if_expr => |v| try self.alloc(node.span, .{
-                .if_expr = .{
-                    .condition = try self.substitute(v.condition),
-                    .then_expr = try self.substitute(v.then_expr),
-                    .else_expr = if (v.else_expr) |e| try self.substitute(e) else null,
-                },
-            }),
-            .unless_expr => |v| try self.alloc(node.span, .{
-                .unless_expr = .{
-                    .condition = try self.substitute(v.condition),
-                    .then_expr = try self.substitute(v.then_expr),
-                    .else_expr = if (v.else_expr) |e| try self.substitute(e) else null,
-                },
-            }),
-            .fn_expr => |f| try self.alloc(node.span, .{
-                .fn_expr = .{ .params = f.params, .return_type = f.return_type, .body = try self.substitute(f.body), .type_params = f.type_params },
-            }),
-            .block => |items| blk: {
-                var out = try std.ArrayList(*Node).initCapacity(self.allocator, items.len);
-                defer out.deinit(self.allocator);
-                for (items) |item| try out.append(self.allocator, try self.substitute(item));
-                const n = try self.alloc(node.span, .{ .block = try out.toOwnedSlice(self.allocator) });
-                n.synthetic_block = node.synthetic_block;
-                break :blk n;
-            },
-            .table => |entries| blk: {
-                var out = try std.ArrayList(ast.TableEntry).initCapacity(self.allocator, entries.len);
-                defer out.deinit(self.allocator);
-                for (entries) |entry| {
-                    try out.append(self.allocator, .{
-                        .key = if (entry.key) |k| try self.substitute(k) else null,
-                        .computed = entry.computed,
-                        .value = try self.substitute(entry.value),
-                    });
-                }
-                break :blk try self.alloc(node.span, .{ .table = try out.toOwnedSlice(self.allocator) });
-            },
-            .match_expr => |m| blk: {
-                var arms = try std.ArrayList(ast.MatchArm).initCapacity(self.allocator, m.arms.len);
-                defer arms.deinit(self.allocator);
-                for (m.arms) |arm| {
-                    var matchers = try std.ArrayList(ast.MatchMatcher).initCapacity(self.allocator, arm.matchers.len);
-                    defer matchers.deinit(self.allocator);
-                    for (arm.matchers) |matcher| {
-                        switch (matcher) {
-                            .wildcard => try matchers.append(self.allocator, .wildcard),
-                            .expr => |e| try matchers.append(self.allocator, .{ .expr = try self.substitute(e) }),
-                        }
-                    }
-                    try arms.append(self.allocator, .{
-                        .matchers = try matchers.toOwnedSlice(self.allocator),
-                        .guard = if (arm.guard) |g| try self.substitute(g) else null,
-                        .then = try self.substitute(arm.then),
-                    });
-                }
-                break :blk try self.alloc(node.span, .{
-                    .match_expr = .{ .subject = try self.substitute(m.subject), .arms = try arms.toOwnedSlice(self.allocator) },
-                });
-            },
-            .loop_expr => |l| try self.alloc(node.span, .{
-                .loop_expr = .{ .body = try self.substitute(l.body), .label = l.label },
-            }),
-            .for_loop => |f| try self.alloc(node.span, .{
-                .for_loop = .{ .params = f.params, .iter = try self.substitute(f.iter), .body = try self.substitute(f.body), .label = f.label },
-            }),
-            .while_loop => |w| try self.alloc(node.span, .{
-                .while_loop = .{ .predicate = try self.substitute(w.predicate), .body = try self.substitute(w.body), .label = w.label },
-            }),
-            .break_expr => |b| try self.alloc(node.span, .{
-                .break_expr = .{
-                    .value = if (b.value) |inner| try self.substitute(inner) else null,
-                    .label = b.label,
-                },
-            }),
-            .continue_expr => |c| try self.alloc(node.span, .{
-                .continue_expr = .{
-                    .value = if (c.value) |inner| try self.substitute(inner) else null,
-                    .label = c.label,
-                },
-            }),
-            .labeled_block => |lb| try self.alloc(node.span, .{
-                .labeled_block = .{
-                    .label = lb.label,
-                    .body = try self.substitute(lb.body),
-                },
-            }),
-            .return_expr => |v| try self.alloc(node.span, .{
-                .return_expr = if (v) |inner| try self.substitute(inner) else null,
-            }),
-            .assign_expr => |a| try self.alloc(node.span, .{
-                .assign_expr = .{ .target = try self.substitute(a.target), .value = try self.substitute(a.value) },
-            }),
-            .compound_assign => |a| try self.alloc(node.span, .{
-                .compound_assign = .{ .target = try self.substitute(a.target), .op = a.op, .value = try self.substitute(a.value) },
-            }),
-            .binding => |b| try self.alloc(node.span, .{ .binding = .{
-                .target = try self.substitute(b.target),
-                .type_name = b.type_name,
-                .value = try self.substitute(b.value),
-                .mutable = b.mutable,
-            } }),
-            .number, .string, .multiline_string, .hash, .nil, .range_literal, .slice_literal, .table_pattern, .ascribed, .macro_expr, .quasiquote, .decl, .comp_block, .test_block, .test_suite, .proc_macro, .try_expr, .orelse_expr, .type_alias, .import_stmt => node,
-        };
-    }
-
-    fn alloc(self: *const AstSubstituter, span: Span, expr: ast.Expr) ExpandError!*Node {
-        const n = try self.allocator.create(Node);
-        n.* = .{ .span = span, .expr = expr };
-        return n;
-    }
-};
-
 //
 // template instantiation
 //
@@ -372,7 +211,7 @@ fn instantiateTemplate(
 
     var builder = TemplateBuilder.init(allocator, singles, groups, &replacements);
     const source = try builder.build(template);
-    const parsed = pipeline.parseSource(allocator, source) catch return error.ParseFailed;
+    const parsed = Parser.parseSource(allocator, source) catch return error.ParseFailed;
     const result = try substitutePlaceholders(allocator, span, parsed, &replacements);
     // macro template blocks must create their own scope (synthetic blocks from single-expr templates
     // don't have this flag; multi-expr templates from parse do, but we clear it so the semantic
@@ -810,7 +649,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro dup! `` `saved`
             \\ macro try! `%e:expr` `match %e | x when is_error(x) => sys.panic(x) | x => x`
             \\ 41
@@ -830,7 +669,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro println! `(%fmt:str %ARGS(, %arg:expr)*)` `(print(fmt(%fmt %ARGS(, %arg))))`
             \\ "yo"
             \\ println!("%v %v", 1, 2)
@@ -842,7 +681,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro add! `%a:expr + %b:expr` `(%a + %b)`
             \\ add!(1, 2)
         ));
@@ -853,7 +692,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro sum! `%first:expr %REST(%item:expr)*` `%first %REST(+ %item)`
             \\ sum!(1, 2, 3)
         ));
@@ -864,7 +703,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro unless! `(%cond:expr %body:expr)` `if %cond nil else %body`
             \\ unless!(:false, 42)
         ));
@@ -875,7 +714,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro ok! `(%what:expr)` `{:ok, %what}`
             \\ macro err! `(%what:expr)` `{:err, %what}`
             \\ ok!(42)
@@ -888,7 +727,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro all_true! `(%ITEMS(%item:expr)*)` `do :true %ITEMS(and (%item and :true)) end`
             \\ all_true!(1, :true)
         ));
@@ -899,7 +738,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro double! `%x:expr` `(%x * 2)`
             \\ do
             \\   macro triple! `%x:expr` `(%x * 3)`
@@ -914,7 +753,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const expanded = try expandExpr(arena.allocator(), try pipeline.parseSource(arena.allocator(),
+        const expanded = try expandExpr(arena.allocator(), try Parser.parseSource(arena.allocator(),
             \\ macro id! `%x:ident` `%x`
             \\ macro num! `%x:number` `%x`
             \\ id!(foo)

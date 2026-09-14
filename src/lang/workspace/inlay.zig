@@ -1,0 +1,139 @@
+//! type + parameter inlay hints
+
+const std = @import("std");
+
+const revo = @import("revo");
+
+const ast = @import("../ast.zig");
+const Parser = @import("../Parser.zig");
+const pipeline = @import("../pipeline.zig");
+const txt = @import("text.zig");
+const type_serde = @import("../type_serde.zig");
+
+const W = @import("../Workspace.zig");
+const Workspace = W.Workspace;
+const FileId = W.FileId;
+const Range = W.Range;
+const InlayHint = W.InlayHint;
+
+/// compute type inlay hints for a range in a file
+pub fn inlayHints(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    range: Range,
+    opts: pipeline.BuildOptions,
+) ![]InlayHint {
+    var analysis = try self.inspectDetailed(alloc, id, opts);
+    defer analysis.deinit(alloc);
+    const snap = analysis.snapshot;
+
+    var hints: std.ArrayList(InlayHint) = .empty;
+    errdefer hints.deinit(alloc);
+
+    for (analysis.symbols) |sym| {
+        const ti = sym.type_name orelse continue;
+        if (ti.tag == .any or ti.tag == .never) continue;
+        if (sym.range.end.line < range.start.line or sym.range.start.line > range.end.line) continue;
+
+        const line = txt.sourceLine(snap.text, sym.range.start.line);
+
+        // fn declarations get `-> ret` after the params; aliases fall
+        // through to the generic `: type` hint below
+        if (ti.tag == .function) {
+            const decl_needle = try std.fmt.allocPrint(alloc, "fn {s}(", .{sym.name});
+            defer alloc.free(decl_needle);
+            if (std.mem.find(u8, line, decl_needle) != null) {
+                if (std.mem.find(u8, line, "->") != null or ti.tag.function.return_type.tag == .any) continue;
+                const ret = try type_serde.formatTypeOpts(alloc, ti.tag.function.return_type, .{});
+                defer alloc.free(ret);
+
+                var paren = sym.range.end.character;
+                while (paren < line.len and line[paren] != ')') paren += 1;
+                if (paren >= line.len) continue;
+
+                try hints.append(alloc, .{
+                    .position = .{ .line = sym.range.start.line, .character = paren + 1 },
+                    .label = try std.fmt.allocPrint(alloc, " -> {s}", .{ret}),
+                    .kind = .type,
+                });
+                continue;
+            }
+        }
+
+        const tn = try type_serde.formatTypeOpts(alloc, ti, .{});
+        defer alloc.free(tn);
+        const needle = try std.fmt.allocPrint(alloc, ": {s}", .{tn});
+        defer alloc.free(needle);
+        if (std.mem.find(u8, line, needle) != null) continue;
+
+        try hints.append(alloc, .{
+            .position = sym.range.end,
+            .label = try std.fmt.allocPrint(alloc, ": {s}", .{tn}),
+            .kind = .type,
+        });
+    }
+
+    try appendParamHints(self, alloc, &hints, id, snap.text);
+
+    return hints.toOwnedSlice(alloc);
+}
+
+/// local fns via the sig map, stdlib globals as fallback
+const ParamHintVisitor = struct {
+    ws: *Workspace,
+    id: FileId,
+    hints: *std.ArrayList(InlayHint),
+    alloc: std.mem.Allocator,
+
+    pub fn visit(self: *@This(), node: *const ast.Node) void {
+        switch (node.expr) {
+            .call => |c| if (c.callee.expr == .ident and !c.implicit_self and c.args.len > 0) {
+                const names = self.paramNames(c.callee.expr.ident);
+                for (c.args, 0..) |arg, i| {
+                    if (i >= names.len) break;
+                    self.hints.append(self.alloc, .{
+                        .position = .{ .line = arg.span.line, .character = arg.span.column },
+                        .label = names[i],
+                        .kind = .parameter,
+                    }) catch return;
+                }
+            },
+            else => {},
+        }
+        ast.walkAST(@This(), self, node);
+    }
+
+    fn paramNames(self: *@This(), name: []const u8) []const []const u8 {
+        if (self.ws.inspect_cache.getPtr(self.id)) |cache| {
+            if (cache.sig_map.get(name)) |sig| {
+                var out = std.ArrayList([]const u8).empty;
+                for (sig.params) |p| out.append(self.alloc, p.name) catch return &.{};
+                return out.toOwnedSlice(self.alloc) catch &.{};
+            }
+        }
+
+        if (revo.std_lib.api.findFn(name)) |spec| {
+            var out = std.ArrayList([]const u8).empty;
+            for (spec.type.kind.function.params) |p| out.append(self.alloc, p.name) catch return &.{};
+            return out.toOwnedSlice(self.alloc) catch &.{};
+        }
+        return &.{};
+    }
+};
+
+fn appendParamHints(
+    ws: *Workspace,
+    alloc: std.mem.Allocator,
+    hints: *std.ArrayList(InlayHint),
+    id: FileId,
+    text: []const u8,
+) !void {
+    const parsed = Parser.parseSourceReport(alloc, text) catch return;
+    const root = switch (parsed) {
+        .ok => |r| r,
+        .err => return,
+    };
+    var visitor = ParamHintVisitor{ .ws = ws, .id = id, .hints = hints, .alloc = alloc };
+    visitor.visit(root);
+}

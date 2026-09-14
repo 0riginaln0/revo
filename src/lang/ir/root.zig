@@ -6,7 +6,7 @@ const Instruction = revo.opcode.Instruction;
 const Opcode = revo.opcode.Opcode;
 const Operand = revo.Operand;
 const Register = revo.opcode.Register;
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("../compiler/root.zig").Compiler;
 
 pub const IrValue = union(enum) { reg: Register, inst: *IrInst };
 
@@ -48,7 +48,7 @@ pub const IrBuilder = struct {
 };
 
 /// the control-flow opcodes that carry a target in `op_arg` (jumps and the
-/// fused range back-branch). dce, peephole, and promote all walk these
+/// fused range back-branch). dce and peephole walk these
 pub fn isBranch(op: Opcode) bool {
     return switch (op) {
         .jump, .jump_if_false, .jump_if_true, .jump_err, .range_loop => true,

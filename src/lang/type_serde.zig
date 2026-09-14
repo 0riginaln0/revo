@@ -1,16 +1,12 @@
 //!
 //! welcome to type serde
 //!
-//! all type text conversion is here: text -> TypeExpr -> TypeInfo and back
-//! the two mirrors (parse/printTypeExpr, evalTypeExpr/toTypeExpr) must stay in sync
-//!     keep them adjacent.
-//!
-//! the ast <-> type_serde cycle is intentional:
-//! Node printing embeds type printing, so ast calls printTypeExpr while this module
-//! operates on ast.TypeExpr
-//! type refs flow one way (here -> ast only)
-//! dont add comptime cross-refs
-//! same shape as the revo <-> vm cycle
+//! the text layer of types: text -> TypeExpr in parseTypeExpr below,
+//! TypeInfo -> text in printType. TypeExpr printing, cloning, and freeing
+//! live next to the TypeExpr definition in ast.zig (pure ast operations),
+//! and TypeExpr -> TypeInfo evaluation lives in compiler/types.zig next to
+//! inference (it needs a CheckCtx scope, same as everything there).
+//! type refs flow one way: here -> ast, here -> compiler/types
 //!
 
 const ast = @import("ast.zig");
@@ -18,30 +14,12 @@ const Lexer = @import("Lexer.zig");
 const std = @import("std");
 const types = @import("compiler/types.zig");
 const TypeInfo = types.TypeInfo;
-const UnionVariant = types.UnionVariant;
 const Token = Lexer.Token;
 const TokenType = Lexer.TokenType;
 
-/// empty scope for tooling
-/// no aliases, no generics, no imports, etc
-/// unknown names degrade
-pub const BareCtx = struct {
-    alloc: std.mem.Allocator,
-    pub fn isTypeParam(_: @This(), _: []const u8) bool {
-        return false;
-    }
-    pub fn resolveTypeAlias(_: @This(), _: []const u8) ?types.TypeInfo {
-        return null;
-    }
-
-    /// bare ctx has no module scope, so qualified types always degrade
-    pub fn resolveImportAlias(_: @This(), _: []const u8, _: []const u8) ?types.TypeInfo {
-        return null;
-    }
-};
-
 /// advances pos past the consumed tokens
-pub fn parse(tokens: []const Token, pos: *usize, alloc: std.mem.Allocator) !*ast.TypeExpr {
+/// mirrors ast.printTypeExpr: every Kind parses and prints
+pub fn parseTypeExpr(tokens: []const Token, pos: *usize, alloc: std.mem.Allocator) !*ast.TypeExpr {
     var p = Parser{ .tokens = tokens, .pos = pos, .alloc = alloc };
     return try p.parseExpr();
 }
@@ -240,167 +218,6 @@ fn flattenUnion(alloc: std.mem.Allocator, variants: *std.ArrayList(*ast.TypeExpr
     }
 }
 
-/// type ast back into a TypeInfo
-/// every TypeExpr kind must be handled here; this is the single place where AST type
-/// nodes becomes semantic TypeInfo values. mirrors toTypeExpr below
-/// ctx must support .alloc, .isTypeParam(name) -> bool, and .resolveTypeAlias(name) -> ?TypeInfo
-pub fn evalTypeExpr(ctx: anytype, te: *const ast.TypeExpr) !TypeInfo {
-    switch (te.kind) {
-        // "number" -> int (from type_name_map), unknown names -> any
-        .named => |name| {
-            if (ctx.isTypeParam(name)) return .{ .tag = .{ .type_var = name } };
-            if (types.type_name_map.get(name)) |res| return res;
-            if (ctx.resolveTypeAlias(name)) |aliased| return aliased;
-            return .{ .tag = .any };
-        },
-        // "a.T" -> module a's alias T, or any when unresolvable (the
-        // compiler has no dep IO, so it always lands here; semantic
-        // validates qualified names separately and errors first)
-        .qualified => |q| {
-            if (ctx.resolveImportAlias(q.module, q.name)) |t| return t;
-            return .{ .tag = .any };
-        },
-        // ":nil", ":ok" -> atom
-        .atom => |name| return .{ .tag = .{ .atom = name } },
-        // "int | :nil" -> union(@[{name="", types=@[int]}, {name="", types=@[:nil]}])
-        // "number?" -> union_of(named("number"), atom(":nil")) from parseAtom
-        .union_of => |variants| {
-            var collected = try std.ArrayList(UnionVariant).initCapacity(ctx.alloc, 4);
-            errdefer collected.deinit(ctx.alloc);
-            for (variants) |v| {
-                const inner = try evalTypeExpr(ctx, v);
-                try types.collectVariants(ctx.alloc, inner, &collected);
-            }
-            return .{ .tag = .{ .@"union" = try collected.toOwnedSlice(ctx.alloc) } };
-        },
-        // "fn(int) -> bool" -> function(param_types=@[int], return_type=bool)
-        .function => |f| {
-            var param_types = try std.ArrayList(TypeInfo).initCapacity(ctx.alloc, f.params.len);
-            errdefer param_types.deinit(ctx.alloc);
-            for (f.params) |p| {
-                try param_types.append(ctx.alloc, if (p.type_name) |tn| try evalTypeExpr(ctx, tn) else .{ .tag = .any });
-            }
-
-            var param_names = try std.ArrayList([]const u8).initCapacity(ctx.alloc, f.params.len);
-            errdefer param_names.deinit(ctx.alloc);
-            for (f.params) |p| try param_names.append(ctx.alloc, p.name);
-            const return_type = if (f.return_type) |rt| try evalTypeExpr(ctx, rt) else TypeInfo{ .tag = .any };
-
-            var required: usize = 0;
-            for (f.params) |p| {
-                if (!p.optional) required += 1;
-            }
-
-            const sig = try types.newSignature(ctx.alloc, .{
-                .param_names = try param_names.toOwnedSlice(ctx.alloc),
-                .params = try param_types.toOwnedSlice(ctx.alloc),
-                .return_type = return_type,
-                .required_count = required,
-            });
-
-            return .{ .tag = .{ .function = sig } };
-        },
-        // "table<int>" -> table(key=null, value=int), "table<string, int>" -> table(key=string, value=int)
-        .parameterized => |p| {
-            var params = try std.ArrayList(TypeInfo).initCapacity(ctx.alloc, p.params.len);
-            errdefer params.deinit(ctx.alloc);
-            for (p.params) |param| try params.append(ctx.alloc, try evalTypeExpr(ctx, param));
-            const resolved = try params.toOwnedSlice(ctx.alloc);
-            if (std.mem.eql(u8, p.name, "table")) {
-                if (resolved.len == 1) {
-                    const v = try ctx.alloc.create(TypeInfo);
-                    v.* = resolved[0];
-                    return .{ .tag = .{ .table = .{ .key = null, .value = v } } };
-                }
-                if (resolved.len == 2) {
-                    const k = try ctx.alloc.create(TypeInfo);
-                    k.* = resolved[0];
-                    const v = try ctx.alloc.create(TypeInfo);
-                    v.* = resolved[1];
-                    return .{ .tag = .{ .table = .{ .key = k, .value = v } } };
-                }
-            }
-            return .{ .tag = .any };
-        },
-        // "{ name: string, age: num }" -> table with per-field types;
-        // names borrow source text like .named does, owners clone
-        .record => |fields| {
-            const owned = try ctx.alloc.alloc(types.RecordField, fields.len);
-            for (fields, owned) |f, *dst| dst.* = .{
-                .name = f.name,
-                .field_type = try evalTypeExpr(ctx, f.type_expr),
-            };
-            const value = try ctx.alloc.create(TypeInfo);
-            value.* = .{ .tag = .any };
-            return types.makeTable(null, value, owned);
-        },
-        // "!int" -> union(@[{name="", types=@[{:ok, int}]}, {name="", types=@[{:err, any}]}])
-        // the same shape the literal `{:ok, int} | {:err, any}` produces
-        .error_union => |inner| {
-            const t = try evalTypeExpr(ctx, inner);
-            var collected = try std.ArrayList(UnionVariant).initCapacity(ctx.alloc, 2);
-            errdefer collected.deinit(ctx.alloc);
-            try types.collectVariants(ctx.alloc, try makeResultTable(ctx, ":ok", t), &collected);
-            try types.collectVariants(ctx.alloc, try makeResultTable(ctx, ":err", .{ .tag = .any }), &collected);
-            return .{ .tag = .{ .@"union" = try collected.toOwnedSlice(ctx.alloc) } };
-        },
-    }
-}
-
-///
-/// guardless arm coverage for match exhaustiveness
-///
-/// maps matchers to MatchCover descriptors
-/// guards excluded since a guard can always fail
-fn matcherCover(ctx: anytype, m: ast.MatchMatcher) types.MatchCover {
-    return switch (m) {
-        .wildcard => .wildcard,
-        .expr => |e| switch (e.expr) {
-            .ident => .wildcard, // binder hits every value
-            .hash => |name| .{ .atom = name },
-            .nil => .{ .atom = ":nil" },
-            .number => .number,
-            .string, .multiline_string => .string,
-            .ascribed => |a| .{ .ascribed = evalTypeExpr(ctx, a.type_name) catch types.TypeInfo{ .tag = .any } },
-            .table_pattern => |items| blk: {
-                if (items.len == 0) break :blk .other;
-
-                const tag = if (items[0].expr == .hash) items[0].expr.hash else break :blk .other;
-                break :blk .{ .tag = tag };
-            },
-            else => .other,
-        },
-    };
-}
-
-/// covers for one arm, guards included; callers decide what guards mean
-pub fn buildArmCovers(ctx: anytype, arm: ast.MatchArm) ![]types.MatchCover {
-    var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arm.matchers.len * 2) catch return &.{};
-    errdefer covers.deinit(ctx.alloc);
-
-    for (arm.matchers) |m| try covers.append(ctx.alloc, matcherCover(ctx, m));
-    return covers.toOwnedSlice(ctx.alloc);
-}
-
-pub fn buildCovers(ctx: anytype, arms: []const ast.MatchArm) ![]types.MatchCover {
-    var covers = std.ArrayList(types.MatchCover).initCapacity(ctx.alloc, arms.len * 2) catch return &.{};
-    errdefer covers.deinit(ctx.alloc);
-
-    for (arms) |arm| {
-        if (arm.guard != null) continue;
-        const one = try buildArmCovers(ctx, arm);
-        defer ctx.alloc.free(one);
-        try covers.appendSlice(ctx.alloc, one);
-    }
-    return covers.toOwnedSlice(ctx.alloc);
-}
-
-pub fn matchCovers(ctx: anytype, subject: types.TypeInfo, arms: []const ast.MatchArm) bool {
-    const covers = buildCovers(ctx, arms) catch return false;
-    defer ctx.alloc.free(covers);
-    return types.matchCoversAll(subject, covers);
-}
-
 /// render a TypeInfo straight to the writer
 /// trailing params past required_count print `?` (for optional)
 pub fn printType(ti: TypeInfo, writer: *std.Io.Writer, opts: PrintOptions) !void {
@@ -515,87 +332,6 @@ pub const FieldPreview = struct {
     preview: []const u8,
 };
 
-/// render a TypeExpr via printTypeExpr; mirrors parse above
-pub fn printTypeExpr(te: *const ast.TypeExpr, writer: *std.Io.Writer) !void {
-    switch (te.kind) {
-        .named => |name| try writer.writeAll(name),
-        // atom payloads come both bare (`nil` from the main parser)
-        // and colon-prefixed (`:nil` from the type parser)
-        .atom => |name| try writer.print(":{s}", .{ast.atomName(name)}),
-        .union_of => |variants| {
-            // `T?` sugar, for a 2-union ending in `:nil`
-            if (variants.len == 2 and variants[1].kind == .atom and
-                std.mem.eql(u8, ast.atomName(variants[1].kind.atom), "nil"))
-            {
-                try printTypeExpr(variants[0], writer);
-                try writer.writeByte('?');
-            } else for (variants, 0..) |v, i| {
-                if (i > 0) try writer.writeAll(" | ");
-                try printTypeExpr(v, writer);
-            }
-        },
-        .qualified => |q| {
-            try writer.writeAll(q.module);
-            try writer.writeByte('.');
-            try writer.writeAll(q.name);
-        },
-        .record => |fields| {
-            try writer.writeByte('{');
-            for (fields, 0..) |f, i| {
-                if (i > 0) try writer.writeAll(", ");
-                // numeric names are positional array entries (`{ number, number }`)
-                const positional = f.name.len > 0 and blk: {
-                    for (f.name) |c| if (!std.ascii.isDigit(c)) break :blk false;
-                    break :blk true;
-                };
-                if (!positional) {
-                    try writer.writeAll(f.name);
-                    try writer.writeAll(": ");
-                }
-                try printTypeExpr(f.type_expr, writer);
-            }
-            try writer.writeByte('}');
-        },
-        .function => |f| {
-            try writer.writeAll("fn(");
-            for (f.params, 0..) |p, i| {
-                if (i > 0) try writer.writeAll(", ");
-                if (p.optional) try writer.writeByte('?');
-                if (p.name.len > 0) {
-                    try writer.writeAll(p.name);
-                    if (p.type_name != null) try writer.writeAll(": ");
-                }
-
-                if (p.type_name) |t| try printTypeExpr(t, writer);
-                if (p.variadic) try writer.writeAll("...");
-            }
-            try writer.writeByte(')');
-            if (f.return_type) |ret| {
-                try writer.writeAll(" -> ");
-                try printTypeExpr(ret, writer);
-            }
-        },
-        .parameterized => |p| {
-            try writer.writeAll(p.name);
-            try writer.writeByte('<');
-            for (p.params, 0..) |param, i| {
-                if (i > 0) try writer.writeAll(", ");
-                try printTypeExpr(param, writer);
-            }
-            try writer.writeByte('>');
-        },
-        .error_union => |inner| {
-            try writer.writeByte('!');
-            try printTypeExpr(inner, writer);
-        },
-    }
-}
-
-// TODO: remove
-pub fn formatType(alloc: std.mem.Allocator, ti: TypeInfo) std.mem.Allocator.Error![]const u8 {
-    return formatTypeOpts(alloc, ti, .{});
-}
-
 /// formatType with display options (`.short` for tag words, `.values` for hover)
 pub fn formatTypeOpts(alloc: std.mem.Allocator, ti: TypeInfo, opts: PrintOptions) std.mem.Allocator.Error![]const u8 {
     var buf = std.Io.Writer.Allocating.init(alloc);
@@ -608,108 +344,6 @@ pub fn formatTypeOpts(alloc: std.mem.Allocator, ti: TypeInfo, opts: PrintOptions
         return error.OutOfMemory;
     };
     return try buf.toOwnedSlice();
-}
-
-/// one `{:tag, payload}` table, the same shape `{...}` literals infer:
-/// positional fields, tag atom in "0", payload in "1"
-fn makeResultTable(ctx: anytype, tag: []const u8, payload: TypeInfo) !TypeInfo {
-    const fields = try ctx.alloc.alloc(types.RecordField, 2);
-    fields[0] = .{ .name = "0", .field_type = .{ .tag = .{ .atom = tag } } };
-    fields[1] = .{ .name = "1", .field_type = payload };
-    const value = try ctx.alloc.create(TypeInfo);
-    value.* = .{ .tag = .any };
-    return types.makeTable(null, value, fields);
-}
-
-/// deep-copy a TypeExpr
-/// dupe every borrowed string (names borrow source text)
-///     paired with freeTypeExpr
-/// default_value pointers copy over but stay unowned (type position never sets them)
-pub fn cloneTypeExpr(alloc: std.mem.Allocator, te: *const ast.TypeExpr) std.mem.Allocator.Error!*ast.TypeExpr {
-    const kind: ast.TypeExpr.Kind = switch (te.kind) {
-        .named => |n| .{ .named = try alloc.dupe(u8, n) },
-        .atom => |n| .{ .atom = try alloc.dupe(u8, n) },
-        .union_of => |variants| blk: {
-            const owned = try alloc.alloc(*ast.TypeExpr, variants.len);
-            for (variants, owned) |v, *dst| dst.* = try cloneTypeExpr(alloc, v);
-            break :blk .{ .union_of = owned };
-        },
-        .record => |fields| blk: {
-            const owned = try alloc.alloc(ast.RecordField, fields.len);
-            for (fields, owned) |f, *dst| dst.* = .{
-                .name = try alloc.dupe(u8, f.name),
-                .type_expr = try cloneTypeExpr(alloc, f.type_expr),
-            };
-            break :blk .{ .record = owned };
-        },
-        .qualified => |q| .{ .qualified = .{
-            .module = try alloc.dupe(u8, q.module),
-            .name = try alloc.dupe(u8, q.name),
-        } },
-        .function => |f| blk: {
-            const params = try alloc.alloc(ast.FnParam, f.params.len);
-            for (f.params, params) |p, *dst| dst.* = .{
-                .name = try alloc.dupe(u8, p.name),
-                .name_span = p.name_span,
-                .type_name = if (p.type_name) |tn| try cloneTypeExpr(alloc, tn) else null,
-                .optional = p.optional,
-                .default_value = p.default_value,
-                .variadic = p.variadic,
-            };
-            break :blk .{ .function = .{
-                .params = params,
-                .return_type = if (f.return_type) |rt| try cloneTypeExpr(alloc, rt) else null,
-            } };
-        },
-        .parameterized => |p| blk: {
-            const owned = try alloc.alloc(*ast.TypeExpr, p.params.len);
-            for (p.params, owned) |item, *dst| dst.* = try cloneTypeExpr(alloc, item);
-            break :blk .{ .parameterized = .{
-                .name = try alloc.dupe(u8, p.name),
-                .params = owned,
-            } };
-        },
-        .error_union => |inner| .{ .error_union = try cloneTypeExpr(alloc, inner) },
-    };
-    return try ast.allocTypeExpr(alloc, te.span, kind);
-}
-
-/// free a cloneTypeExpr tree: strings, slices, nodes
-pub fn freeTypeExpr(alloc: std.mem.Allocator, te: *ast.TypeExpr) void {
-    switch (te.kind) {
-        .named => |n| alloc.free(n),
-        .atom => |n| alloc.free(n),
-        .union_of => |variants| {
-            for (variants) |v| freeTypeExpr(alloc, v);
-            alloc.free(variants);
-        },
-        .record => |fields| {
-            for (fields) |f| {
-                alloc.free(f.name);
-                freeTypeExpr(alloc, f.type_expr);
-            }
-            alloc.free(fields);
-        },
-        .qualified => |q| {
-            alloc.free(q.module);
-            alloc.free(q.name);
-        },
-        .function => |f| {
-            for (f.params) |p| {
-                alloc.free(p.name);
-                if (p.type_name) |tn| freeTypeExpr(alloc, tn);
-            }
-            alloc.free(f.params);
-            if (f.return_type) |rt| freeTypeExpr(alloc, rt);
-        },
-        .parameterized => |p| {
-            alloc.free(p.name);
-            for (p.params) |param| freeTypeExpr(alloc, param);
-            alloc.free(p.params);
-        },
-        .error_union => |inner| freeTypeExpr(alloc, inner),
-    }
-    alloc.destroy(te);
 }
 
 test "type serde roundtrips" {
@@ -734,8 +368,8 @@ test "type serde roundtrips" {
 
         const tokens = try Lexer.lexAt(alloc, c, .{});
         var pos: usize = 0;
-        const te = try parse(tokens, &pos, alloc);
-        const ti = try evalTypeExpr(BareCtx{ .alloc = alloc }, te);
-        try std.testing.expectEqualStrings(c, try formatType(alloc, ti));
+        const te = try parseTypeExpr(tokens, &pos, alloc);
+        const ti = try types.evalBare(alloc, te);
+        try std.testing.expectEqualStrings(c, try formatTypeOpts(alloc, ti, .{}));
     }
 }

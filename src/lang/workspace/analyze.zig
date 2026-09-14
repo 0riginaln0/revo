@@ -1,0 +1,673 @@
+//! full builds, quick inspection, diagnostics, fn sigs
+
+const std = @import("std");
+
+const revo = @import("revo");
+
+const ast = @import("../ast.zig");
+const common = @import("common.zig");
+const diagnostic = @import("../diagnostic.zig");
+const pipeline = @import("../pipeline.zig");
+const semantic = @import("../semantic.zig");
+const types = @import("../compiler/types.zig");
+
+const W = @import("../Workspace.zig");
+const Workspace = W.Workspace;
+const FileId = W.FileId;
+const Analysis = W.Analysis;
+const Symbol = W.Symbol;
+const FnSig = W.FnSig;
+const DiagnosticsBundle = W.DiagnosticsBundle;
+
+/// full compile; returns BuildResult (ok/err)
+pub fn analyze(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !pipeline.BuildResult {
+    var analysis = try analyzeDetailed(self, alloc, id, opts);
+    if (analysis.artifact) |artifact| {
+        analysis.artifact = null;
+        defer analysis.deinit(alloc);
+        return .{ .ok = artifact };
+    }
+    defer analysis.deinit(alloc);
+    return .{ .err = analysis.diagnostics.? };
+}
+
+/// full compile
+/// ret: detailed Analysis with artifact + diagnostics
+pub fn analyzeDetailed(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !Analysis {
+    const snap = self.snapshot(id) orelse return error.FileNotOpen;
+    const vm = self.vm orelse return error.VmUnavailable;
+    if (self.cache.get(id)) |cached| {
+        if (cached.version == snap.version and common.sameOpts(cached.opts, opts)) {
+            const artifact = try common.copyArtifact(alloc, cached.artifact);
+            errdefer common.deinitArtifact(alloc, artifact);
+            var warnings: ?diagnostic.Report = null;
+            errdefer if (warnings) |*w| w.deinit(alloc);
+            if (cached.warnings) |cached_w| {
+                var wcopy = try cached_w.copy(alloc);
+                wcopy.source_name = alloc.dupe(u8, snap.name) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                wcopy.source = alloc.dupe(u8, snap.text) catch |e| {
+                    wcopy.deinit(alloc);
+                    return e;
+                };
+                warnings = wcopy;
+            }
+            if (opts.install_debug_info) {
+                try vm.setProgramDebugInfo(artifact.spans, snap.text, snap.name);
+            }
+            return .{
+                .snapshot = snap,
+                .artifact = artifact,
+                .warnings = warnings,
+                .cached = true,
+                .symbols = try common.copySymbols(alloc, cached.symbols),
+                .dependencies = try self.copyDeps(alloc, id),
+            };
+        }
+    }
+
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+
+    const parsed = try pipeline.parse(arena.allocator(), .{
+        .name = snap.name,
+        .text = snap.text,
+    }, .{
+        .include_stdlib_macros = opts.include_stdlib_macros,
+    });
+
+    if (parsed == .err) {
+        var report = try parsed.err.report.copy(alloc);
+        report.source_name = try alloc.dupe(u8, snap.name);
+        report.source = try alloc.dupe(u8, snap.text);
+        return .{
+            .snapshot = snap,
+            .diagnostics = .{ .parse = .{
+                .kind = parsed.err.kind,
+                .report = report,
+            } },
+            .cached = false,
+            .symbols = try alloc.alloc(Symbol, 0),
+            .dependencies = try alloc.alloc(FileId, 0),
+        };
+    }
+
+    const root = parsed.ok.root;
+    const symbols = try self.collectSymbolsFromParsed(root, snap.text);
+    defer common.freeSymbols(self.alloc, symbols);
+    const deps = try self.collectDepsFromParsed(snap, root);
+    errdefer self.alloc.free(deps);
+    try self.updateDeps(id, deps);
+
+    var warn_report: ?diagnostic.Report = null;
+    const build_result = try pipeline.buildWithWarnings(vm, .{
+        .name = snap.name,
+        .text = snap.text,
+    }, opts, &warn_report);
+
+    return switch (build_result) {
+        .ok => |artifact| blk: {
+            defer common.deinitArtifact(vm.runtime.alloc, artifact);
+            const cache_artifact = try common.copyArtifact(self.alloc, artifact);
+            errdefer common.deinitArtifact(self.alloc, cache_artifact);
+
+            const cache_symbols = try common.copySymbols(self.alloc, symbols);
+            errdefer common.freeSymbols(self.alloc, cache_symbols);
+
+            // warnings are owned by vm.runtime.alloc
+            // re-own for the caller and the cache
+            var cache_warnings: ?diagnostic.Report = null;
+            errdefer if (cache_warnings) |*w| w.deinit(self.alloc);
+            var warnings = if (warn_report) |wr| blk_w: {
+                var owned = try wr.copy(alloc);
+                owned.source_name = try alloc.dupe(u8, snap.name);
+                owned.source = try alloc.dupe(u8, snap.text);
+
+                cache_warnings = try wr.copy(self.alloc);
+                cache_warnings.?.source_name = try self.alloc.dupe(u8, snap.name);
+                cache_warnings.?.source = try self.alloc.dupe(u8, snap.text);
+
+                var mutable = wr;
+                mutable.deinit(vm.runtime.alloc);
+
+                break :blk_w owned;
+            } else null;
+
+            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols, cache_warnings);
+            cache_warnings = null;
+
+            const copy = try common.copyArtifact(alloc, artifact);
+            errdefer common.deinitArtifact(alloc, copy);
+
+            errdefer if (warnings) |*w| w.deinit(alloc);
+            break :blk .{
+                .snapshot = snap,
+                .artifact = copy,
+                .warnings = warnings,
+                .cached = false,
+                .symbols = try common.copySymbols(alloc, symbols),
+                .dependencies = try self.copyDeps(alloc, id),
+            };
+        },
+        .err => |err| blk: {
+            // errors dominate
+            // warnings drop with them
+            if (warn_report) |*wr| wr.deinit(vm.runtime.alloc);
+            break :blk .{
+                .snapshot = snap,
+                .diagnostics = try common.copyError(alloc, err, snap.name, snap.text),
+                .cached = false,
+                .symbols = try common.copySymbols(alloc, symbols),
+                .dependencies = try self.copyDeps(alloc, id),
+            };
+        },
+    };
+}
+
+/// get diagnostics for a file (or null if clean)
+/// runs both semantic and full compile to catch all errors
+pub fn diagnostics(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !?pipeline.Error {
+    var bundle = try diagnosticsWithWarnings(self, alloc, id, opts);
+    if (bundle.warnings) |*w| w.deinit(alloc);
+    return bundle.err;
+}
+
+/// same as diagnostics,
+/// but also lifts non-failing warnings from th full build
+pub fn diagnosticsWithWarnings(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !DiagnosticsBundle {
+    var sem = try inspectDetailed(self, alloc, id, opts);
+    errdefer sem.deinit(alloc);
+    var full = analyzeDetailed(self, alloc, id, opts) catch |err| switch (err) {
+        error.VmUnavailable => {
+            if (sem.diagnostics) |diag| {
+                sem.diagnostics = null;
+                return .{ .err = diag };
+            }
+            return .{};
+        },
+        else => |e| return e,
+    };
+    errdefer full.deinit(alloc);
+
+    // if both have diagnostics, merge the reports
+    if (full.diagnostics) |full_diag| {
+        if (sem.diagnostics) |sem_diag| {
+            const merged_report = try common.mergeReports(alloc, sem_diag, full_diag);
+            // keep the error variant from the full compile, but swap the report
+            // errorKind doesn't matter much for diagnostics display
+            full.diagnostics = null;
+            sem.diagnostics = null;
+            const warnings = full.warnings;
+            full.warnings = null;
+            return .{ .err = pipeline.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
+        }
+        full.diagnostics = null;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = full_diag, .warnings = warnings };
+    }
+
+    if (sem.diagnostics) |diag| {
+        sem.diagnostics = null;
+        const warnings = full.warnings;
+        full.warnings = null;
+        return .{ .err = diag, .warnings = warnings };
+    }
+
+    const warnings = full.warnings;
+    full.warnings = null;
+    return .{ .warnings = warnings };
+}
+
+// quick inspection via inspect cache (no full compile)
+pub fn inspectDetailed(
+    self: *Workspace,
+    alloc: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !Analysis {
+    const snap = self.snapshot(id) orelse return error.FileNotOpen;
+    if (try self.inspectCached(alloc, snap, id, opts)) |cached| return cached;
+
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+
+    //
+    // analysis never merges manifest macros
+    //
+    //   their spans point into the embedded sources,
+    //   so theyd comw up as weird symbols/hovers with
+    //   wrong lines
+    //      (expansion and lowering keep merging; completions
+    //      derive the names from the same manifest sources instead)
+    //
+    const parsed = try pipeline.parse(arena.allocator(), .{
+        .name = snap.name,
+        .text = snap.text,
+    }, .{
+        .include_stdlib_macros = false,
+    });
+
+    if (parsed == .err) {
+        return self.inspectParseError(alloc, snap, id, opts, parsed.err);
+    }
+
+    const root = parsed.ok.root;
+    const symbols = try self.collectSymbolsFromParsed(root, snap.text);
+    defer common.freeSymbols(self.alloc, symbols);
+    const deps = try self.collectDepsFromParsed(snap, root);
+    errdefer self.alloc.free(deps);
+    try self.updateDeps(id, deps);
+    const known_globals = try common.getKnownGlobals(self, alloc);
+    defer alloc.free(known_globals);
+
+    // name -> type, populated by sem checker
+    var type_map = std.StringHashMap(types.TypeInfo).init(alloc);
+    defer {
+        var it = type_map.iterator();
+        while (it.next()) |entry| {
+            alloc.free(entry.key_ptr.*);
+            types.deinitType(entry.value_ptr, alloc);
+        }
+        type_map.deinit();
+    }
+
+    var type_annotations = std.AutoHashMap(*const ast.Node, types.TypeInfo).init(alloc);
+    defer {
+        var it = type_annotations.iterator();
+        while (it.next()) |entry| types.deinitType(@constCast(entry.value_ptr), alloc);
+        type_annotations.deinit();
+    }
+
+    const WorkspaceResolver = struct {
+        ws: *Workspace,
+        source_name: []const u8,
+        mode: pipeline.RunMode,
+        project_root: []const u8,
+        fn resolve(ptr: *anyopaque, path: []const u8, a: std.mem.Allocator) ?[]const u8 {
+            const s: *@This() = @ptrCast(@alignCast(ptr));
+            const file_id = s.ws.resolveOpenImport(s.source_name, path, s.mode, s.project_root) orelse return null;
+            const snap2 = s.ws.snapshot(file_id) orelse return null;
+            return a.dupe(u8, snap2.text) catch null;
+        }
+    };
+    const project_root = blk: {
+        const entry = self.entryPtr(snap.id) catch break :blk "";
+        break :blk entry.project_root;
+    };
+    var ws_resolver = WorkspaceResolver{
+        .ws = self,
+        .source_name = snap.name,
+        .mode = opts.mode,
+        .project_root = project_root,
+    };
+
+    var docs = std.StringHashMap([]const u8).init(self.alloc);
+    errdefer {
+        var dit = docs.iterator();
+        while (dit.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            self.alloc.free(e.value_ptr.*);
+        }
+        docs.deinit();
+    }
+
+    var dropped_warn: ?diagnostic.Report = null;
+    const semantic_error = try semantic.analyze(
+        alloc,
+        root,
+        snap.name,
+        snap.text,
+        known_globals,
+        &type_map,
+        &type_annotations,
+        &docs,
+        .{ .ptr = &ws_resolver, .resolveFn = WorkspaceResolver.resolve },
+        &dropped_warn,
+    );
+
+    if (dropped_warn) |*wr| wr.deinit(alloc);
+
+    const cache_diag = if (semantic_error) |failure|
+        try common.copyError(self.alloc, .{ .semantic = failure }, snap.name, snap.text)
+    else
+        null;
+    errdefer if (cache_diag) |d| pipeline.deinitError(self.alloc, d);
+
+    for (symbols) |*sym| {
+        if (type_map.get(sym.name)) |t| {
+            sym.type_name = try types.clone(t, self.alloc);
+        }
+    }
+
+    // collect fn signatures from ast
+    var sig_map: std.StringHashMapUnmanaged(FnSig) = .empty;
+    errdefer if (sig_map.size > 0) common.freeSigMap(self.alloc, &sig_map);
+    self.collectSigsFromParsed(root, &sig_map);
+
+    // doc strings live in the request arena; re-own them for the cache
+    var cache_docs = std.StringHashMap([]const u8).init(self.alloc);
+    errdefer {
+        var cit = cache_docs.iterator();
+        while (cit.next()) |e| {
+            self.alloc.free(e.key_ptr.*);
+            self.alloc.free(e.value_ptr.*);
+        }
+        cache_docs.deinit();
+    }
+    var doc_it = docs.iterator();
+    while (doc_it.next()) |e| {
+        try cache_docs.put(
+            try self.alloc.dupe(u8, e.key_ptr.*),
+            try self.alloc.dupe(u8, e.value_ptr.*),
+        );
+    }
+
+    // annotate param and return types from type_map where not explicitly set
+    var sig_it = sig_map.iterator();
+    while (sig_it.next()) |sig_entry| {
+        for (sig_entry.value_ptr.params) |*p| {
+            if (p.type_name == null) {
+                if (type_map.get(p.name)) |t| {
+                    p.type_name = try types.clone(t, self.alloc);
+                }
+            }
+        }
+        if (sig_entry.value_ptr.return_type == null) {
+            if (type_map.get(sig_entry.key_ptr.*)) |t| {
+                if (t.tag == .function) {
+                    sig_entry.value_ptr.return_type = try types.clone(t.tag.function.return_type, self.alloc);
+                }
+            }
+        }
+    }
+
+    const cache_symbols = try common.copySymbols(self.alloc, symbols);
+    errdefer common.freeSymbols(self.alloc, cache_symbols);
+    const cache_deps = try self.copyDeps(self.alloc, id);
+    errdefer self.alloc.free(cache_deps);
+    try self.putInspectCache(id, snap.version, opts, cache_symbols, cache_deps, cache_diag, sig_map, cache_docs);
+
+    if (semantic_error) |err| {
+        return .{
+            .snapshot = snap,
+            .diagnostics = .{ .semantic = err },
+            .cached = false,
+            .symbols = try common.copySymbols(alloc, symbols),
+            .dependencies = try self.copyDeps(alloc, id),
+        };
+    }
+
+    return .{
+        .snapshot = snap,
+        .cached = false,
+        .symbols = try common.copySymbols(alloc, symbols),
+        .dependencies = try self.copyDeps(alloc, id),
+    };
+}
+
+/// lookup a function signature from the inspect cache for file `id`
+pub fn fnSig(self: *Workspace, alloc: std.mem.Allocator, id: FileId, name: []const u8) !?FnSig {
+    _ = try inspectDetailed(self, alloc, id, .{});
+    const cache = self.inspect_cache.getPtr(id) orelse return null;
+    return cache.sig_map.get(name);
+}
+
+test "workspace caches repeated analysis" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
+    defer vm.deinit();
+
+    var ws = try Workspace.initWithVm(&vm, alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "1 + 1", .{});
+    const first = try ws.analyze(alloc, id, .{});
+    try std.testing.expect(first == .ok);
+
+    const second = try ws.analyze(alloc, id, .{});
+    try std.testing.expect(second == .ok);
+    try std.testing.expectEqual(first.ok.instructions.len, second.ok.instructions.len);
+}
+
+test "workspace invalidates cache on change" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
+    defer vm.deinit();
+
+    var ws = try Workspace.initWithVm(&vm, alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "1 + 1", .{});
+    const first = try ws.analyze(alloc, id, .{});
+    defer switch (first) {
+        .ok => |artifact| {
+            alloc.free(artifact.instructions);
+            alloc.free(artifact.spans);
+        },
+        .err => |err| pipeline.deinitError(alloc, err),
+    };
+
+    try ws.change(id, "1 + 2");
+    const snap = ws.snapshot(id).?;
+    try std.testing.expectEqual(@as(u32, 2), snap.version);
+
+    const second = try ws.analyze(alloc, id, .{});
+    defer switch (second) {
+        .ok => |artifact| {
+            alloc.free(artifact.instructions);
+            alloc.free(artifact.spans);
+        },
+        .err => |err| pipeline.deinitError(alloc, err),
+    };
+    try std.testing.expect(second == .ok);
+}
+
+test "workspace invalidates dependent caches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
+    defer vm.deinit();
+
+    var ws = try Workspace.initWithVm(&vm, alloc);
+    defer ws.deinit();
+
+    const a = try ws.open("dir/a.rv", "1", .{});
+    const b = try ws.open("dir/b.rv", "import \"a\"", .{});
+    const c = try ws.open("dir/c.rv", "import \"b\"", .{});
+
+    const res_b = try ws.analyze(alloc, b, .{});
+    defer switch (res_b) {
+        .ok => |artifact| {
+            alloc.free(artifact.instructions);
+            alloc.free(artifact.spans);
+        },
+        .err => |err| pipeline.deinitError(alloc, err),
+    };
+
+    const res_c = try ws.analyze(alloc, c, .{});
+    defer switch (res_c) {
+        .ok => |artifact| {
+            alloc.free(artifact.instructions);
+            alloc.free(artifact.spans);
+        },
+        .err => |err| pipeline.deinitError(alloc, err),
+    };
+
+    try std.testing.expect(ws.cache.get(b) != null);
+    try std.testing.expect(ws.cache.get(c) != null);
+
+    try ws.change(a, "2");
+
+    try std.testing.expect(ws.cache.get(b) == null);
+    try std.testing.expect(ws.cache.get(c) == null);
+}
+
+test "analysis returns snapshot and artifact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
+    defer vm.deinit();
+
+    var ws = try Workspace.initWithVm(&vm, alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "1 + 1", .{});
+    var analysis = try ws.analyzeDetailed(alloc, id, .{});
+    defer analysis.deinit(alloc);
+
+    try std.testing.expectEqualStrings("<test>", analysis.snapshot.name);
+    try std.testing.expect(analysis.artifact != null);
+    try std.testing.expect(analysis.diagnostics == null);
+}
+
+test "workspace diagnostics query" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "const x =", .{});
+    const diag = try ws.diagnostics(alloc, id, .{});
+    try std.testing.expect(diag != null);
+}
+
+test "workspace diagnostics clean file" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // *vm attached like the lsp does, stdlib fns come from its globals*
+    var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
+    defer vm.deinit();
+    var ws = try Workspace.initWithVm(&vm, alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "let x = 1\nprint(x)", .{});
+    const diag = try ws.diagnostics(alloc, id, .{});
+    try std.testing.expect(diag == null);
+}
+
+test "workspace diagnostics undefined name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>", "hiasdhfasduf", .{});
+    const diag = try ws.diagnostics(alloc, id, .{});
+    try std.testing.expect(diag != null);
+}
+
+test "workspace diagnostics warn on missing return arrow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<test>",
+        \\ fn demo() string do
+        \\   "ok"
+        \\ end
+    , .{});
+    const diag = try ws.diagnostics(alloc, id, .{});
+    try std.testing.expect(diag != null);
+}
+
+test "workspace diagnostics merge semantic and lower failures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const source =
+        \\ type Result = {:ok, any} | {:err, atom}
+        \\ fn bind(what: any, where: num) -> Result do
+        \\   "ok"
+        \\ end
+        \\ bind(1, "hi")
+    ;
+    const id = try ws.open("<test>", source, .{});
+    const diag = try ws.diagnostics(alloc, id, .{});
+    try std.testing.expect(diag != null);
+
+    const report = switch (diag.?) {
+        .parse => |f| f.report,
+        .expand => |f| f.report,
+        .lower => |f| f.report,
+        .semantic => |f| f.report,
+    };
+
+    var err_count: usize = 0;
+    for (report.parts) |part| {
+        if (part == .@"error") err_count += 1;
+    }
+    try std.testing.expect(err_count >= 2);
+    try std.testing.expect(report.message.len != 0);
+    try std.testing.expect(std.mem.find(u8, report.message, "return type") != null);
+}
+
+test "workspace sig map survives typed fn invalidation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var ws = try Workspace.init(alloc);
+    defer ws.deinit();
+
+    const id = try ws.open("<sig>",
+        \\const f = fn(x: table, y: fn(num) -> str) x
+        \\type T = fn(table<int>, num) -> table<string, int>
+        \\
+    , .{});
+    _ = try ws.inspectDetailed(alloc, id, .{});
+
+    try ws.change(id, "const f = fn(x: table) x");
+    _ = try ws.inspectDetailed(alloc, id, .{});
+
+    const cache = ws.inspect_cache.getPtr(id) orelse return error.TestUnexpectedResult;
+    const sig = cache.sig_map.get("f") orelse return error.TestUnexpectedResult;
+    const p = sig.params[0].type_name.?;
+    try std.testing.expect(p.tag == .table);
+    try std.testing.expect(p.tag.table.key == null);
+    try std.testing.expect(p.tag.table.value.*.tag == .any);
+}

@@ -1,12 +1,12 @@
 // zlint-disable line-length -- yeah
+//!
 //! local peephole pass over ir, runs after dce.dceIr
 //!
-//! `fold.foldIr` folds constant expressions and `dce.dceIr` drops dead
-//! instructions, but a few patterns survive
-//! ~ redundant copies: `move rA, rA`, and moves whose destination register
-//!   is overwritten again before anything reads it
-//! ~ identity and annihilator arithmetic that fold misses because one side
-//!   is not a constant (`x + 0`, `x * 1`, `x * 0`)
+//! `fold.foldIr` folds constant expressions (including identities like
+//! `x + 0`) and `dce.dceIr` drops dead instructions, but a few patterns
+//! survive
+//! ~ redundant copies: `move rA, rA` self-moves, which dce keeps because
+//!   the register is live
 //! ~ control flow: jumps that chain into other jumps, conditional jumps
 //!   immediately followed by an unconditional jump, and jumps that land on
 //!   the very next instruction
@@ -14,15 +14,11 @@
 //! deletes instructions in place and compacts at the end, remapping jump
 //! targets and function entry points exactly like dce.dceIr
 //!
-//! the identity folds drop the operand's runtime type check (a dynamic
-//! `x + 0` with a non-number x would error in the vm and now silently
-//! yields x), the number-safe identities are folded, annihilators only for
-//! the typed int opcodes where string/float fallbacks cannot apply
 
 const std = @import("std");
 
 const revo = @import("revo");
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("../compiler/root.zig").Compiler;
 const Opcode = revo.opcode.Opcode;
 const Operand = revo.Operand;
 const Register = revo.opcode.Register;
@@ -64,13 +60,12 @@ pub fn peepholeIr(self: *Compiler) !void {
         const inst = insts[i];
         switch (inst.opcode) {
             .move => {
-                if (try eliminateMove(i, insts, live, read_buf)) continue;
-                _ = try propagateMove(i, insts, live, is_target, read_buf);
+                eliminateSelfMove(i, insts, live);
+                if (live[i]) _ = try propagateMove(i, insts, live, is_target, read_buf);
             },
             .store_local, .bind_local => eliminateSelfLoad(i, insts, live, is_target),
             .table_set_atom => eliminateFieldRefetch(i, insts, live, is_target),
             .table_get_atom => reuseObjectLoad(i, insts, live, is_target),
-            .add, .sub, .mul, .div, .mod, .int_div, .band, .bor, .bxor, .shl, .shr, .add_imm, .sub_imm, .mul_imm, .band_imm, .lt_int_imm => _ = try foldIdentity(self, i, insts, live),
             .jump => {
                 if (inst.op_arg == i + 1) live[i] = false;
             },
@@ -270,7 +265,7 @@ fn eliminateFieldRefetch(i: usize, insts: []*ir.IrInst, live: []bool, is_target:
     if (reload.opcode != .load_local) return;
     if (reload.result_reg != val_reg) return;
     const slot = reload.op_arg;
-    if (!isFieldRefetchGet(insts[i + 2], set.opcode, set.op_arg, val_reg)) return;
+    if (!isFieldReadback(insts[i + 2], set.opcode, set.op_arg, val_reg)) return;
     if (is_target[i + 1] or is_target[i + 2]) return;
 
     // the setter's object register must have been loaded from the same slot,
@@ -359,13 +354,12 @@ fn reuseObjectLoad(i: usize, insts: []*ir.IrInst, live: []bool, is_target: []con
     if (redundant) |rd| live[rd] = false;
 }
 
-/// the `table_get_atom` that reads the field the setter
-/// just wrote, from the same object, into the value register
-fn isFieldRefetchGet(inst: *const ir.IrInst, set_op: Opcode, field: Operand, reg: Register) bool {
-    switch (inst.opcode) {
-        .table_get_atom => if (set_op != .table_set_atom) return false,
-        else => return false,
-    }
+/// a `table_get_atom` that reads the field a `table_set_atom` just wrote,
+/// from the same object register into the value register: the assignment's
+/// expression result, reading back the stored value
+fn isFieldReadback(inst: *const ir.IrInst, set_op: Opcode, field: Operand, reg: Register) bool {
+    if (set_op != .table_set_atom) return false;
+    if (inst.opcode != .table_get_atom) return false;
     if (inst.result_reg != reg) return false;
     if (inst.op_arg != field) return false;
     return true;
@@ -426,7 +420,7 @@ fn shiftSetterCopy(i: usize, insts: []*ir.IrInst, live: []bool, is_target: []con
     var readback: ?usize = null;
     for (user_idx + 1..insts.len) |k| {
         if (!live[k]) continue;
-        if (readback == null and k == user_idx + 1 and isFieldReadback(insts[k], user, dst_reg)) {
+        if (readback == null and k == user_idx + 1 and isFieldReadback(insts[k], user.opcode, user.op_arg, dst_reg)) {
             readback = k;
             continue;
         }
@@ -451,21 +445,6 @@ fn shiftSetterCopy(i: usize, insts: []*ir.IrInst, live: []bool, is_target: []con
     return true;
 }
 
-/// a `table_get_atom` that immediately follows a
-/// `table_set_atom` of the same field and reads the same
-/// object register: the assignment's expression result, reading the value
-/// that was just stored
-fn isFieldReadback(inst: *const ir.IrInst, user: *const ir.IrInst, dst_reg: Register) bool {
-    if (user.opcode != .table_set_atom) return false;
-    switch (inst.opcode) {
-        .table_get_atom => if (user.opcode != .table_set_atom) return false,
-        else => return false,
-    }
-    if (inst.result_reg != dst_reg) return false;
-    if (inst.op_arg != user.op_arg) return false;
-    return true;
-}
-
 fn readsReg(inst: *const ir.IrInst, reg: Register, buf: []Register) bool {
     const cnt = dce.readRegsAll(inst, buf);
     for (buf[0..cnt]) |r| if (r == reg) return true;
@@ -479,159 +458,16 @@ fn writesReg(inst: *const ir.IrInst, reg: Register) bool {
     return false;
 }
 
-/// remove a move whose destination register is never read
-///
-/// a self-move is a no-op and always deletes. otherwise the copy is dead
-/// when the destination register is overwritten again before anything reads
-/// it; that is only provable locally, so the region between the move and
-/// its next write must be straight-line (no jumps) with no reads of the
-/// register. anything more global was already handled by dce's per-block
-/// register liveness
-fn eliminateMove(i: usize, insts: []*ir.IrInst, live: []bool, read_buf: []Register) !bool {
+/// `move rA, rA` is a register no-op: repoint users so their `.inst`
+/// operands stay valid, then drop it. anything more global (destination
+/// overwritten before read) is dce's job via register liveness
+fn eliminateSelfMove(i: usize, insts: []*ir.IrInst, live: []bool) void {
     const m = insts[i];
-    if (m.operands.len != 1) return false;
+    if (m.operands.len != 1) return;
     const src_val = m.operands[0];
-    const src_reg: Register = ir.valueReg(src_val);
-    const dst_reg = m.result_reg;
-
-    if (src_reg == dst_reg) {
-        ir.repointUsers(insts, i + 1, m, src_val);
-        live[i] = false;
-        return true;
-    }
-
-    var w = insts.len;
-    for (i + 1..insts.len) |j| {
-        if (writesReg(insts[j], dst_reg)) {
-            w = j;
-            break;
-        }
-    }
-    if (w == insts.len) return false;
-    for (i + 1..w) |j| {
-        if (ir.isBranch(insts[j].opcode)) return false;
-        if (readsReg(insts[j], dst_reg, read_buf)) return false;
-    }
-    // the overwriter itself must not read the register: opcodes like
-    // `table_set_atom` read `result_reg` (the table) and then write it back
-    if (readsReg(insts[w], dst_reg, read_buf)) return false;
+    if (ir.valueReg(src_val) != m.result_reg) return;
     ir.repointUsers(insts, i + 1, m, src_val);
     live[i] = false;
-    return true;
-}
-
-/// rewrite `x OP c` where the constant makes the result equal to one
-/// operand (`x + 0`, `x * 1`) or a constant (`x * 0`)
-///
-/// when the surviving operand already writes the result register the
-/// instruction is a register no-op and is deleted; otherwise it becomes a
-/// copy
-///
-/// only integral small constants participate
-/// identity folds hold for floats too (including NaN)
-/// annihilators apply only where the op is exact on all inputs it accepts:
-///   band_imm requires integral lhs, so x&0 is 0,
-///
-/// but mul_imm takes any float and NaN*0 is NaN, so it has no annihilator
-///
-/// the `*_int_imm` forms carry their constant in `op_arg` (single operand)
-/// so they are folded against that constant too: the compiler's immediate
-/// emission must not hide an identity from this pass
-fn foldIdentity(self: *Compiler, i: usize, insts: []*ir.IrInst, live: []bool) !bool {
-    const inst = insts[i];
-    if (inst.operands.len == 1) return foldIdentityImm(self, i, insts, live, inst);
-    if (inst.operands.len != 2) return false;
-    const lhs = inst.operands[0];
-    const rhs = inst.operands[1];
-    if (lhs != .inst or rhs != .inst) return false;
-
-    const lc = constInt(self, lhs.inst);
-    const rc = constInt(self, rhs.inst);
-    if (lc == null and rc == null) return false;
-    if (lc != null and rc != null) return false;
-
-    const op = inst.opcode;
-    if (rc != null) {
-        if (identityWith(op, rc.?)) return try makeCopy(self, i, insts, live, lhs.inst);
-        if (annihilatorWith(op, rc.?)) return try makeConst(self, i, insts, 0);
-    }
-    if (lc != null and commutative(op)) {
-        if (identityWith(op, lc.?)) return try makeCopy(self, i, insts, live, rhs.inst);
-        if (annihilatorWith(op, lc.?)) return try makeConst(self, i, insts, 0);
-    }
-    return false;
-}
-
-fn foldIdentityImm(self: *Compiler, i: usize, insts: []*ir.IrInst, live: []bool, inst: *ir.IrInst) !bool {
-    const acc = inst.operands[0];
-    if (acc != .inst) return false;
-    const k: i64 = @intCast(inst.op_arg);
-    if (identityWith(inst.opcode, k)) return try makeCopy(self, i, insts, live, acc.inst);
-    if (annihilatorWith(inst.opcode, k)) return try makeConst(self, i, insts, 0);
-    return false;
-}
-
-fn makeCopy(self: *Compiler, i: usize, insts: []*ir.IrInst, live: []bool, src: *ir.IrInst) !bool {
-    const inst = insts[i];
-    if (src.result_reg == inst.result_reg) {
-        // register already holds the value; repoint users so their `.inst`
-        // operands stay valid, then drop the no-op
-        ir.repointUsers(insts, i + 1, inst, .{ .inst = src });
-        live[i] = false;
-        return true;
-    }
-    self.alloc.free(inst.operands);
-    inst.operands = try self.alloc.dupe(ir.IrValue, &.{.{ .inst = src }});
-    inst.opcode = .move;
-    return true;
-}
-
-fn makeConst(self: *Compiler, i: usize, insts: []*ir.IrInst, val: i64) !bool {
-    const inst = insts[i];
-    self.alloc.free(inst.operands);
-    inst.operands = try self.alloc.alloc(ir.IrValue, 0);
-    inst.opcode = .load_small_int;
-    inst.op_arg = @intCast(val);
-    return true;
-}
-
-fn constInt(self: *Compiler, inst: *const ir.IrInst) ?i64 {
-    switch (inst.opcode) {
-        .load_small_int => return @intCast(inst.op_arg),
-        .load_const => {
-            if (inst.op_arg < self.vm.constants.items.len) {
-                if (self.vm.constants.items[inst.op_arg].asNum()) |n| {
-                    if (revo.memory.numToI64(n)) |iv| {
-                        if (@as(f64, @floatFromInt(iv)) == n) return iv;
-                    }
-                }
-            }
-            return null;
-        },
-        else => return null,
-    }
-}
-
-fn commutative(op: Opcode) bool {
-    return switch (op) {
-        .add, .mul, .band, .bor, .bxor => true,
-        else => false,
-    };
-}
-
-fn identityWith(op: Opcode, c: i64) bool {
-    return switch (op) {
-        .add, .add_imm, .sub, .sub_imm => c == 0,
-        .mul, .mul_imm, .div, .int_div => c == 1,
-        else => false,
-    };
-}
-
-fn annihilatorWith(op: Opcode, c: i64) bool {
-    return switch (op) {
-        .band_imm => c == 0,
-        else => false,
-    };
 }
 
 /// `jump_if_false rA, L1; jump L2; L1: ...` inverts to
@@ -650,9 +486,9 @@ fn invertBranch(i: usize, insts: []*ir.IrInst, live: []bool) bool {
     return true;
 }
 
-const testing = revo.lang.testing;
+const pipeline = @import("../pipeline.zig");
+const testing = @import("../testing.zig");
 const t = testing;
-const lang = revo.lang;
 const VM = revo.VM;
 
 // -- [the tests] -------------------------------------------------------------
@@ -683,7 +519,7 @@ test "peephole: add zero folds away" {
     var vm = try VM.init(testRuntime());
     defer vm.deinit();
 
-    const built = try lang.build(&vm, .{ .text =
+    const built = try pipeline.build(&vm, .{ .text =
         \\fn f(x) do
         \\  x + 0
         \\end
@@ -724,34 +560,6 @@ test "peephole regressions" {
         \\end
         \\f(5)
     , 10);
-}
-
-test "peephole: dead move is eliminated" {
-    // a move whose destination register is overwritten again before
-    // anything reads it (straight-line, no jumps) is a dead copy and must
-    // be dropped
-    var vm = try VM.init(testRuntime());
-    defer vm.deinit();
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-
-    var compiler = try Compiler.init(&vm, false, arena.allocator(), std.testing.allocator);
-    defer compiler.deinit();
-
-    const a = try compiler.record(.load_small_int, &.{}, false, 0, 7);
-    _ = try compiler.record(.move, &.{.{ .inst = a }}, false, 1, 0);
-    _ = try compiler.record(.load_small_int, &.{}, false, 1, 8);
-    _ = try compiler.record(.ret, &.{}, false, 1, 0);
-    try appendSpans(&compiler, 4);
-
-    try peepholeIr(&compiler);
-
-    const insts = compiler.ir_builder.instructions.items;
-    try std.testing.expectEqual(@as(usize, 3), insts.len);
-    for (insts) |inst| {
-        if (inst.opcode == .move) return error.TestUnexpectedResult;
-    }
 }
 
 test "peephole: store then self-load is a no-op" {

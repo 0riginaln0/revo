@@ -1,0 +1,11 @@
+match {1, 2}
+# [x] either-match (or whatever the name for that is)
+| 1, 2 => :one_thru_five
+# [x] table matching
+| {x, y} => x + y
+# [ ] match on keys (by value not pattern rn)
+| {a = 5, y = 10} => a + y
+# [ ] rest
+| {_, _, ..rest} => :tail
+# [ ] range match
+| 1..5 => :one_thru_five

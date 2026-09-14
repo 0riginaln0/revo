@@ -2,7 +2,10 @@ const std = @import("std");
 const alloc = std.testing.allocator;
 const io = std.testing.io;
 
-const lang = @import("./root.zig");
+const diagnostic = @import("diagnostic.zig");
+const Lexer = @import("Lexer.zig");
+const Parser = @import("Parser.zig");
+const pipeline = @import("pipeline.zig");
 const revo = @import("revo");
 
 pub fn runtime() revo.Runtime {
@@ -15,15 +18,15 @@ pub fn runtime() revo.Runtime {
 }
 
 pub fn expectPrinted(source: []const u8, expected: []const u8) !void {
-    try lang.parser.testing.expectPrinted(source, expected);
+    try Parser.testing.expectPrinted(source, expected);
 }
 
-pub fn expectTypes(source: []const u8, expected: []const lang.TokenType) !void {
-    try lang.Lexer.testing.expectTypes(source, expected);
+pub fn expectTypes(source: []const u8, expected: []const Lexer.TokenType) !void {
+    try Lexer.testing.expectTypes(source, expected);
 }
 
-pub fn expectTokens(source: []const u8, expected: []const lang.Lexer.testing.ExpectedToken) !void {
-    try lang.Lexer.testing.expectTokens(source, expected);
+pub fn expectTokens(source: []const u8, expected: []const Lexer.testing.ExpectedToken) !void {
+    try Lexer.testing.expectTokens(source, expected);
 }
 
 const TopResult = struct {
@@ -36,7 +39,7 @@ const TopResult = struct {
 };
 
 fn compileChecked(vm: *revo.VM, source: []const u8) ![]revo.Instruction {
-    const result = try lang.build(vm, .{ .text = source }, .{
+    const result = try pipeline.build(vm, .{ .text = source }, .{
         .install_debug_info = true,
     });
     return switch (result) {
@@ -165,8 +168,8 @@ pub fn topFalse(source: []const u8) !void {
     try std.testing.expect(revo.isFalse(result.value));
 }
 
-fn buildOkWithWarnings(source: []const u8, vm: *revo.VM, w: *?lang.diagnostic.Report) !void {
-    const result = try lang.buildWithWarnings(vm, .{ .text = source }, .{
+fn buildOkWithWarnings(source: []const u8, vm: *revo.VM, w: *?diagnostic.Report) !void {
+    const result = try pipeline.buildWithWarnings(vm, .{ .text = source }, .{
         .install_debug_info = false,
     }, w);
     switch (result) {
@@ -204,11 +207,11 @@ pub fn expectWarning(source: []const u8, snippet: []const u8) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    var w: ?lang.diagnostic.Report = null;
+    var w: ?diagnostic.Report = null;
     defer if (w) |*wr| wr.deinit(alloc);
     try buildOkWithWarnings(source, &vm, &w);
     const wr = w orelse return error.ExpectedWarning;
-    const msg = lang.diagnostic.firstWarn(wr) orelse return error.ExpectedWarning;
+    const msg = diagnostic.firstWarn(wr) orelse return error.ExpectedWarning;
     try std.testing.expect(std.mem.find(u8, msg, snippet) != null);
 }
 
@@ -216,7 +219,7 @@ pub fn expectWarningCode(source: []const u8, code: []const u8) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    var w: ?lang.diagnostic.Report = null;
+    var w: ?diagnostic.Report = null;
     defer if (w) |*wr| wr.deinit(alloc);
     try buildOkWithWarnings(source, &vm, &w);
     const wr = w orelse return error.ExpectedWarning;
@@ -228,7 +231,7 @@ pub fn expectSuggestion(source: []const u8, snippet: []const u8) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    var w: ?lang.diagnostic.Report = null;
+    var w: ?diagnostic.Report = null;
     defer if (w) |*wr| wr.deinit(alloc);
     try buildOkWithWarnings(source, &vm, &w);
     const wr = w orelse return error.ExpectedWarning;
@@ -242,14 +245,14 @@ pub fn expectNoWarning(source: []const u8) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    var w: ?lang.diagnostic.Report = null;
+    var w: ?diagnostic.Report = null;
     defer if (w) |*wr| wr.deinit(alloc);
     try buildOkWithWarnings(source, &vm, &w);
     try std.testing.expect(w == null);
 }
 
-fn buildExpectingFailure(source: []const u8, vm: *revo.VM) !lang.LowerFailure {
-    const result = try lang.build(vm, .{ .text = source }, .{
+fn buildExpectingFailure(source: []const u8, vm: *revo.VM) !pipeline.Error {
+    const result = try pipeline.build(vm, .{ .text = source }, .{
         .install_debug_info = false,
     });
     switch (result) {
@@ -258,11 +261,7 @@ fn buildExpectingFailure(source: []const u8, vm: *revo.VM) !lang.LowerFailure {
             defer alloc.free(artifact.spans);
             return error.ExpectedCompileFailure;
         },
-        .err => |failure| switch (failure) {
-            .lower, .semantic => |err| return err,
-            .expand => return error.ExpectedLowerFailure,
-            .parse => return error.ExpectedLowerFailure,
-        },
+        .err => |failure| return failure,
     }
 }
 
@@ -272,17 +271,36 @@ pub fn expectErrorCode(source: []const u8, code: []const u8) !void {
 
     const err = try buildExpectingFailure(source, &vm);
     defer vm.runtime.resetDiagArena();
-    const got = err.report.code orelse return error.ExpectedCode;
+    const got = switch (err) {
+        inline else => |f| f.report.code orelse return error.ExpectedCode,
+    };
     try std.testing.expectEqualStrings(code, got);
 }
 
-pub fn expectCompileError(source: []const u8, expected: lang.LowerErrorKind) !void {
+pub fn expectCompileError(source: []const u8, expected: pipeline.LowerErrorKind) !void {
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
     const err = try buildExpectingFailure(source, &vm);
     defer vm.runtime.resetDiagArena();
-    try std.testing.expectEqual(expected, err.kind);
+    switch (err) {
+        .lower => |failure| try std.testing.expectEqual(expected, failure.kind),
+        else => return error.ExpectedLowerFailure,
+    }
+}
+
+/// semantic failures carry their own kind; this asserts the stage.
+/// use expectSemanticFailure for line and message precision.
+pub fn expectSemanticError(source: []const u8) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    const err = try buildExpectingFailure(source, &vm);
+    defer vm.runtime.resetDiagArena();
+    switch (err) {
+        .semantic => {},
+        else => return error.ExpectedSemanticFailure,
+    }
 }
 
 pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void {
@@ -293,7 +311,7 @@ pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void
     const source_name = try std.Io.Dir.path.join(alloc, &.{ module_dir, "<source>" });
     defer alloc.free(source_name);
 
-    const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{
+    const result = try pipeline.build(&vm, .{ .name = source_name, .text = source }, .{
         .install_debug_info = false,
     });
     switch (result) {
@@ -314,7 +332,7 @@ pub fn expectCompileErrorInDir(module_dir: []const u8, source: []const u8) !void
     }
 }
 
-fn checkExpandError(vm: *revo.VM, result: lang.BuildResult, expected_message: []const u8) !void {
+fn checkExpandError(vm: *revo.VM, result: pipeline.BuildResult, expected_message: []const u8) !void {
     switch (result) {
         .ok => |artifact| {
             defer vm.runtime.alloc.free(artifact.instructions);
@@ -323,7 +341,7 @@ fn checkExpandError(vm: *revo.VM, result: lang.BuildResult, expected_message: []
         },
         .err => |failure| switch (failure) {
             .expand => |diag| {
-                const msg = lang.diagnostic.firstError(diag.report).?;
+                const msg = diagnostic.firstError(diag.report).?;
                 try std.testing.expectEqualStrings(expected_message, msg);
                 vm.runtime.resetDiagArena();
             },
@@ -336,7 +354,7 @@ pub fn expectExpandError(source: []const u8, expected_message: []const u8) !void
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    const result = try lang.build(&vm, .{ .text = source }, .{
+    const result = try pipeline.build(&vm, .{ .text = source }, .{
         .install_debug_info = false,
     });
 
@@ -351,7 +369,7 @@ pub fn expectExpandErrorInDir(module_dir: []const u8, source: []const u8, expect
     const source_name = try std.Io.Dir.path.join(alloc, &.{ module_dir, "<source>" });
     defer alloc.free(source_name);
 
-    const result = try lang.build(&vm, .{ .name = source_name, .text = source }, .{
+    const result = try pipeline.build(&vm, .{ .name = source_name, .text = source }, .{
         .install_debug_info = false,
     });
 
@@ -360,7 +378,7 @@ pub fn expectExpandErrorInDir(module_dir: []const u8, source: []const u8, expect
 
 pub fn expectCompileFailure(
     source: []const u8,
-    expected_kind: lang.LowerErrorKind,
+    expected_kind: pipeline.LowerErrorKind,
     expected_line: u32,
     expected_column: u32,
     expected_message: []const u8,
@@ -368,7 +386,7 @@ pub fn expectCompileFailure(
     var vm = try revo.VM.init(runtime());
     defer vm.deinit();
 
-    const result = try lang.build(&vm, .{ .text = source }, .{
+    const result = try pipeline.build(&vm, .{ .text = source }, .{
         .install_debug_info = false,
     });
     switch (result) {
@@ -380,10 +398,45 @@ pub fn expectCompileFailure(
         .err => |failure| switch (failure) {
             .parse => return error.ExpectedLowerFailure,
             .expand => return error.ExpectedLowerFailure,
-            .lower, .semantic => |diag| {
+            .lower => |diag| {
                 try std.testing.expectEqual(expected_kind, diag.kind);
-                const span = lang.diagnostic.primarySpan(diag.report).?;
-                const msg = lang.diagnostic.firstError(diag.report).?;
+                const span = diagnostic.primarySpan(diag.report).?;
+                const msg = diagnostic.firstError(diag.report).?;
+                try std.testing.expectEqual(expected_line, span.span.line);
+                try std.testing.expectEqual(expected_column, span.span.column);
+                try std.testing.expectEqualStrings(expected_message, msg);
+                vm.runtime.resetDiagArena();
+            },
+            .semantic => return error.ExpectedLowerFailure,
+        },
+    }
+}
+
+pub fn expectSemanticFailure(
+    source: []const u8,
+    expected_line: u32,
+    expected_column: u32,
+    expected_message: []const u8,
+) !void {
+    var vm = try revo.VM.init(runtime());
+    defer vm.deinit();
+
+    const result = try pipeline.build(&vm, .{ .text = source }, .{
+        .install_debug_info = false,
+    });
+    switch (result) {
+        .ok => |artifact| {
+            defer alloc.free(artifact.instructions);
+            defer alloc.free(artifact.spans);
+            return error.ExpectedCompileFailure;
+        },
+        .err => |failure| switch (failure) {
+            .parse => return error.ExpectedSemanticFailure,
+            .expand => return error.ExpectedSemanticFailure,
+            .lower => return error.ExpectedSemanticFailure,
+            .semantic => |diag| {
+                const span = diagnostic.primarySpan(diag.report).?;
+                const msg = diagnostic.firstError(diag.report).?;
                 try std.testing.expectEqual(expected_line, span.span.line);
                 try std.testing.expectEqual(expected_column, span.span.column);
                 try std.testing.expectEqualStrings(expected_message, msg);
@@ -442,8 +495,8 @@ pub fn expectRuntimeFailure(
         .ok => return error.ExpectedRuntimeFailure,
         .err => |failure| {
             try std.testing.expectEqual(expected_kind, failure.kind);
-            const span = lang.diagnostic.primarySpan(failure.report).?;
-            const msg = lang.diagnostic.firstError(failure.report).?;
+            const span = diagnostic.primarySpan(failure.report).?;
+            const msg = diagnostic.firstError(failure.report).?;
             try std.testing.expectEqual(expected_line, span.span.line);
             try std.testing.expectEqual(expected_column, span.span.column);
             try std.testing.expectEqualStrings(expected_message, msg);
@@ -470,7 +523,7 @@ pub fn expectRuntimeFailureWithMessage(
             try std.testing.expectEqual(expected_kind, failure.kind);
             try std.testing.expectEqualStrings(
                 expected_message,
-                lang.diagnostic.firstError(failure.report).?,
+                diagnostic.firstError(failure.report).?,
             );
         },
     }

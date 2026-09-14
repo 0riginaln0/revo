@@ -3,7 +3,6 @@ const std = @import("std");
 const types = @import("compiler/types.zig");
 const TypeInfo = types.TypeInfo;
 
-const type_serde = @import("type_serde.zig");
 
 /// ======================= pub iface of mod ast ==========================
 /// this bhv shold be
@@ -85,6 +84,10 @@ const ModuleCtx = struct {
     stack: std.ArrayList([]const u8),
     type_params: []const []const u8 = &.{},
 
+    pub fn check(self: *ModuleCtx) types.CheckCtx {
+        return types.CheckCtx.init(self, self.alloc);
+    }
+
     pub fn isTypeParam(self: *const ModuleCtx, name: []const u8) bool {
         for (self.type_params) |tp| if (std.mem.eql(u8, tp, name)) return true;
         return false;
@@ -95,7 +98,7 @@ const ModuleCtx = struct {
         for (self.stack.items) |s| if (std.mem.eql(u8, s, name)) return null;
         self.stack.append(self.alloc, name) catch return null;
         defer _ = self.stack.pop();
-        return type_serde.evalTypeExpr(self, raw) catch null;
+        return types.evalTypeExpr(self.check(), raw) catch null;
     }
 
     /// qualified refs inside deps (dep on dep types) stay unresolved
@@ -130,7 +133,8 @@ const ModuleCtx = struct {
         doc: ?[]const u8,
     ) TypeInfo {
         const saved = self.type_params;
-        self.type_params = type_params;
+        const combined = types.combinedTypeParams(self.alloc, type_params, params) catch type_params;
+        self.type_params = combined;
         defer self.type_params = saved;
 
         var param_types = std.ArrayList(TypeInfo).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
@@ -141,7 +145,7 @@ const ModuleCtx = struct {
 
         for (params) |p| {
             param_names.append(self.alloc, p.name) catch return .{ .tag = .any };
-            param_types.append(self.alloc, if (p.type_name) |tn| type_serde.evalTypeExpr(self, tn) catch .{ .tag = .any } else .{ .tag = .any }) catch return .{ .tag = .any };
+            param_types.append(self.alloc, if (p.type_name) |tn| types.evalTypeExpr(self.check(), tn) catch .{ .tag = .any } else types.implicitParamType(p)) catch return .{ .tag = .any };
             if (!p.optional and p.default_value == null) required += 1;
         }
 
@@ -151,7 +155,7 @@ const ModuleCtx = struct {
         errdefer self.alloc.free(owned_names);
 
         const ret: TypeInfo = if (return_type) |rt|
-            type_serde.evalTypeExpr(self, rt) catch .{ .tag = .any }
+            types.evalTypeExpr(self.check(), rt) catch .{ .tag = .any }
         else
             .{ .tag = .any };
 
@@ -160,7 +164,7 @@ const ModuleCtx = struct {
             .params = owned_params,
             .return_type = ret,
             .required_count = required,
-            .type_params = type_params,
+            .type_params = combined,
             .doc = doc,
         }) catch return .{ .tag = .any };
         return .{ .tag = .{ .function = sig } };
@@ -175,7 +179,7 @@ fn moduleExportInto(mctx: *ModuleCtx, node: *const ast.Node, out: *std.ArrayList
             if (d.kind == .declare_decl and d.inner.expr == .type_alias) {
                 if (!d.pub_) return;
                 const t = d.inner.expr.type_alias;
-                const ft = type_serde.evalTypeExpr(mctx, t.type_expr) catch TypeInfo{ .tag = .any };
+                const ft = types.evalTypeExpr(mctx.check(), t.type_expr) catch TypeInfo{ .tag = .any };
                 try out.append(alloc, .{ .name = t.name, .field_type = ft });
                 return;
             }
@@ -188,7 +192,7 @@ fn moduleExportInto(mctx: *ModuleCtx, node: *const ast.Node, out: *std.ArrayList
                         // inferred with the module ctx: unknown names
                         // degrade to any inside inference, so nothing
                         // leaks across scopes
-                        .field_type = types.inferExprType(mctx, b.value),
+                        .field_type = types.inferExprType(mctx.check(), b.value),
                     });
                 },
                 // type aliases are compile-time only so skip them

@@ -568,9 +568,9 @@ test "fs.open unknown mode is a type error" {
 }
 
 test "fs.open non-string path is a compile error" {
-    try testing.expectCompileFailure(
+    try testing.expectSemanticFailure(
         \\ fs.open(42)
-    , .ParseError, 1, 10, "arg 1 (`path`) to `open` wants string, got number");
+    , 1, 10, "arg 1 (`path`) to `open` wants string, got number");
 }
 
 test "fs.touch creates missing file and leaves existing content" {

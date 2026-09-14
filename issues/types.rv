@@ -1,0 +1,26 @@
+# [ ] shadowing overrides type
+
+do # [ ] the docs are not inherited from rng.rand into x
+	let a = rng.rand
+	a
+end
+
+do # [ ] type of x should be num | string
+	let b = 
+		match input()
+		| {:ok, v} => v
+		| {:err, e} => 123
+end
+
+# [ ] type is `(type = {:ok, string} | {:err, any})`
+#     but should be !string
+let c = input()
+
+# [ ] return type inferred as string
+fn d[T](val: !T)
+  if val[0] == :ok
+    val[1]
+  else "bad"
+
+# [ ] type of x inferred as string
+let e = d({:ok, 5})

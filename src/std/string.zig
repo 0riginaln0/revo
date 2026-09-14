@@ -250,12 +250,12 @@ test "string methods" {
     try testing.topNumber("\"hello\":index_of(\"ll\")", 2);
     try testing.topString("string.of_ascii(97)", "a");
     try testing.topString("'hello':upper()", "HELLO");
-    try testing.expectCompileError("'hello':sub('x', 2)", .ParseError);
-    try testing.expectCompileError("'hello':sub(2, 2, 3)", .ParseError);
+    try testing.expectSemanticError("'hello':sub('x', 2)");
+    try testing.expectSemanticError("'hello':sub(2, 2, 3)");
     try testing.topNumber("'hello':find('el')", 1);
-    try testing.expectCompileError("'hello':find(42)", .ParseError);
+    try testing.expectSemanticError("'hello':find(42)");
     try testing.topString("'hello':replace('l', 'x')", "hexxo");
-    try testing.expectCompileError("'hello':replace(1, 'x')", .ParseError);
+    try testing.expectSemanticError("'hello':replace(1, 'x')");
     try testing.topString("'hello':add(' world')", "hello world");
     try testing.topString("\"\":add(\"abc\")", "abc");
     try testing.topString("\"abc\":add(\"\")", "abc");

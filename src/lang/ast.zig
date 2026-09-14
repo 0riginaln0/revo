@@ -1,5 +1,4 @@
 const std = @import("std");
-const type_serde = @import("type_serde.zig");
 
 pub const Span = struct {
     start: usize,
@@ -145,6 +144,174 @@ pub fn atomName(name: []const u8) []const u8 {
     return if (name.len > 0 and name[0] == ':') name[1..] else name;
 }
 
+/// render a TypeExpr to the writer
+/// mirrors type_serde.parseTypeExpr: every Kind parses and prints
+pub fn printTypeExpr(te: *const TypeExpr, writer: *std.Io.Writer) !void {
+    switch (te.kind) {
+        .named => |name| try writer.writeAll(name),
+        // atom payloads come both bare (`nil` from the main parser)
+        // and colon-prefixed (`:nil` from the type parser)
+        .atom => |name| try writer.print(":{s}", .{atomName(name)}),
+        .union_of => |variants| {
+            // `T?` sugar, for a 2-union ending in `:nil`
+            if (variants.len == 2 and variants[1].kind == .atom and
+                std.mem.eql(u8, atomName(variants[1].kind.atom), "nil"))
+            {
+                try printTypeExpr(variants[0], writer);
+                try writer.writeByte('?');
+            } else for (variants, 0..) |v, i| {
+                if (i > 0) try writer.writeAll(" | ");
+                try printTypeExpr(v, writer);
+            }
+        },
+        .qualified => |q| {
+            try writer.writeAll(q.module);
+            try writer.writeByte('.');
+            try writer.writeAll(q.name);
+        },
+        .record => |fields| {
+            try writer.writeByte('{');
+            for (fields, 0..) |f, i| {
+                if (i > 0) try writer.writeAll(", ");
+                // numeric names are positional array entries (`{ number, number }`)
+                const positional = f.name.len > 0 and blk: {
+                    for (f.name) |c| if (!std.ascii.isDigit(c)) break :blk false;
+                    break :blk true;
+                };
+                if (!positional) {
+                    try writer.writeAll(f.name);
+                    try writer.writeAll(": ");
+                }
+                try printTypeExpr(f.type_expr, writer);
+            }
+            try writer.writeByte('}');
+        },
+        .function => |f| {
+            try writer.writeAll("fn(");
+            for (f.params, 0..) |p, i| {
+                if (i > 0) try writer.writeAll(", ");
+                if (p.optional) try writer.writeByte('?');
+                if (p.name.len > 0) {
+                    try writer.writeAll(p.name);
+                    if (p.type_name != null) try writer.writeAll(": ");
+                }
+
+                if (p.type_name) |t| try printTypeExpr(t, writer);
+                if (p.variadic) try writer.writeAll("...");
+            }
+            try writer.writeByte(')');
+            if (f.return_type) |ret| {
+                try writer.writeAll(" -> ");
+                try printTypeExpr(ret, writer);
+            }
+        },
+        .parameterized => |p| {
+            try writer.writeAll(p.name);
+            try writer.writeByte('<');
+            for (p.params, 0..) |param, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try printTypeExpr(param, writer);
+            }
+            try writer.writeByte('>');
+        },
+        .error_union => |inner| {
+            try writer.writeByte('!');
+            try printTypeExpr(inner, writer);
+        },
+    }
+}
+
+/// deep-copy a TypeExpr
+/// dupe every borrowed string (names borrow source text)
+///     paired with freeTypeExpr
+/// default_value pointers copy over but stay unowned (type position never sets them)
+pub fn cloneTypeExpr(alloc: std.mem.Allocator, te: *const TypeExpr) std.mem.Allocator.Error!*TypeExpr {
+    const kind: TypeExpr.Kind = switch (te.kind) {
+        .named => |n| .{ .named = try alloc.dupe(u8, n) },
+        .atom => |n| .{ .atom = try alloc.dupe(u8, n) },
+        .union_of => |variants| blk: {
+            const owned = try alloc.alloc(*TypeExpr, variants.len);
+            for (variants, owned) |v, *dst| dst.* = try cloneTypeExpr(alloc, v);
+            break :blk .{ .union_of = owned };
+        },
+        .record => |fields| blk: {
+            const owned = try alloc.alloc(RecordField, fields.len);
+            for (fields, owned) |f, *dst| dst.* = .{
+                .name = try alloc.dupe(u8, f.name),
+                .type_expr = try cloneTypeExpr(alloc, f.type_expr),
+            };
+            break :blk .{ .record = owned };
+        },
+        .qualified => |q| .{ .qualified = .{
+            .module = try alloc.dupe(u8, q.module),
+            .name = try alloc.dupe(u8, q.name),
+        } },
+        .function => |f| blk: {
+            const params = try alloc.alloc(FnParam, f.params.len);
+            for (f.params, params) |p, *dst| dst.* = .{
+                .name = try alloc.dupe(u8, p.name),
+                .name_span = p.name_span,
+                .type_name = if (p.type_name) |tn| try cloneTypeExpr(alloc, tn) else null,
+                .optional = p.optional,
+                .default_value = p.default_value,
+                .variadic = p.variadic,
+            };
+            break :blk .{ .function = .{
+                .params = params,
+                .return_type = if (f.return_type) |rt| try cloneTypeExpr(alloc, rt) else null,
+            } };
+        },
+        .parameterized => |p| blk: {
+            const owned = try alloc.alloc(*TypeExpr, p.params.len);
+            for (p.params, owned) |item, *dst| dst.* = try cloneTypeExpr(alloc, item);
+            break :blk .{ .parameterized = .{
+                .name = try alloc.dupe(u8, p.name),
+                .params = owned,
+            } };
+        },
+        .error_union => |inner| .{ .error_union = try cloneTypeExpr(alloc, inner) },
+    };
+    return try allocTypeExpr(alloc, te.span, kind);
+}
+
+/// free a cloneTypeExpr tree: strings, slices, nodes
+pub fn freeTypeExpr(alloc: std.mem.Allocator, te: *TypeExpr) void {
+    switch (te.kind) {
+        .named => |n| alloc.free(n),
+        .atom => |n| alloc.free(n),
+        .union_of => |variants| {
+            for (variants) |v| freeTypeExpr(alloc, v);
+            alloc.free(variants);
+        },
+        .record => |fields| {
+            for (fields) |f| {
+                alloc.free(f.name);
+                freeTypeExpr(alloc, f.type_expr);
+            }
+            alloc.free(fields);
+        },
+        .qualified => |q| {
+            alloc.free(q.module);
+            alloc.free(q.name);
+        },
+        .function => |f| {
+            for (f.params) |p| {
+                alloc.free(p.name);
+                if (p.type_name) |tn| freeTypeExpr(alloc, tn);
+            }
+            alloc.free(f.params);
+            if (f.return_type) |rt| freeTypeExpr(alloc, rt);
+        },
+        .parameterized => |p| {
+            alloc.free(p.name);
+            for (p.params) |param| freeTypeExpr(alloc, param);
+            alloc.free(p.params);
+        },
+        .error_union => |inner| freeTypeExpr(alloc, inner),
+    }
+    alloc.destroy(te);
+}
+
 /// static `name = v` / `:name = v` key, or null for computed keys,
 /// dynamic keys, and keyless entries
 pub fn staticFieldName(entry: TableEntry) ?[]const u8 {
@@ -215,7 +382,7 @@ pub const Binding = struct {
             try self.target.printAt(writer, d + 1);
             if (self.type_name) |t| {
                 try writer.writeByte(':');
-                try type_serde.printTypeExpr(t, writer);
+                try printTypeExpr(t, writer);
             }
             try writer.writeByte('\n');
             try writeIndent(writer, d + 1);
@@ -227,7 +394,7 @@ pub const Binding = struct {
             try self.target.printAt(writer, null);
             if (self.type_name) |t| {
                 try writer.writeByte(':');
-                try type_serde.printTypeExpr(t, writer);
+                try printTypeExpr(t, writer);
             }
             try writer.writeByte(' ');
             try self.value.printAt(writer, null);
@@ -508,13 +675,13 @@ pub const Node = struct {
                     try writer.writeAll(param.name);
                     if (param.type_name) |t| {
                         try writer.writeByte(':');
-                        try type_serde.printTypeExpr(t, writer);
+                        try printTypeExpr(t, writer);
                     }
                 }
                 try writer.writeByte(')');
                 if (fn_expr.return_type) |ret| {
                     try writer.writeAll(" -> ");
-                    try type_serde.printTypeExpr(ret, writer);
+                    try printTypeExpr(ret, writer);
                 }
                 try sep(writer, depth, 1);
                 try fn_expr.body.printAt(writer, child(depth));
@@ -590,7 +757,7 @@ pub const Node = struct {
                     try writer.writeAll(param.name);
                     if (param.type_name) |t| {
                         try writer.writeByte(':');
-                        try type_serde.printTypeExpr(t, writer);
+                        try printTypeExpr(t, writer);
                     }
                 }
                 try writer.writeAll(" in ");
@@ -655,7 +822,7 @@ pub const Node = struct {
                 try sep(writer, depth, 1);
                 try a.expr.printAt(writer, child(depth));
                 try sep(writer, depth, 1);
-                try type_serde.printTypeExpr(a.type_name, writer);
+                try printTypeExpr(a.type_name, writer);
                 try close(writer, depth);
             },
             .table => |entries| {
@@ -704,7 +871,7 @@ pub const Node = struct {
             .type_alias => |t| {
                 try writer.print("(type {s}", .{t.name});
                 try sep(writer, depth, 1);
-                try type_serde.printTypeExpr(t.type_expr, writer);
+                try printTypeExpr(t.type_expr, writer);
                 try close(writer, depth);
             },
             .quasiquote => |qq| {
@@ -1040,8 +1207,6 @@ pub fn walkAST(comptime Visitor: type, visitor: *Visitor, node: *const Node) voi
     }
 }
 
-const lang = @import("./root.zig");
-
 const UnderscoreVisitor = struct {
     found: bool = false,
 
@@ -1071,22 +1236,23 @@ pub fn hasUnderscore(node: *const Node) bool {
 }
 
 test "hasUnderscore" {
+    const pipeline = @import("pipeline.zig");
     var alloc = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer alloc.deinit();
     const arena = alloc.allocator();
-    var res = (try lang.parse(arena, .{ .text = "_", .name = "<>" }, .{})).ok;
+    var res = (try pipeline.parse(arena, .{ .text = "_", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "x", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "x", .name = "<>" }, .{})).ok;
     try std.testing.expect(!hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "{_, x}", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "{_, x}", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "call{_, x}", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "call{_, x}", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "{a, b}", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "{a, b}", .name = "<>" }, .{})).ok;
     try std.testing.expect(!hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "_:meth()", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "_:meth()", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
-    res = (try lang.parse(arena, .{ .text = "_ + 42", .name = "<>" }, .{})).ok;
+    res = (try pipeline.parse(arena, .{ .text = "_ + 42", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
 }
 pub const NumberLiteral = struct {

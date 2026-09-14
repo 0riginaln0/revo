@@ -1,15 +1,17 @@
 const std = @import("std");
 
-const lang = @import("./root.zig");
-const ast = lang.ast;
+const ast = @import("ast.zig");
 const Expr = ast.Expr;
 const Node = ast.Node;
 const Span = ast.Span;
+const Lexer = @import("Lexer.zig");
 const testing_helpers = @import("testing.zig");
-const lexer = lang.Lexer;
-const Token = lexer.Token;
-const TokenType = lexer.TokenType;
+const Token = Lexer.Token;
+const TokenType = Lexer.TokenType;
 const type_serde = @import("type_serde.zig");
+
+/// TODO: have an actual opts struct pLEASE
+pub var repl_mode: bool = false;
 
 const BP: struct {
     const i = comptime_int;
@@ -72,6 +74,50 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const Token) anyerror
             else => error.ParseFailed,
         },
     };
+}
+
+/// lex + parse in one call, the pure frontend entry
+/// stdlib-free: prelude merging lives in pipeline.parse
+pub fn parseSource(allocator: std.mem.Allocator, source: []const u8) !*Node {
+    return switch (try parseSourceReport(allocator, source)) {
+        .ok => |expr| expr,
+        .err => |failure| switch (failure.kind) {
+            .LexUnexpectedCharacter => error.UnexpectedCharacter,
+            .LexUnterminatedComment => error.UnterminatedComment,
+            .LexUnterminatedString => error.UnterminatedString,
+            .LexLateModuleDoc => error.LateModuleDoc,
+            .UnexpectedToken => error.UnexpectedToken,
+            .ExpectedIdentifier => error.ExpectedIdentifier,
+            .ExpectedMatchArm => error.ExpectedMatchArm,
+            .LexUnknown => error.ParseFailed,
+            .InvalidNumber => error.ParseFailed,
+        },
+    };
+}
+
+pub fn parseSourceReport(allocator: std.mem.Allocator, source: []const u8) !ParseResult {
+    const lexed = try Lexer.lexReportAt(allocator, source, .{});
+    const tokens = switch (lexed) {
+        .ok => |items| items,
+        .err => |failure| {
+            const kind: Kind = switch (failure.kind) {
+                .UnexpectedCharacter => .LexUnexpectedCharacter,
+                .UnterminatedComment => .LexUnterminatedComment,
+                .UnterminatedString => .LexUnterminatedString,
+                .LateModuleDoc => .LexLateModuleDoc,
+                .Unknown => .LexUnknown,
+            };
+            const parts = try allocator.alloc(diagnostic.Part, 2);
+            parts[0] = diagnostic.Part{ .@"error" = failure.message };
+            parts[1] = .{ .span = .{ .span = failure.span, .role = .primary } };
+            return .{ .err = .{
+                .kind = kind,
+                .report = .{ .parts = parts, .message = failure.message },
+            } };
+        },
+    };
+    defer allocator.free(tokens);
+    return parseTokensReport(allocator, tokens);
 }
 
 pub fn parseTokensReport(alloc: std.mem.Allocator, tokens: []const Token) anyerror!ParseResult {
@@ -676,7 +722,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
             });
             return self.allocExpr(
                 Span.merge(start.span(), body.span),
-                .{ .decl = .{ .inner = bind_node, .kind = ast.DeclKind.con } },
+                .{ .decl = .{ .inner = bind_node, .kind = if (repl_mode) .global else .con } },
             );
         }
         return error.UnexpectedToken;
@@ -788,17 +834,14 @@ fn parseMatchArm(self: *Parser) anyerror!ast.MatchArm {
 
 /// type Name = TypeExpr
 fn parseTypeExpr(self: *Parser) anyerror!*ast.TypeExpr {
-    return try type_serde.parse(self.tokens, &self.pos, self.alloc);
+    return try type_serde.parseTypeExpr(self.tokens, &self.pos, self.alloc);
 }
 
 /// const x = expr or let x = expr, with const {a, b} = <expr> destructuring
-fn parseBinding(self: *Parser, comptime kind: ast.DeclKind, start: Token) anyerror!*Node {
-    const mutable: bool = switch (kind) {
-        ast.DeclKind.con => false,
-        ast.DeclKind.let => true,
-        ast.DeclKind.global => false,
-        else => @compileError("unsupported binding kind to parseBinding"),
-    };
+fn parseBinding(self: *Parser, comptime kind_in: ast.DeclKind, start: Token) anyerror!*Node {
+    const kind: ast.DeclKind = if (repl_mode) .global else kind_in;
+
+    const mutable = (kind == .global or kind == .let);
 
     const target: *Node = blk: {
         if (self.check(.lsquiggly)) {
@@ -1232,10 +1275,10 @@ fn parseQuasiquote(self: *Parser, token: Token) anyerror!*Node {
     var splice_count: usize = 0;
     var i: usize = 0;
     while (i < raw.len) {
-        if (raw[i] == '%' and i + 1 < raw.len and lexer.isIdentStart(raw[i + 1])) {
+        if (raw[i] == '%' and i + 1 < raw.len and Lexer.isIdentStart(raw[i + 1])) {
             splice_count += 1;
             i += 1;
-            while (i < raw.len and lexer.isIdentContinue(raw[i])) i += 1;
+            while (i < raw.len and Lexer.isIdentContinue(raw[i])) i += 1;
         } else i += 1;
     }
 
@@ -1245,10 +1288,10 @@ fn parseQuasiquote(self: *Parser, token: Token) anyerror!*Node {
     i = 0;
     var counter: usize = 0;
     while (i < raw.len) {
-        if (raw[i] == '%' and i + 1 < raw.len and lexer.isIdentStart(raw[i + 1])) {
+        if (raw[i] == '%' and i + 1 < raw.len and Lexer.isIdentStart(raw[i + 1])) {
             i += 1;
             const start = i;
-            while (i < raw.len and lexer.isIdentContinue(raw[i])) i += 1;
+            while (i < raw.len and Lexer.isIdentContinue(raw[i])) i += 1;
             try splices.append(self.alloc, raw[start..i]);
             try modified.appendSlice(self.alloc, "__qq_");
             var buf: [32]u8 = undefined;
@@ -1264,7 +1307,7 @@ fn parseQuasiquote(self: *Parser, token: Token) anyerror!*Node {
     // spans land in real src coords
     // `%x` -> `__qq_N` rewrites shift
     // byte offsets after first splice, so those are approx
-    const inner = try parseTokens(self.alloc, try lexer.lexAt(self.alloc, modified.items, .{
+    const inner = try parseTokens(self.alloc, try Lexer.lexAt(self.alloc, modified.items, .{
         .offset = token.start + 1,
         .line = token.line,
         .column = token.column + 1,
@@ -1437,7 +1480,7 @@ fn parseParenExpr(self: *Parser, start: Token) anyerror!*Node {
 ///   ; value positions reject it later with a proper error
 fn parseAscribed(self: *Parser, first: *Node) anyerror!*Node {
     _ = try self.expect(.colon);
-    const type_name = try type_serde.parse(self.tokens, &self.pos, self.alloc);
+    const type_name = try type_serde.parseTypeExpr(self.tokens, &self.pos, self.alloc);
 
     return self.allocExpr(
         Span.merge(first.span, type_name.span),
@@ -1482,8 +1525,10 @@ fn parseParamList(self: *Parser, terminator: TokenType) anyerror![]ast.FnParam {
         const optional = self.match(.huh);
         const name = try self.expectIdent();
         var param: ast.FnParam = .{ .name = name.text, .name_span = name.span(), .optional = optional };
+
         if (self.match(.colon)) param.type_name = try self.parseTypeExpr();
         if (self.match(.assign)) param.default_value = try self.parseExpression(0);
+
         try params.append(self.alloc, param);
         if (!self.match(.comma)) break;
     }
@@ -1983,7 +2028,7 @@ fn parseInterpolatedString(self: *Parser, token: Token) anyerror!*Node {
 
         // lex the body as a fragment anchored at the `{`; tokens come out
         // with real source positions, so node spans need no rebasing
-        const embedded_tokens = try lexer.lexAt(self.alloc, body, .{
+        const embedded_tokens = try Lexer.lexAt(self.alloc, body, .{
             .offset = open.offset + 1,
             .line = open.line,
             .column = open.column + 1,
@@ -2102,7 +2147,7 @@ pub const testing = struct {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
 
-        const tokens = try lexer.lexAt(arena.allocator(), source, .{});
+        const tokens = try Lexer.lexAt(arena.allocator(), source, .{});
         defer arena.allocator().free(tokens);
         const expr = try parseTokens(arena.allocator(), tokens);
         var buf = std.Io.Writer.Allocating.init(std.testing.allocator);
@@ -2120,7 +2165,7 @@ pub const testing = struct {
     }
 
     pub fn parseOne(alloc: std.mem.Allocator, source: []const u8) !*Node {
-        const tokens = try lexer.lexAt(alloc, source, .{});
+        const tokens = try Lexer.lexAt(alloc, source, .{});
         return parseTokens(alloc, tokens);
     }
 };
@@ -2136,7 +2181,7 @@ test "interpolation value nodes carry real source spans" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "print \"hi #{name}\"", .{});
+    const tokens = try Lexer.lexAt(alloc, "print \"hi #{name}\"", .{});
     const root = try parseTokens(alloc, tokens);
     const value = root.expr.call.args[0].expr.call.args[1];
     try std.testing.expectEqual(@as(u32, 1), value.span.line);
@@ -2155,7 +2200,7 @@ test "interpolation spans survive multiline dedent" {
         \\  #{a}
         \\  #{b}"""
     ;
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     const call = root.expr.call.args[0].expr.call;
     try std.testing.expectEqual(@as(usize, 3), call.args.len);
@@ -2176,7 +2221,7 @@ test "interpolation spans survive nested strings" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "print \"a #{ \\\"b #{c}\\\" } d\"", .{});
+    const tokens = try Lexer.lexAt(alloc, "print \"a #{ \\\"b #{c}\\\" } d\"", .{});
     const root = try parseTokens(alloc, tokens);
     const outer = root.expr.call.args[0].expr.call;
     const inner = outer.args[1].expr.call;
@@ -2192,7 +2237,7 @@ test "quasiquote inner nodes carry template spans" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "let q = `a + b`", .{});
+    const tokens = try Lexer.lexAt(alloc, "let q = `a + b`", .{});
     const root = try parseTokens(alloc, tokens);
     const qq = root.expr.decl.inner.expr.binding.value.expr.quasiquote;
     const inner = qq.inner;
@@ -2211,7 +2256,7 @@ test "parses doc comment on function declaration" {
         \\ #* adds *#
         \\ fn add(a, b) a + b
     ;
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.inner.expr == .binding);
@@ -2229,7 +2274,7 @@ test "doc comment attaches to non-fn const binding" {
         \\ #* a plain value *#
         \\ const a = 5
     ;
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     const b = root.expr.decl.inner.expr.binding;
@@ -2246,7 +2291,7 @@ test "parses @native annotation on function declaration" {
         \\ @native
         \\ fn add(a, b) a + b
     ;
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     const value = root.expr.decl.inner.expr.binding.value;
     try std.testing.expect(value.expr == .fn_expr);
@@ -2263,7 +2308,7 @@ test "parses @native with a doc comment" {
         \\ #* adds two numbers *#
         \\ @native fn add(a, b) a + b
     ;
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     const b = root.expr.decl.inner.expr.binding;
     try std.testing.expect(b.value.expr == .fn_expr);
@@ -2276,7 +2321,7 @@ test "unknown attribute is a parse error" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "@bar fn foo() 1", .{});
+    const tokens = try Lexer.lexAt(alloc, "@bar fn foo() 1", .{});
     try std.testing.expectError(error.UnknownAttribute, parseTokens(alloc, tokens));
 }
 
@@ -2285,7 +2330,7 @@ test "parses import statement" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "import \"json\"", .{});
+    const tokens = try Lexer.lexAt(alloc, "import \"json\"", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .import_stmt);
     try std.testing.expectEqualStrings("json", root.expr.import_stmt.path);
@@ -2299,7 +2344,7 @@ test "parses multi-import table" {
     const alloc = arena.allocator();
 
     {
-        const tokens = try lexer.lexAt(alloc, "import {\"a\", \"b\"}", .{});
+        const tokens = try Lexer.lexAt(alloc, "import {\"a\", \"b\"}", .{});
         const root = try parseTokens(alloc, tokens);
         try std.testing.expect(root.expr == .block);
         try std.testing.expect(root.expr.block.len == 2);
@@ -2309,7 +2354,7 @@ test "parses multi-import table" {
         try std.testing.expectEqualStrings("b", root.expr.block[1].expr.import_stmt.name);
     }
     {
-        const tokens = try lexer.lexAt(alloc, "import {x = \"a\"}", .{});
+        const tokens = try Lexer.lexAt(alloc, "import {x = \"a\"}", .{});
         const root = try parseTokens(alloc, tokens);
         try std.testing.expect(root.expr == .block);
         try std.testing.expect(root.expr.block.len == 1);
@@ -2318,7 +2363,7 @@ test "parses multi-import table" {
         try std.testing.expectEqualStrings("a", root.expr.block[0].expr.import_stmt.path);
     }
     {
-        const tokens = try lexer.lexAt(alloc, "import {x = \"a\", \"b\"}", .{});
+        const tokens = try Lexer.lexAt(alloc, "import {x = \"a\", \"b\"}", .{});
         const root = try parseTokens(alloc, tokens);
         try std.testing.expect(root.expr == .block);
         try std.testing.expect(root.expr.block.len == 2);
@@ -2332,7 +2377,7 @@ test "parses pub const with pub_ flag" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub const x = 1", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub const x = 1", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2345,7 +2390,7 @@ test "parses pub macro" {
     const alloc = arena.allocator();
 
     const src = "pub macro assert! `(expr)` `(expr)`";
-    const tokens = try lexer.lexAt(alloc, src, .{});
+    const tokens = try Lexer.lexAt(alloc, src, .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2358,7 +2403,7 @@ test "parses pub import statement" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub import \"json\"", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub import \"json\"", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .import_stmt);
     try std.testing.expect(root.expr.import_stmt.pub_);
@@ -2370,7 +2415,7 @@ test "parses pub fn with pub_ flag" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub fn f() 42", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub fn f() 42", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2381,7 +2426,7 @@ test "parses pub proc" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub proc inc!(n) n + 1", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub proc inc!(n) n + 1", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2394,7 +2439,7 @@ test "parses pub type with pub_ flag" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub type MyInt = int", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub type MyInt = int", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2406,7 +2451,7 @@ test "parses declare as an ambient decl" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "pub declare ring = fn(volume: number, label: string) -> bool", .{});
+    const tokens = try Lexer.lexAt(alloc, "pub declare ring = fn(volume: number, label: string) -> bool", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
@@ -2421,7 +2466,7 @@ test "declare fn doc comment attaches to the decl" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(
+    const tokens = try Lexer.lexAt(
         alloc,
         "#* lights the lamp loudness *# declare lamp = fn(volume: number) -> bool",
         .{},
@@ -2439,7 +2484,7 @@ test "doc comment attaches to any decl, docs land on the declared thing" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "#* a doc *# const x = 42", .{});
+    const tokens = try Lexer.lexAt(alloc, "#* a doc *# const x = 42", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expectEqualStrings("a doc", root.expr.decl.doc.?);
 }
@@ -2449,7 +2494,7 @@ test "declare defaults to pub" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const tokens = try lexer.lexAt(alloc, "declare ring = fn() -> int", .{});
+    const tokens = try Lexer.lexAt(alloc, "declare ring = fn() -> int", .{});
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr.decl.pub_);
 }

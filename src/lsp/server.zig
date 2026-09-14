@@ -8,6 +8,7 @@ const lang = revo.lang;
 const Workspace = lang.Workspace;
 
 const completion = @import("completion.zig");
+const txt = lang.text;
 
 pub fn main(init: std.process.Init) !void {
     try runLsp(init.gpa, init.io, .script, "");
@@ -283,14 +284,14 @@ const Handler = struct {
             try label.appendSlice(arena, p.name);
             if (p.optional) try label.append(arena, '?');
             if (p.type_name) |ti| {
-                const pt = try lang.type_serde.formatType(arena, ti);
+                const pt = try lang.type_serde.formatTypeOpts(arena, ti, .{});
                 try label.appendSlice(arena, ": ");
                 try label.appendSlice(arena, pt);
             }
         }
         try label.append(arena, ')');
         if (sig.return_type) |rt| {
-            const rt_str = try lang.type_serde.formatType(arena, rt);
+            const rt_str = try lang.type_serde.formatTypeOpts(arena, rt, .{});
             try label.appendSlice(arena, ": ");
             try label.appendSlice(arena, rt_str);
         }
@@ -306,7 +307,7 @@ const Handler = struct {
             pos += @as(u32, @intCast(p.name.len));
             if (p.optional) pos += 1;
             if (p.type_name) |ti| {
-                const pt = try lang.type_serde.formatType(arena, ti);
+                const pt = try lang.type_serde.formatTypeOpts(arena, ti, .{});
                 pos += 2 + @as(u32, @intCast(pt.len));
             }
             params_list.appendAssumeCapacity(.{
@@ -400,7 +401,7 @@ const Handler = struct {
         const file_id = h.uri_to_file.get(params.textDocument.uri) orelse return null;
         const snap = h.ws.snapshot(file_id) orelse return null;
         const ws_pos = clientToWs(snap.text, params.position, h.enc);
-        const cursor_off = positionToOffset(snap.text, ws_pos) orelse return null;
+        const cursor_off = txt.positionToOffset(snap.text, ws_pos) orelse return null;
         return @as(
             ?T.completion.Result,
             try completion.completions(&h.vm, &h.ws, arena, file_id, snap.text, cursor_off),
@@ -982,21 +983,4 @@ fn rangesOverlap(a: T.Range, b: T.Range) bool {
         }
     }.le;
     return posLe(a.start, b.end) and posLe(b.start, a.end);
-}
-
-/// convert 1-based workspace position to byte offset
-fn positionToOffset(text: []const u8, pos: Workspace.Position) ?usize {
-    var line: u32 = 1;
-    var col: u32 = 1;
-    for (text, 0..) |ch, idx| {
-        if (line == pos.line and col == pos.character) return idx;
-        if (ch == '\n') {
-            line += 1;
-            col = 1;
-        } else {
-            col += 1;
-        }
-    }
-    if (line == pos.line and col == pos.character) return text.len;
-    return null;
 }

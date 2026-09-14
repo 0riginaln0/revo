@@ -1,396 +1,7 @@
-/// build @exports[:name] = name
-fn buildSetExport(alloc: std.mem.Allocator, span: ast.Span, name: []const u8) !*Node {
-    const exports_ref = try allocNode(alloc, span, .{ .ident = "@exports" });
-    const key = try allocNode(alloc, span, .{ .hash = name });
-    const index = try allocNode(alloc, span, .{ .index = .{ .object = exports_ref, .key = key } });
-    const value = try allocNode(alloc, span, .{ .ident = name });
-    return allocNode(alloc, span, .{ .assign_expr = .{ .target = index, .value = value } });
-}
 
-/// extract exported name from a pub decl or import_stmt
-fn pubName(item: *Node) ?[]const u8 {
-    return switch (item.expr) {
-        .decl => |d| if (d.pub_) switch (d.inner.expr) {
-            .binding => |b| if (b.target.expr == .ident) b.target.expr.ident else null,
-            // type aliases are compile-time only, not runtime values
-            // so they cannot be exported in the runtime exports table
-            else => null,
-        } else null,
-        .import_stmt => |is| if (is.pub_) is.name else null,
-        else => null,
-    };
-}
-
-/// copy a node without its pub_ flag, leaves non-pub nodes unchanged
-fn clearPub(item: *Node, alloc: std.mem.Allocator) !*Node {
-    return switch (item.expr) {
-        .decl => |d| allocNode(alloc, item.span, .{ .decl = .{
-            .inner = d.inner,
-            .kind = d.kind,
-            .pub_ = false,
-        } }),
-        .import_stmt => |is| allocNode(alloc, item.span, .{ .import_stmt = .{
-            .name = is.name,
-            .path = is.path,
-            .pub_ = false,
-        } }),
-        else => item,
-    };
-}
-
-/// wrap AST for module scope: build exports table from pub decls
-fn wrapModule(alloc: std.mem.Allocator, root: *Node) !*Node {
-    const is_single = root.expr != .block;
-    const items: []const *Node = if (is_single) &[_]*Node{root} else root.expr.block;
-
-    // collect pub names for each item, cache so we don't call pubName twice
-    var pub_names = try std.ArrayList(?[]const u8).initCapacity(alloc, items.len);
-    errdefer pub_names.deinit(alloc);
-
-    var has_pub = false;
-    for (items) |item| {
-        const name = if (item.expr == .block) blk: {
-            for (item.expr.block) |sub| {
-                if (pubName(sub) != null) has_pub = true;
-            }
-            break :blk null;
-        } else pubName(item);
-        pub_names.appendAssumeCapacity(name);
-        if (name != null) has_pub = true;
-    }
-    if (!has_pub) {
-        pub_names.deinit(alloc);
-        return root;
-    }
-
-    const span = root.span;
-
-    // const @exports = {}
-    const exports_ident = try allocNode(alloc, span, .{ .ident = "@exports" });
-    const exports_table = try allocNode(alloc, span, .{ .table = &.{} });
-    const exports_binding = try allocNode(alloc, span, .{ .binding = .{
-        .target = exports_ident,
-        .value = exports_table,
-    } });
-    const exports_decl = try allocNode(alloc, span, .{ .decl = .{
-        .inner = exports_binding,
-        .kind = .con,
-    } });
-
-    var new_items = try std.ArrayList(*Node).initCapacity(alloc, items.len * 2 + 2); // upper bound: each item + export
-    try new_items.append(alloc, exports_decl);
-
-    for (items, pub_names.items) |item, maybe_name| {
-        if (item.expr == .block) {
-            var cleaned = try std.ArrayList(*Node).initCapacity(alloc, item.expr.block.len);
-            for (item.expr.block) |sub| {
-                if (pubName(sub)) |_| {
-                    try cleaned.append(alloc, try clearPub(sub, alloc));
-                } else {
-                    try cleaned.append(alloc, sub);
-                }
-            }
-            const new_block = try allocNode(alloc, item.span, .{ .block = try cleaned.toOwnedSlice(alloc) });
-            new_block.synthetic_block = item.synthetic_block;
-            // emit exports AFTER the block so names defined inside are in scope
-            try new_items.append(alloc, new_block);
-            for (item.expr.block) |sub| {
-                if (pubName(sub)) |name| {
-                    try new_items.append(alloc, try buildSetExport(alloc, span, name));
-                }
-            }
-        } else if (maybe_name) |name| {
-            try new_items.append(alloc, try clearPub(item, alloc));
-            try new_items.append(alloc, try buildSetExport(alloc, span, name));
-        } else {
-            try new_items.append(alloc, item);
-        }
-    }
-    pub_names.deinit(alloc);
-
-    const final_exports = try allocNode(alloc, span, .{ .ident = "@exports" });
-    try new_items.append(alloc, final_exports);
-
-    const result = try allocNode(alloc, span, .{ .block = try new_items.toOwnedSlice(alloc) });
-    result.synthetic_block = true;
-    return result;
-}
-
-/// botch, pls FIXME
-/// walk AST recursively: any fn_expr whose body contains pub decls
-/// gets its body wrapped so calling the closure returns @exports
-fn wrapPubFunctions(alloc: std.mem.Allocator, node: *Node) !void {
-    switch (node.expr) {
-        .fn_expr => |*f| {
-            try wrapPubFunctions(alloc, f.body);
-            if (bodyHasPub(f.body)) {
-                f.body = try wrapModule(alloc, f.body);
-            }
-        },
-        .block => |items| {
-            for (items) |item| try wrapPubFunctions(alloc, item);
-        },
-        .decl => |*d| try wrapPubFunctions(alloc, d.inner),
-        .binding => |*b| {
-            try wrapPubFunctions(alloc, b.target);
-            try wrapPubFunctions(alloc, b.value);
-        },
-        .if_expr => |*v| {
-            try wrapPubFunctions(alloc, v.condition);
-            try wrapPubFunctions(alloc, v.then_expr);
-            if (v.else_expr) |e| try wrapPubFunctions(alloc, e);
-        },
-        .unless_expr => |*v| {
-            try wrapPubFunctions(alloc, v.condition);
-            try wrapPubFunctions(alloc, v.then_expr);
-            if (v.else_expr) |e| try wrapPubFunctions(alloc, e);
-        },
-        .match_expr => |*m| {
-            try wrapPubFunctions(alloc, m.subject);
-            for (m.arms) |*arm| try wrapPubFunctions(alloc, arm.then);
-        },
-        .loop_expr => |*l| try wrapPubFunctions(alloc, l.body),
-        .for_loop => |*f| try wrapPubFunctions(alloc, f.body),
-        .while_loop => |*w| try wrapPubFunctions(alloc, w.body),
-        .labeled_block => |*lb| try wrapPubFunctions(alloc, lb.body),
-        .return_expr => |v| if (v) |inner| try wrapPubFunctions(alloc, inner),
-        .assign_expr => |*a| {
-            try wrapPubFunctions(alloc, a.target);
-            try wrapPubFunctions(alloc, a.value);
-        },
-        .compound_assign => |*a| {
-            try wrapPubFunctions(alloc, a.target);
-            try wrapPubFunctions(alloc, a.value);
-        },
-        .call => |*c| {
-            try wrapPubFunctions(alloc, c.callee);
-            for (c.args) |arg| try wrapPubFunctions(alloc, arg);
-        },
-        .unary => |*u| try wrapPubFunctions(alloc, u.expr),
-        .binary => |*b| {
-            try wrapPubFunctions(alloc, b.left);
-            try wrapPubFunctions(alloc, b.right);
-        },
-        .and_expr => |ae| {
-            try wrapPubFunctions(alloc, ae.left);
-            try wrapPubFunctions(alloc, ae.right);
-        },
-        .or_expr => |ae| {
-            try wrapPubFunctions(alloc, ae.left);
-            try wrapPubFunctions(alloc, ae.right);
-        },
-        .field => |*f| try wrapPubFunctions(alloc, f.object),
-        .index => |*i| {
-            try wrapPubFunctions(alloc, i.object);
-            try wrapPubFunctions(alloc, i.key);
-        },
-        .table => |entries| {
-            for (entries) |*e| {
-                if (e.key) |k| try wrapPubFunctions(alloc, k);
-                try wrapPubFunctions(alloc, e.value);
-            }
-        },
-        else => {},
-    }
-}
-
-fn bodyHasPub(node: *Node) bool {
-    return switch (node.expr) {
-        .block => |items| for (items) |item| {
-            if (pubName(item) != null) break true;
-        } else false,
-        else => pubName(node) != null,
-    };
-}
-
-fn allocNode(alloc: std.mem.Allocator, span: ast.Span, expr: ast.Expr) !*Node {
-    const n = try alloc.create(ast.Node);
-    n.* = .{ .span = span, .expr = expr };
-    return n;
-}
-
-/// walk AST and pre-load imported modules (best-effort, OOM propagates, others
-/// are deferred to runtime where the import native fn handles them)
-fn preloadImports(vm: *VM, root: *Node, alloc: std.mem.Allocator) !void {
-    var inject_nodes = try std.ArrayList(*Node).initCapacity(alloc, 8);
-    defer inject_nodes.deinit(alloc);
-
-    var visited = std.StringHashMap(void).init(alloc);
-    defer visited.deinit();
-
-    // separate visited for submod macro extraction, keyed by qualified prefix + path
-    // so that re-exports through different parents both get extracted
-    var visited_sub = std.StringHashMap(void).init(alloc);
-    defer visited_sub.deinit();
-
-    try walkAndProcessImports(vm, root, alloc, &inject_nodes, &visited, &visited_sub);
-
-    if (inject_nodes.items.len > 0 and root.expr == .block) {
-        const items = root.expr.block;
-        var new_items = try std.ArrayList(*Node).initCapacity(alloc, items.len + inject_nodes.items.len);
-        for (inject_nodes.items) |n| new_items.appendAssumeCapacity(n);
-        for (items) |item| new_items.appendAssumeCapacity(item);
-        root.expr.block = try new_items.toOwnedSlice(alloc);
-    }
-}
-
-fn walkAndProcessImports(
-    vm: *VM,
-    node: *Node,
-    alloc: std.mem.Allocator,
-    inject_nodes: *std.ArrayList(*Node),
-    visited: *std.StringHashMap(void),
-    visited_sub: *std.StringHashMap(void),
-) !void {
-    switch (node.expr) {
-        .block => |items| {
-            for (items) |item| try walkAndProcessImports(vm, item, alloc, inject_nodes, visited, visited_sub);
-        },
-        .import_stmt => |stmt| try processImport(vm, stmt.path, stmt.name, alloc, inject_nodes, visited, visited_sub),
-        .decl => |d| try walkAndProcessImports(vm, d.inner, alloc, inject_nodes, visited, visited_sub),
-        .binding => |b| try walkAndProcessImports(vm, b.value, alloc, inject_nodes, visited, visited_sub),
-        else => {},
-    }
-}
-
-/// resolve module path matching runtime import resolution
-fn resolveModuleFile(vm: *VM, name: []const u8) !?[]const u8 {
-    return revo.resolveImportFile(
-        vm.runtime.io,
-        vm.runtime.alloc,
-        name,
-        vm.module_dir,
-        vm.project_root,
-        vm.package_path.items,
-    );
-}
-
-/// read, parse, and extract macros/procs from a module for compile-time use
-/// does NOT compile or cache the module!!! runtime `import` handles that!
-/// extraction populates the expander env with qualified names (mod_name.macro!)
-fn processImport(
-    vm: *VM,
-    path: []const u8,
-    mod_name: []const u8,
-    alloc: std.mem.Allocator,
-    inject_nodes: *std.ArrayList(*Node),
-    visited: *std.StringHashMap(void),
-    visited_sub: *std.StringHashMap(void),
-) !void {
-    if (visited.contains(path)) return;
-    try visited.put(path, {});
-
-    const resolved = try resolveModuleFile(vm, path) orelse return;
-    defer vm.runtime.alloc.free(resolved);
-
-    // non-OOM errors are deferred to runtime,,, preload is best-effort
-    const source = std.Io.Dir.cwd().readFileAlloc(
-        vm.runtime.io,
-        resolved,
-        alloc,
-        std.Io.Limit.unlimited,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => |e| return e,
-        else => return,
-    };
-
-    const module_ast = lang.parseSource(alloc, source) catch return;
-
-    extractPubDefs(module_ast, mod_name, alloc, inject_nodes) catch return;
-    extractPubImportsOneLevel(vm, module_ast, mod_name, alloc, inject_nodes, visited_sub) catch return;
-}
-
-/// extract pub macros and procs from a module AST, qualified with prefix
-/// injects them as named nodes into out for the parent scope
-fn extractPubDefs(node: *Node, prefix: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList(*Node)) !void {
-    switch (node.expr) {
-        .block => |items| {
-            for (items) |item| try extractPubDefs(item, prefix, alloc, out);
-        },
-        .decl => |d| {
-            if (d.pub_) {
-                switch (d.inner.expr) {
-                    .macro_expr => |m| {
-                        // already-scoped names liek `uri.asdf!` rescope under
-                        // the import like bare ones
-                        //  `Port` -> `svc.Port`
-                        const qualified = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, ast.bareMacroName(m.name) });
-                        const cloned = try allocNode(alloc, d.inner.span, .{ .macro_expr = .{
-                            .name = qualified,
-                            .pattern = m.pattern,
-                            .template = m.template,
-                        } });
-                        try out.append(alloc, cloned);
-                    },
-                    .proc_macro => |pm| {
-                        if (std.mem.endsWith(u8, pm.name, "!")) {
-                            const qualified = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, ast.bareMacroName(pm.name) });
-                            const proc_node = try allocNode(alloc, d.inner.span, .{ .proc_macro = .{
-                                .name = qualified,
-                                .param = .{ .name = pm.param.name, .name_span = pm.param.name_span },
-                                .body = pm.body,
-                            } });
-                            try out.append(alloc, proc_node);
-                        }
-                    },
-                    .type_alias => |t| {
-                        const ta_node = try allocNode(alloc, d.inner.span, .{
-                            .type_alias = .{ .name = t.name, .name_span = t.name_span, .type_expr = t.type_expr },
-                        });
-                        try out.append(alloc, ta_node);
-                    },
-                    else => {},
-                }
-            }
-            try extractPubDefs(d.inner, prefix, alloc, out);
-        },
-        else => {},
-    }
-}
-
-/// extract one level of pub imports;;; loads submods and extracts their macros
-/// but does NOT recurse into submod's own pub imports (breaks the inference cycle)
-fn extractPubImportsOneLevel(
-    vm: *VM,
-    node: *Node,
-    prefix: []const u8,
-    alloc: std.mem.Allocator,
-    inject_nodes: *std.ArrayList(*Node),
-    visited_sub: *std.StringHashMap(void),
-) !void {
-    switch (node.expr) {
-        .block => |items| {
-            for (items) |item| try extractPubImportsOneLevel(vm, item, prefix, alloc, inject_nodes, visited_sub);
-        },
-        .import_stmt => |stmt| {
-            if (stmt.pub_) {
-                // key by qualified prefix + path so different parents with same sub-path
-                // both get their macros extracted
-                const dedup_key = try std.fmt.allocPrint(alloc, "{s}.{s}.{s}", .{ prefix, stmt.name, stmt.path });
-                defer alloc.free(dedup_key);
-                if (visited_sub.contains(dedup_key)) return;
-                try visited_sub.put(dedup_key, {});
-
-                const sub_prefix = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, stmt.name });
-                defer alloc.free(sub_prefix);
-
-                const resolved = try resolveModuleFile(vm, stmt.path) orelse return;
-                defer vm.runtime.alloc.free(resolved);
-                const source = try std.Io.Dir.cwd().readFileAlloc(
-                    vm.runtime.io,
-                    resolved,
-                    alloc,
-                    std.Io.Limit.unlimited,
-                );
-
-                const sub_ast = try lang.parseSource(alloc, source);
-                try extractPubDefs(sub_ast, sub_prefix, alloc, inject_nodes);
-            }
-        },
-        .decl => |d| try extractPubImportsOneLevel(vm, d.inner, prefix, alloc, inject_nodes, visited_sub),
-        else => {},
-    }
-}
+//! parse -> expand -> check -> lower orchestration
+//! stage companions live in pipeline/: module_scope (@exports wiring)
+//! and import_preload (compile-time import extraction)
 
 pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
     var dropped: ?diagnostic.Report = null;
@@ -434,13 +45,13 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     };
     // module scope? wrap ast to build exports table from pub decls
     if (opts.module_scope)
-        parsed.root = try wrapModule(arena.allocator(), parsed.root);
+        parsed.root = try module_scope.wrapModule(arena.allocator(), parsed.root);
 
     // closures with pub decls should return their @exports table
-    try wrapPubFunctions(arena.allocator(), parsed.root);
+    parsed.root = try module_scope.wrapPubFunctions(arena.allocator(), parsed.root);
 
     if (!opts.skip_preload and comptime !revo.is_freestanding)
-        preloadImports(vm, parsed.root, arena.allocator()) catch |err| switch (err) {
+        import_preload.preloadImports(vm, parsed.root, arena.allocator()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => revo.pretty.fatal("preload: {s}", .{@errorName(err)}, vm),
         };
@@ -490,7 +101,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         fn resolve(ptr: *anyopaque, path: []const u8, a: std.mem.Allocator) ?[]const u8 {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             if (comptime !revo.is_freestanding) {
-                const resolved = (resolveModuleFile(self.vm, path) catch return null) orelse return null;
+                const resolved = (import_preload.resolveModuleFile(self.vm, path) catch return null) orelse return null;
                 defer self.vm.runtime.alloc.free(resolved);
                 // shared libs carry their sigs as data, instead of source source
                 // a sibling `lib.d.rv` manifest is the type interface and required for
@@ -509,7 +120,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     };
     var pipeline_resolver = PipelineResolver{ .vm = vm };
 
-    if (try lang.semantic.analyze(
+    if (try semantic.analyze(
         vm.runtime.alloc,
         expanded.root,
         source.name orelse "",
@@ -520,14 +131,14 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         null,
         .{ .ptr = &pipeline_resolver, .resolveFn = PipelineResolver.resolve },
         warnings,
-    )) |semantic_err| {
+    )) |failure| {
         // the original report is arena-owned inside semantic.analyze; copy it
         // out and take ownership of the source text (deinitError frees it)
-        var copied = try semantic_err.semantic.report.copy(vm.runtime.diag_alloc);
+        var copied = try failure.report.copy(vm.runtime.diag_alloc);
         if (source.name) |name| copied.source_name = try vm.runtime.diag_alloc.dupe(u8, name);
         copied.source = try vm.runtime.diag_alloc.dupe(u8, source.text);
-        deinitError(vm.runtime.alloc, semantic_err);
-        return .{ .err = .{ .semantic = .{ .kind = semantic_err.semantic.kind, .report = copied } } };
+        deinitError(vm.runtime.alloc, .{ .semantic = failure });
+        return .{ .err = .{ .semantic = .{ .kind = failure.kind, .report = copied } } };
     }
 
     const lower_result = try lower(vm, expanded, .{
@@ -582,13 +193,13 @@ pub const ExpandFailure = struct {
 };
 
 pub const Error = union(enum) {
-    parse: parser.ParseFailure,
+    parse: Parser.ParseFailure,
     expand: ExpandFailure,
     lower: compiler.LowerFailure,
-    semantic: compiler.LowerFailure,
+    semantic: semantic.Failure,
 };
 
-pub const ParseResult = Result(Parsed, parser.ParseFailure);
+pub const ParseResult = Result(Parsed, Parser.ParseFailure);
 pub const ExpandError = expander.ExpandError || proc.ExpandError;
 pub const ExpandResult = Result(Expanded, ExpandError);
 pub const ExpandWithVmResult = union(enum) {
@@ -696,7 +307,7 @@ pub const BuildResult = Result(Artifact, Error);
 
 pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !ParseResult {
     if (!opts.include_stdlib_macros) {
-        return switch (try parseSourceReport(allocator, source.text)) {
+        return switch (try Parser.parseSourceReport(allocator, source.text)) {
             .ok => |expr| .{ .ok = .{ .root = expr } },
             .err => |failure| blk: {
                 var diag = failure;
@@ -713,12 +324,12 @@ pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !
     var preludes = try std.ArrayList(*Node).initCapacity(allocator, macro_srcs.len);
     defer preludes.deinit(allocator);
     for (macro_srcs) |src| {
-        switch (try parseSourceReport(allocator, src)) {
+        switch (try Parser.parseSourceReport(allocator, src)) {
             .ok => |root| try preludes.append(allocator, root),
             .err => |failure| return .{ .err = failure },
         }
     }
-    const user: ParseResult = switch (try parseSourceReport(allocator, source.text)) {
+    const user: ParseResult = switch (try Parser.parseSourceReport(allocator, source.text)) {
         .ok => |root| .{ .ok = .{ .root = root } },
         .err => |failure| blk: {
             var diag = failure;
@@ -728,12 +339,6 @@ pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !
     };
     if (user == .err) return .{ .err = user.err };
     return .{ .ok = .{ .root = try mergeWithPreludes(allocator, preludes.items, user.ok.root) } };
-}
-
-pub fn expand(allocator: std.mem.Allocator, parsed: Parsed) !ExpandResult {
-    const template_expanded = expander.expandExpr(allocator, parsed.root) catch |err| return .{ .err = err };
-    const final = expander.expandExpr(allocator, template_expanded) catch |err| return .{ .err = err };
-    return .{ .ok = .{ .root = final } };
 }
 
 pub fn expandWithVmSource(
@@ -860,48 +465,6 @@ pub fn deinitError(alloc: std.mem.Allocator, err: Error) void {
     }
 }
 
-pub fn parseSource(allocator: std.mem.Allocator, source: []const u8) !*Node {
-    return switch (try parseSourceReport(allocator, source)) {
-        .ok => |expr| expr,
-        .err => |failure| switch (failure.kind) {
-            .LexUnexpectedCharacter => error.UnexpectedCharacter,
-            .LexUnterminatedComment => error.UnterminatedComment,
-            .LexUnterminatedString => error.UnterminatedString,
-            .LexLateModuleDoc => error.LateModuleDoc,
-            .UnexpectedToken => error.UnexpectedToken,
-            .ExpectedIdentifier => error.ExpectedIdentifier,
-            .ExpectedMatchArm => error.ExpectedMatchArm,
-            .LexUnknown => error.ParseFailed,
-            .InvalidNumber => error.ParseFailed,
-        },
-    };
-}
-
-pub fn parseSourceReport(allocator: std.mem.Allocator, source: []const u8) !parser.ParseResult {
-    const lexed = try Lexer.lexReportAt(allocator, source, .{});
-    const tokens = switch (lexed) {
-        .ok => |items| items,
-        .err => |failure| {
-            const kind: parser.Kind = switch (failure.kind) {
-                .UnexpectedCharacter => .LexUnexpectedCharacter,
-                .UnterminatedComment => .LexUnterminatedComment,
-                .UnterminatedString => .LexUnterminatedString,
-                .LateModuleDoc => .LexLateModuleDoc,
-                .Unknown => .LexUnknown,
-            };
-            const parts = try allocator.alloc(diagnostic.Part, 2);
-            parts[0] = diagnostic.Part{ .@"error" = failure.message };
-            parts[1] = .{ .span = .{ .span = failure.span, .role = .primary } };
-            return .{ .err = .{
-                .kind = kind,
-                .report = .{ .parts = parts, .message = failure.message },
-            } };
-        },
-    };
-    defer allocator.free(tokens);
-    return parser.parseTokensReport(allocator, tokens);
-}
-
 /// flat merge of prelude roots before user code: one shared scope, so
 /// later definitions win on redeclaration
 fn mergeWithPreludes(allocator: std.mem.Allocator, preludes: []const *Node, user: *Node) !*Node {
@@ -938,15 +501,17 @@ const revo = @import("revo");
 const VM = revo.VM;
 const Result = revo.Result;
 
-const lang = @import("./root.zig");
-const ast = lang.ast;
+const ast = @import("ast.zig");
 const Node = ast.Node;
-const compiler = lang.compiler;
-const expander = lang.expander;
-const proc = lang.proc;
-const Lexer = lang.Lexer;
-const parser = lang.parser;
-const diagnostic = lang.diagnostic;
+const compiler = @import("compiler/root.zig");
+const diagnostic = @import("diagnostic.zig");
+const expander = @import("expander.zig");
+const import_preload = @import("pipeline/import_preload.zig");
+const module_scope = @import("pipeline/module_scope.zig");
+const Parser = @import("Parser.zig");
+const proc = @import("proc.zig");
+const semantic = @import("semantic.zig");
 pub const Artifact = compiler.Artifact;
-pub const ParseFailure = parser.ParseFailure;
+pub const ParseFailure = Parser.ParseFailure;
+pub const LowerErrorKind = compiler.LowerErrorKind;
 pub const LowerFailure = compiler.LowerFailure;

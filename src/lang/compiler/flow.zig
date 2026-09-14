@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const revo = @import("revo");
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("root.zig").Compiler;
 const Data = revo.Data;
 const ProgramCounter = revo.ProgramCounter;
 const Operand = revo.Operand;
@@ -15,8 +15,6 @@ const ir = @import("../ir/root.zig");
 const state = @import("state.zig");
 const toRegister = state.toRegister;
 const TypeHint = state.FunctionState.TypeHint;
-const type_check = @import("type_check.zig");
-const type_serde = @import("../type_serde.zig");
 const types_mod = @import("types.zig");
 
 pub const VarStorage = union(enum) {
@@ -124,7 +122,7 @@ pub fn compileRangeLoopBody(
     if (params.len >= 1 and !ast.isDiscardName(params[0].name)) {
         value_slot = try state.declareLocal(self, params[0].name, false);
         if (params[0].type_name) |tn| {
-            const declared = try type_serde.evalTypeExpr(self, tn);
+            const declared = try types_mod.evalTypeExpr(self.check(), tn);
             if (declared.tag != .number) {
                 const msg = try std.fmt.allocPrint(
                     self.alloc,
@@ -141,7 +139,7 @@ pub fn compileRangeLoopBody(
     if (params.len == 2 and !ast.isDiscardName(params[1].name)) {
         index_slot = try state.declareLocal(self, params[1].name, false);
         if (params[1].type_name) |tn| {
-            const declared = try type_serde.evalTypeExpr(self, tn);
+            const declared = try types_mod.evalTypeExpr(self.check(), tn);
             if (declared.tag != .number) {
                 const msg = try std.fmt.allocPrint(
                     self.alloc,
@@ -318,6 +316,23 @@ pub fn emitStorageLoad(self: *Compiler, storage: VarStorage) !void {
     }
 }
 
+pub const PatternSrc = union(enum) { reg: usize, storage: VarStorage };
+
+/// fetch table element idx from src, leaves it on stack top.
+/// reg sources move to a fresh register first, storage sources load directly
+pub fn fetchPatternElem(self: *Compiler, src: PatternSrc, idx: usize) !void {
+    switch (src) {
+        .reg => |r| {
+            const mv_dst = try state.pushRegister(self);
+            try self.spans.append(self.alloc, self.active_span);
+            _ = try self.record(.move, &.{.{ .reg = try toRegister(r) }}, true, mv_dst, 0);
+        },
+        .storage => |s| try emitStorageLoad(self, s),
+    }
+    try self.emit(.load_small_int, idx);
+    try self.emit(.table_get, 0);
+}
+
 pub fn emitLoopRecurse(
     self: *Compiler,
     param_count: usize,
@@ -418,7 +433,7 @@ pub fn compileMatch(
         }
 
         // capture subject type before patternTypeInfo overwrites the hint
-        const pre_narrow_subject_type = type_check.inferExprType(self, subject);
+        const pre_narrow_subject_type = self.inferExprType( subject);
 
         //
         // matchers are alternatives:
@@ -540,37 +555,18 @@ pub fn bindMatchPattern(
         .ident => |name| {
             if (ast.isDiscardName(name)) return;
             try emitStorageLoad(self, subject);
-
-            // hoisted arm slot when present, so every matcher binds the same one
-            const slot = if (state.findLocalInCurrentScope(self, name)) |l| l.slot else try state.declareLocal(self, name, true);
-            state.markLocalInitialized(self, slot);
-            try self.emit(.bind_local, slot);
-
-            state.reserveLocalSlots(self);
+            try bindMatchIdent(self, name);
         },
         .table_pattern => |items| {
             for (items, 0..) |item, idx| {
                 switch (item.expr) {
                     .ident => |name| {
                         if (ast.isDiscardName(name)) continue;
-                        try emitStorageLoad(self, subject);
-                        try self.emit(.load_small_int, idx);
-                        try self.emit(.table_get, 0);
-
-                        const slot = if (state.findLocalInCurrentScope(self, name)) |l|
-                            l.slot
-                        else
-                            try state.declareLocal(self, name, true);
-
-                        state.markLocalInitialized(self, slot);
-                        try self.emit(.bind_local, slot);
-
-                        state.reserveLocalSlots(self);
+                        try fetchPatternElem(self, .{ .storage = subject }, idx);
+                        try bindMatchIdent(self, name);
                     },
                     .table_pattern, .ascribed => {
-                        try emitStorageLoad(self, subject);
-                        try self.emit(.load_small_int, idx);
-                        try self.emit(.table_get, 0);
+                        try fetchPatternElem(self, .{ .storage = subject }, idx);
 
                         // temp for nested pattern
                         const nested_slot = try state.declareLocal(self, "__bind_tmp", false);
@@ -589,6 +585,16 @@ pub fn bindMatchPattern(
     }
 }
 
+/// bind the loaded value to the hoisted arm slot when present,
+/// so every matcher binds the same one
+fn bindMatchIdent(self: *Compiler, name: []const u8) !void {
+    const slot = if (state.findLocalInCurrentScope(self, name)) |l| l.slot else try state.declareLocal(self, name, true);
+    state.markLocalInitialized(self, slot);
+    try self.emit(.bind_local, slot);
+
+    state.reserveLocalSlots(self);
+}
+
 pub fn compilePatternChecks(
     self: *Compiler,
     subject: VarStorage,
@@ -602,7 +608,7 @@ pub fn compilePatternChecks(
         .ascribed => |a| {
             // type check first, then the inner pattern
             //   ; fail fast
-            const asc_ti = type_serde.evalTypeExpr(self, a.type_name) catch types_mod.TypeInfo{ .tag = .any };
+            const asc_ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
 
             const type_fails = try compileTypeSatisfies(self, subject, asc_ti);
             defer self.alloc.free(type_fails);
@@ -847,67 +853,7 @@ pub fn compileIf(
     then_expr: *const Node,
     else_expr: ?*Node,
 ) !void {
-    if (state.currentFunctionState(self) == null)
-        return self.fail(.UnsupportedSyntax, condition, "if requires function scope");
-
-    const saved = saveRegState(self);
-    errdefer restoreRegState(self, saved);
-
-    try self.compile(condition, true);
-    const else_jump = try self.jump(.jump_if_false);
-    const branch_base_registers = self.active_registers;
-    const join_depth = self.value_stack.items.len;
-
-    try state.pushScope(self);
-    errdefer state.popScope(self);
-    if (conditionTypeHint(condition)) |hint| {
-        try state.setLocalTypeHint(self, hint.name, hint.type_info);
-    }
-    try self.compile(then_expr, true);
-    state.popScope(self);
-    const then_registers = self.active_registers;
-
-    // both paths must leave the if expr's value in the shared branch
-    // register; single-expression branches go there by themselves, but
-    // do/stmt blocks push their value in a fresh register, so copy
-    // it into place before jumping to the join
-    if (self.value_stack.items.len > join_depth) {
-        const then_val = self.value_stack.items[self.value_stack.items.len - 1];
-        if (then_val.result_reg != branch_base_registers) {
-            try self.spans.append(self.alloc, self.active_span);
-            _ = try self.record(.move, &.{.{ .inst = then_val }}, true, @intCast(branch_base_registers), 0);
-        }
-    }
-
-    const end_jump = try self.jump(.jump);
-    self.patchJump(else_jump);
-    self.active_registers = branch_base_registers; // reset before else so both branches start at same depth
-
-    try state.pushScope(self);
-    errdefer state.popScope(self);
-    if (else_expr) |branch| {
-        try self.compile(branch, true);
-        _ = type_check.inferExprType(self, branch);
-    } else try self.pushNil();
-    state.popScope(self);
-
-    // same normalization for the else path, emitted at the join so the
-    // then path (which jumped past it) is unaffected
-    if (self.value_stack.items.len > join_depth) {
-        const else_val = self.value_stack.items[self.value_stack.items.len - 1];
-        if (else_val.result_reg != branch_base_registers) {
-            try self.spans.append(self.alloc, self.active_span);
-            _ = try self.record(.move, &.{.{ .inst = else_val }}, true, @intCast(branch_base_registers), 0);
-        }
-    }
-
-    if (then_registers != self.active_registers) {
-        // equalize, push nils if else was shorter, then clamp
-        while (self.active_registers < then_registers)
-            try self.pushNil();
-        self.active_registers = then_registers;
-    }
-    self.patchJump(end_jump);
+    try compileConditional(self, condition, then_expr, else_expr, .jump_if_false, "if requires function scope");
 }
 
 pub fn compileUnless(
@@ -916,14 +862,25 @@ pub fn compileUnless(
     then_expr: *const Node,
     else_expr: ?*Node,
 ) !void {
+    try compileConditional(self, condition, then_expr, else_expr, .jump_if_true, "unless requires function scope");
+}
+
+fn compileConditional(
+    self: *Compiler,
+    condition: *const Node,
+    then_expr: *const Node,
+    else_expr: ?*Node,
+    jump_op: Opcode,
+    scope_err: []const u8,
+) !void {
     if (state.currentFunctionState(self) == null)
-        return self.fail(.UnsupportedSyntax, condition, "unless requires function scope");
+        return self.fail(.UnsupportedSyntax, condition, scope_err);
 
     const saved = saveRegState(self);
     errdefer restoreRegState(self, saved);
 
     try self.compile(condition, true);
-    const else_jump = try self.jump(.jump_if_true);
+    const else_jump = try self.jump(jump_op);
     const branch_base_registers = self.active_registers;
     const join_depth = self.value_stack.items.len;
 
@@ -936,10 +893,6 @@ pub fn compileUnless(
     state.popScope(self);
     const then_registers = self.active_registers;
 
-    // both paths must leave the if expr's value in the shared branch
-    // register; single-expression branches go there by themselves, but
-    // do/stmt blocks push their value in a fresh register, so copy
-    // it into place before jumping to the join
     if (self.value_stack.items.len > join_depth) {
         const then_val = self.value_stack.items[self.value_stack.items.len - 1];
         if (then_val.result_reg != branch_base_registers) {
@@ -950,18 +903,16 @@ pub fn compileUnless(
 
     const end_jump = try self.jump(.jump);
     self.patchJump(else_jump);
-    self.active_registers = branch_base_registers; // reset before else so both branches start at same depth
+    self.active_registers = branch_base_registers;
 
     try state.pushScope(self);
     errdefer state.popScope(self);
     if (else_expr) |branch| {
         try self.compile(branch, true);
-        _ = type_check.inferExprType(self, branch);
+        _ = self.inferExprType( branch);
     } else try self.pushNil();
     state.popScope(self);
 
-    // same normalization for the else path, emitted at the join so the
-    // then path (which jumped past it) is unaffected
     if (self.value_stack.items.len > join_depth) {
         const else_val = self.value_stack.items[self.value_stack.items.len - 1];
         if (else_val.result_reg != branch_base_registers) {
@@ -971,7 +922,6 @@ pub fn compileUnless(
     }
 
     if (then_registers != self.active_registers) {
-        // equalize, push nils if else was shorter, then clamp
         while (self.active_registers < then_registers)
             try self.pushNil();
         self.active_registers = then_registers;
@@ -1038,7 +988,7 @@ fn typeNameInfo(name: []const u8) ?types_mod.TypeInfo {
 
 fn patternTypeInfo(self: *Compiler, pattern: *const Node) ?types_mod.TypeInfo {
     return switch (pattern.expr) {
-        .ascribed => |a| type_serde.evalTypeExpr(self, a.type_name) catch null,
+        .ascribed => |a| types_mod.evalTypeExpr(self.check(), a.type_name) catch null,
         .number => .{ .tag = .number },
         .string, .multiline_string => .{ .tag = .string },
         .hash => |name| .{ .tag = .{ .atom = name } },
@@ -1089,7 +1039,7 @@ fn narrowMatchPattern(
         const a = pattern.expr.ascribed;
 
         if (a.expr.expr == .ident and !ast.isDiscardName(a.expr.expr.ident)) {
-            const ti = type_serde.evalTypeExpr(self, a.type_name) catch types_mod.TypeInfo{ .tag = .any };
+            const ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
             try state.setLocalTypeHint(self, a.expr.expr.ident, ti);
 
             return;
@@ -1110,7 +1060,7 @@ fn narrowMatchPattern(
         const a = item.expr.ascribed;
 
         if (a.expr.expr == .ident and !ast.isDiscardName(a.expr.expr.ident)) {
-            const ti = type_serde.evalTypeExpr(self, a.type_name) catch types_mod.TypeInfo{ .tag = .any };
+            const ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
             try state.setLocalTypeHint(self, a.expr.expr.ident, ti);
         }
     }
@@ -1135,7 +1085,7 @@ fn narrowMatchPattern(
                 const a = item.expr.ascribed;
 
                 if (a.expr.expr == .ident and !ast.isDiscardName(a.expr.expr.ident)) {
-                    const ti = type_serde.evalTypeExpr(self, a.type_name) catch types_mod.TypeInfo{ .tag = .any };
+                    const ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
                     try state.setLocalTypeHint(self, a.expr.expr.ident, ti);
                 }
 

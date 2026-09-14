@@ -1,7 +1,10 @@
 //! doc extraction, docgen rendering for terminal text + html, collection for cli
 
-const revo = @import("../root.zig");
+const Lexer = @import("Lexer.zig");
+const Parser = @import("Parser.zig");
+const revo = @import("revo");
 const std = @import("std");
+const Project = @import("Project.zig").Project;
 const api = revo.std_lib.api;
 const Writer = std.Io.Writer;
 const pretty = revo.pretty;
@@ -29,7 +32,7 @@ pub const Extracted = struct {
 
 /// a `#! ... !#` block before any code is the module's own doc
 fn moduleDoc(src: []const u8) ![]const u8 {
-    const result = try revo.lang.lexReportAt(std.heap.page_allocator, src, .{});
+    const result = try Lexer.lexReportAt(std.heap.page_allocator, src, .{});
     const tokens = switch (result) {
         .ok => |t| t,
         .err => return "",
@@ -50,7 +53,7 @@ pub fn docsExtract(alloc: std.mem.Allocator, src: []const u8) !Extracted {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const parsed = try revo.lang.parseSourceReport(a, src);
+    const parsed = try Parser.parseSourceReport(a, src);
     const root_node = switch (parsed) {
         .ok => |node| node,
         .err => |f| {
@@ -747,7 +750,7 @@ pub const Cli = struct {
                 module_doc = try addDocsFromPath(init, gpa, arena, p, &owned, &flat);
             }
         } else if (splice or stdin_tty) {
-            var project = revo.lang.Project.detectFromCwd(init.io, gpa);
+            var project = Project.detectFromCwd(init.io, gpa);
             defer project.deinit(gpa);
             const root_dir: []const u8 = if (project.root.len > 0) project.root else ".";
             const t = try arena.dupe(u8, root_dir);

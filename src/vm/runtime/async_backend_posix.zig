@@ -1,5 +1,5 @@
 const async_backend = @import("./async_backend.zig");
-const revo = @import("../root.zig");
+const revo = @import("revo");
 const std = @import("std");
 
 // default async backend

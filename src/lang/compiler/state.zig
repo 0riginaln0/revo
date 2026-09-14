@@ -1,14 +1,13 @@
 const std = @import("std");
 
 const revo = @import("revo");
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("root.zig").Compiler;
 const LocalSlot = revo.LocalSlot;
 const Register = revo.opcode.Register;
 const UpvalueSpec = revo.functions.UpvalueSpec;
 const types = @import("types.zig");
 
 const ast = @import("../ast.zig");
-const type_serde = @import("../type_serde.zig");
 const Node = ast.Node;
 
 pub const LocalVar = struct {
@@ -19,8 +18,6 @@ pub const LocalVar = struct {
     type_info: ?types.TypeInfo = null,
     type_explicit: bool = false,
 };
-
-pub const CachedSlot = struct { idx: usize, gen: u32 };
 
 pub const FunctionState = struct {
     pub const TypeHint = struct {
@@ -38,9 +35,6 @@ pub const FunctionState = struct {
     type_scope_starts: std.ArrayList(usize),
     fn_signatures: std.StringHashMap(*types.FunctionSignature),
     type_params: []const []const u8 = &.{},
-    name_cache: std.StringHashMap(CachedSlot),
-    type_hint_cache: std.StringHashMap(CachedSlot),
-    cache_gen: u32 = 0,
 
     pub fn init(alloc: std.mem.Allocator) !FunctionState {
         return .{
@@ -53,8 +47,6 @@ pub const FunctionState = struct {
             .type_hints = try std.ArrayList(TypeHint).initCapacity(alloc, 8),
             .type_scope_starts = try std.ArrayList(usize).initCapacity(alloc, 8),
             .fn_signatures = std.StringHashMap(*types.FunctionSignature).init(alloc),
-            .name_cache = std.StringHashMap(CachedSlot).init(alloc),
-            .type_hint_cache = std.StringHashMap(CachedSlot).init(alloc),
         };
     }
 
@@ -66,8 +58,6 @@ pub const FunctionState = struct {
         self.scope_starts.deinit(alloc);
         self.type_hints.deinit(alloc);
         self.type_scope_starts.deinit(alloc);
-        self.name_cache.deinit();
-        self.type_hint_cache.deinit();
 
         var it = self.fn_signatures.iterator();
         while (it.next()) |entry| {
@@ -165,7 +155,6 @@ pub fn declareLocal(self: *Compiler, name: []const u8, mutable: bool) !LocalSlot
     const local: LocalVar = .{ .name = name, .slot = slot, .mutable = mutable, .initialized = false };
     try state.locals.append(self.alloc, local);
     try state.all_locals.append(self.alloc, local);
-    state.name_cache.put(name, .{ .idx = state.locals.items.len - 1, .gen = state.cache_gen }) catch {};
     return slot;
 }
 
@@ -188,7 +177,6 @@ pub fn popScope(self: *Compiler) void {
     state.locals.items.len = start;
     const type_start = state.type_scope_starts.pop() orelse return;
     state.type_hints.items.len = type_start;
-    state.cache_gen +%= 1;
 }
 
 pub fn findLocalInCurrentScope(self: *Compiler, name: []const u8) ?*LocalVar {
@@ -251,44 +239,28 @@ pub fn setLocalTypeHint(self: *Compiler, name: []const u8, type_info: types.Type
 
 pub fn resolveLocalTypeHint(self: *Compiler, name: []const u8) ?types.TypeInfo {
     const fn_state = currentFunctionState(self) orelse return null;
-    if (fn_state.type_hint_cache.get(name)) |cached| {
-        if (cached.gen == fn_state.cache_gen and cached.idx < fn_state.type_hints.items.len) {
-            const hint = fn_state.type_hints.items[cached.idx];
-            if (std.mem.eql(u8, hint.name, name)) return hint.type_info;
-        }
-    }
     var i = fn_state.type_hints.items.len;
     while (i > 0) {
         i -= 1;
         const hint = fn_state.type_hints.items[i];
-        if (std.mem.eql(u8, hint.name, name)) {
-            fn_state.type_hint_cache.put(name, .{ .idx = i, .gen = fn_state.cache_gen }) catch {};
-            return hint.type_info;
-        }
+        if (std.mem.eql(u8, hint.name, name)) return hint.type_info;
     }
     return null;
 }
 
-pub fn predeclareTypeAliases(self: *Compiler, exprs: []const *Node) !void {
-    for (exprs) |expr| switch (expr.expr) {
-        .decl => |decl| switch (decl.inner.expr) {
+pub fn predeclare(self: *Compiler, exprs: []const *Node) !void {
+    for (exprs) |expr| {
+        if (expr.expr != .decl) continue;
+        const decl = expr.expr.decl;
+        switch (decl.inner.expr) {
             .type_alias => |t| {
                 // declares are values, not type aliases - do not pollute type space
                 if (decl.kind == .declare_decl) continue;
                 const key = ast.bareName(t);
                 if (self.type_aliases.contains(key)) continue;
-                const type_info = try type_serde.evalTypeExpr(self, t.type_expr);
+                const type_info = try types.evalTypeExpr(self.check(), t.type_expr);
                 try self.type_aliases.put(key, type_info);
             },
-            else => {},
-        },
-        else => {},
-    };
-}
-
-pub fn predeclareFunctionBindings(self: *Compiler, exprs: []const *Node) !void {
-    for (exprs) |expr| switch (expr.expr) {
-        .decl => |decl| switch (decl.inner.expr) {
             .binding => |binding| {
                 if (binding.target.expr != .ident or binding.value.expr != .fn_expr) continue;
                 if (decl.kind == .global) continue; // globals are not locals
@@ -309,29 +281,17 @@ pub fn predeclareFunctionBindings(self: *Compiler, exprs: []const *Node) !void {
                 );
             },
             else => {},
-        },
-        else => {},
-    };
+        }
+    }
 }
 
 pub fn resolveLocalVarIn(self: *Compiler, fn_idx: usize, name: []const u8) ?LocalVar {
     const fn_state = &self.functions.items[fn_idx];
-    // try cache
-    if (fn_state.name_cache.get(name)) |cached| {
-        if (cached.gen == fn_state.cache_gen and cached.idx < fn_state.locals.items.len) {
-            const local = fn_state.locals.items[cached.idx];
-            if (std.mem.eql(u8, local.name, name)) return local;
-        }
-    }
-    // linear scan
     const locals = fn_state.locals.items;
     var i = locals.len;
     while (i > 0) {
         i -= 1;
-        if (std.mem.eql(u8, locals[i].name, name)) {
-            fn_state.name_cache.put(name, .{ .idx = i, .gen = fn_state.cache_gen }) catch {};
-            return locals[i];
-        }
+        if (std.mem.eql(u8, locals[i].name, name)) return locals[i];
     }
     // check bypasses scope pops from synthetic blocks
     const import_locals = fn_state.import_locals.items;
@@ -419,7 +379,7 @@ pub fn allocFnSig(
     var param_types = try std.ArrayList(types.TypeInfo).initCapacity(self.alloc, params.len);
     errdefer param_types.deinit(self.alloc);
     for (params) |p| try param_types.append(self.alloc, if (p.type_name) |tn|
-        type_serde.evalTypeExpr(self, tn) catch types.TypeInfo{ .tag = .any }
+        types.evalTypeExpr(self.check(), tn) catch types.TypeInfo{ .tag = .any }
     else
         types.implicitParamType(p));
 
@@ -437,7 +397,7 @@ pub fn allocFnSig(
         .param_names = try param_names.toOwnedSlice(self.alloc),
         .params = try param_types.toOwnedSlice(self.alloc),
         .return_type = if (return_type) |rt|
-            type_serde.evalTypeExpr(self, rt) catch types.TypeInfo{ .tag = .any }
+            types.evalTypeExpr(self.check(), rt) catch types.TypeInfo{ .tag = .any }
         else
             types.TypeInfo{ .tag = .any },
         .required_count = required_count,

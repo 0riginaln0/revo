@@ -3,14 +3,21 @@
 //! safe bc operands use .inst pointers (not register names),
 //! so data flow is correct whatever the control flow is
 //!
+//! folds const-const arithmetic plus identity/annihilator forms with one constant side
+//!   (`x + 0` becomes a copy, `x & 0` becomes 0)
+//!
+//! the identity folds drop the operand's runtime type check
+//! , see the op tables below
+//!
 //! folding frees the operands of the folded instruction, but the operand
 //! instructions themselves are only reclaimed by `dce.dceIr`; fold must
 //! therefore always be followed by dce before the ir is lowered
 const std = @import("std");
 
 const revo = @import("revo");
-const Compiler = revo.lang.compiler.Compiler;
+const Compiler = @import("../compiler/root.zig").Compiler;
 const Data = revo.Data;
+const Opcode = revo.opcode.Opcode;
 
 const ir = @import("root.zig");
 
@@ -23,7 +30,11 @@ pub fn foldIr(self: *Compiler) !void {
 fn tryFoldInst(self: *Compiler, inst: *ir.IrInst) !bool {
     switch (inst.opcode) {
         .add, .sub, .mul, .div, .mod, .concat, .pow, .band, .bor, .bxor, .shl, .shr, .int_div, .eq, .neq, .lt, .gt, .lte, .gte, .eq_int, .neq_int, .lt_int, .gt_int, .lte_int, .gte_int => {
-            return tryFoldBinary(self, inst);
+            if (try tryFoldBinary(self, inst)) return true;
+            return tryFoldIdentity(self, inst);
+        },
+        .add_imm, .sub_imm, .mul_imm, .band_imm, .lt_int_imm => {
+            return tryFoldIdentityImm(self, inst);
         },
         .negate, .not => {
             return tryFoldUnary(self, inst);
@@ -212,6 +223,95 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
     }
 
     return false;
+}
+
+///
+/// rewrite `x OP c` where the constant makes the result equal to one
+/// operand (`x + 0`, `x * 1`) or a constant (`x & 0`)
+///
+/// surviving operand becomes a copy
+/// ; dce and the peephole clean up.
+/// only integral small constants participate
+///
+/// identity folds hold for floats too (including NaN)
+/// annihilators apply only where the op is exact on all inputs it accepts:
+///   band_imm requires integral lhs, so x&0 is 0,
+///
+/// but mul_imm takes any float and NaN*0 is NaN, so it has no annihilator
+///
+fn tryFoldIdentity(self: *Compiler, inst: *ir.IrInst) !bool {
+    if (inst.operands.len != 2) return false;
+    const lhs = inst.operands[0];
+    const rhs = inst.operands[1];
+    if (lhs != .inst or rhs != .inst) return false;
+
+    const lc = constInt(self, lhs.inst);
+    const rc = constInt(self, rhs.inst);
+    if (lc == null and rc == null) return false;
+    if (lc != null and rc != null) return false;
+
+    const op = inst.opcode;
+    if (rc != null) {
+        if (identityWith(op, rc.?)) return try makeMove(self, inst, lhs.inst);
+        if (annihilatorWith(op, rc.?)) return try makeZero(self, inst);
+    }
+    if (lc != null and commutative(op)) {
+        if (identityWith(op, lc.?)) return try makeMove(self, inst, rhs.inst);
+        if (annihilatorWith(op, lc.?)) return try makeZero(self, inst);
+    }
+    return false;
+}
+
+fn tryFoldIdentityImm(self: *Compiler, inst: *ir.IrInst) !bool {
+    if (inst.operands.len != 1) return false;
+    const acc = inst.operands[0];
+    if (acc != .inst) return false;
+    const k: i64 = @intCast(inst.op_arg);
+    if (identityWith(inst.opcode, k)) return try makeMove(self, inst, acc.inst);
+    if (annihilatorWith(inst.opcode, k)) return try makeZero(self, inst);
+    return false;
+}
+
+fn makeMove(self: *Compiler, inst: *ir.IrInst, src: *ir.IrInst) !bool {
+    self.alloc.free(inst.operands);
+    inst.operands = try self.alloc.dupe(ir.IrValue, &.{.{ .inst = src }});
+    inst.opcode = .move;
+    return true;
+}
+
+fn makeZero(self: *Compiler, inst: *ir.IrInst) !bool {
+    try rewriteToConst(self, inst, Data.new.num(0));
+    return true;
+}
+
+fn constInt(self: *Compiler, v: *const ir.IrInst) ?i64 {
+    const d = extractConst(self, v) orelse return null;
+    const n = d.asNum() orelse return null;
+    const iv = revo.memory.numToI64(n) orelse return null;
+    if (@as(f64, @floatFromInt(iv)) != n) return null;
+    return iv;
+}
+
+fn commutative(op: Opcode) bool {
+    return switch (op) {
+        .add, .mul, .band, .bor, .bxor => true,
+        else => false,
+    };
+}
+
+fn identityWith(op: Opcode, c: i64) bool {
+    return switch (op) {
+        .add, .add_imm, .sub, .sub_imm => c == 0,
+        .mul, .mul_imm, .div, .int_div => c == 1,
+        else => false,
+    };
+}
+
+fn annihilatorWith(op: Opcode, c: i64) bool {
+    return switch (op) {
+        .band_imm => c == 0,
+        else => false,
+    };
 }
 
 fn tryFoldUnary(self: *Compiler, inst: *ir.IrInst) !bool {

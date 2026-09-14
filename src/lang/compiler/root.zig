@@ -18,13 +18,11 @@ const dce = @import("../ir/dce.zig");
 const expander = @import("../expander.zig");
 const flow = @import("flow.zig");
 const fold = @import("../ir/fold.zig");
-pub const ir = @import("../ir/root.zig");
+const ir = @import("../ir/root.zig");
 const peephole = @import("../ir/peephole.zig");
-const promote = @import("../ir/promote.zig");
 const state_mod = @import("state.zig");
 
 const diagnostic = @import("../diagnostic.zig");
-pub const type_check = @import("type_check.zig");
 const type_serde = @import("../type_serde.zig");
 pub const types = @import("types.zig");
 const values = @import("values.zig");
@@ -179,14 +177,120 @@ pub const Compiler = struct {
         self.value_stack.deinit(self.alloc);
     }
 
-    // ctx interface for types.zig
-    pub const inferIdentType = type_check.inferIdentType;
-    pub const resolveTypeName = types.resolveTypeName;
-    pub const resolveTypeAlias = type_check.resolveTypeAlias;
-    pub const resolveImportAlias = type_check.resolveImportAlias;
-    pub const inferCallReturnType = type_check.inferCallReturnType;
-    pub const inferFieldType = type_check.inferFieldType;
-    pub const inferFnType = type_check.inferFnType;
+    // the CheckCtx scope for types.zig inference and eval
+    pub fn check(self: *Compiler) types.CheckCtx {
+        return types.CheckCtx.init(self, self.alloc);
+    }
+
+    pub fn inferExprType(self: *Compiler, node: *const Node) types.TypeInfo {
+        if (self.type_annotations) |map| {
+            if (map.get(node)) |t| return t;
+        }
+        return types.inferExprType(self.check(), node);
+    }
+
+    pub fn inferIdentType(self: *Compiler, name: []const u8) types.TypeInfo {
+        if (state_mod.resolveLocalTypeHint(self, name)) |hint| return hint;
+        const local = state_mod.resolveLocalVar(self, name) orelse return inferTypeMap(self, name);
+        if (local.type_info) |ti| return ti;
+
+        return inferTypeMap(self, name);
+    }
+
+    fn inferTypeMap(self: *Compiler, name: []const u8) types.TypeInfo {
+        if (self.type_aliases.get(name)) |aliased| return aliased;
+        return .{ .tag = .any };
+    }
+
+    pub fn inferCallReturnType(
+        self: *Compiler,
+        callee: *const Node,
+        args: []const *Node,
+        type_args: []const []const u8,
+        implicit_self: bool,
+    ) types.TypeInfo {
+        const callee_type = self.inferExprType(callee);
+        if (callee_type.tag == .function) {
+            const fn_sig = callee_type.tag.function;
+            const ret = fn_sig.return_type;
+
+            if (fn_sig.type_params.len > 0 and ret.tag != .any)
+                return types.substCallReturn(self.check(), fn_sig, callee, args, type_args, implicit_self);
+            if (ret.tag != .any) return ret;
+
+            if (callee.expr == .fn_expr and callee.expr.fn_expr.return_type == null)
+                return self.inferExprType(callee.expr.fn_expr.body);
+        }
+
+        if (callee.expr == .ident) {
+            const fn_name = callee.expr.ident;
+            const sig = state_mod.findFnSignature(self, fn_name) orelse return .{ .tag = .any };
+            if (sig.type_params.len > 0 and sig.return_type.tag != .any)
+                return types.substCallReturn(self.check(), sig, callee, args, type_args, implicit_self);
+            return sig.return_type;
+        }
+
+        return .{ .tag = .any };
+    }
+
+    pub fn inferFieldType(self: *Compiler, object: *const Node, name: []const u8) types.TypeInfo {
+        return switch (self.inferExprType(object).tag) {
+            // `t.name` where t: { name: string } infers string
+            .table => |tbl| blk: {
+                if (tbl.fields) |fields| {
+                    if (types.findField(fields, name)) |f| break :blk f.field_type;
+                }
+                break :blk .{ .tag = .any };
+            },
+            else => .{ .tag = .any },
+        };
+    }
+
+    pub fn inferFnType(
+        self: *Compiler,
+        params: []const ast.FnParam,
+        return_type: ?*ast.TypeExpr,
+        type_params: []const []const u8,
+        doc: ?[]const u8,
+    ) types.TypeInfo {
+        var param_types = std.ArrayList(types.TypeInfo).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
+        defer param_types.deinit(self.alloc);
+
+        var param_names = std.ArrayList([]const u8).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
+        defer param_names.deinit(self.alloc);
+        var required_count: usize = 0;
+
+        for (params) |p| {
+            const pt = if (p.type_name) |tn| types.evalTypeExpr(self.check(), tn) catch types.TypeInfo{ .tag = .any } else types.implicitParamType(p);
+            param_types.append(self.alloc, pt) catch return .{ .tag = .any };
+            param_names.append(self.alloc, p.name) catch return .{ .tag = .any };
+            if (!p.optional and p.default_value == null) required_count += 1;
+        }
+
+        const combined = types.combinedTypeParams(self.alloc, type_params, params) catch type_params;
+
+        const sig = types.newSignature(self.alloc, .{
+            .param_names = param_names.toOwnedSlice(self.alloc) catch return .{ .tag = .any },
+            .params = param_types.toOwnedSlice(self.alloc) catch return .{ .tag = .any },
+            .return_type = if (return_type) |rt| types.evalTypeExpr(self.check(), rt) catch types.TypeInfo{ .tag = .any } else .{ .tag = .any },
+            .required_count = required_count,
+            .type_params = combined,
+            .doc = doc,
+        }) catch return .{ .tag = .any };
+
+        return .{ .tag = .{ .function = sig } };
+    }
+
+    pub fn resolveTypeAlias(self: *Compiler, name: []const u8) ?types.TypeInfo {
+        return self.type_aliases.get(name);
+    }
+
+    /// cant do it
+    /// no io dep in the compiler
+    /// sema validates first anwyays so degraditn to any cant false-error
+    pub fn resolveImportAlias(_: *Compiler, _: []const u8, _: []const u8) ?types.TypeInfo {
+        return null;
+    }
 
     pub fn isTypeParam(self: *Compiler, name: []const u8) bool {
         const fn_state = state_mod.currentFunctionState(self) orelse return false;
@@ -205,7 +309,6 @@ pub const Compiler = struct {
         try fold.foldIr(self);
         try dce.dceIr(self);
         try peephole.peepholeIr(self);
-        try promote.promoteLoopCarried(self);
         const lowered = try self.lowerToVerifyBytecode();
         const instr_copy = try self.runtime_alloc.dupe(Instruction, lowered);
         defer self.alloc.free(lowered);
@@ -653,8 +756,8 @@ pub const Compiler = struct {
                     "union type expression used as a value",
                 );
 
-                const left_type = type_check.inferExprType(self, b.left);
-                const right_type = type_check.inferExprType(self, b.right);
+                const left_type = self.inferExprType(b.left);
+                const right_type = self.inferExprType(b.right);
 
                 const both_numeric = b.op != .concat and left_type.tag == .number and right_type.tag == .number;
 
@@ -894,7 +997,7 @@ pub const Compiler = struct {
                 try self.pushNil();
             },
             .type_alias => |t| {
-                const type_info = type_serde.evalTypeExpr(self, t.type_expr) catch |err| switch (err) {
+                const type_info = types.evalTypeExpr(self.check(), t.type_expr) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                 };
                 try self.type_aliases.put(ast.bareName(t), type_info);
@@ -1028,7 +1131,7 @@ pub const Compiler = struct {
         args: []const *Node,
         implicit_self: bool,
     ) InternalLowerError!bool {
-        const object_type = type_check.inferExprType(self, field.object);
+        const object_type = self.inferExprType(field.object);
         const module_name = switch (object_type.tag) {
             .string => "string",
             .table => "table",
@@ -1229,19 +1332,18 @@ pub const Compiler = struct {
         for (0..min_args) |i| {
             const expected_type = sig.params[i];
             if (expected_type.tag == .any) continue;
-            const actual_type = type_check.inferExprType(
-                self,
+            const actual_type = self.inferExprType(
                 reordered_args[i],
             );
             // type params (generics) are .type_var, skip type check
             if (expected_type.tag == .type_var) continue;
-            type_check.checkType(
+            types.ensureCoercible(
                 expected_type,
                 actual_type,
             ) catch |err| switch (err) {
                 error.TypeError => {
-                    const expected_str = try type_serde.formatType(self.alloc, expected_type);
-                    const actual_str = try type_serde.formatType(self.alloc, actual_type);
+                    const expected_str = try type_serde.formatTypeOpts(self.alloc, expected_type, .{});
+                    const actual_str = try type_serde.formatTypeOpts(self.alloc, actual_type, .{});
                     const label = if (sig.param_names[i].len == 0)
                         try std.fmt.allocPrint(
                             self.alloc,
@@ -1300,11 +1402,11 @@ pub const Compiler = struct {
             for (reordered_args.len..sig.params.len) |idx| {
                 const expected_type = sig.params[idx];
                 if (expected_type.tag == .any or expected_type.tag == .type_var) continue;
-                const actual_type = type_check.inferExprType(self, full_args[idx]);
-                type_check.checkType(expected_type, actual_type) catch |err| switch (err) {
+                const actual_type = self.inferExprType(full_args[idx]);
+                types.ensureCoercible(expected_type, actual_type) catch |err| switch (err) {
                     error.TypeError => {
-                        const expected_str = try type_serde.formatType(self.alloc, expected_type);
-                        const actual_str = try type_serde.formatType(self.alloc, actual_type);
+                        const expected_str = try type_serde.formatTypeOpts(self.alloc, expected_type, .{});
+                        const actual_str = try type_serde.formatTypeOpts(self.alloc, actual_type, .{});
                         try self.appendFailureReport(.ParseError, &.{
                             .{ .@"error" = try std.fmt.allocPrint(self.alloc, "default for `{s}` wants {s}, got {s}", .{ sig.param_names[idx], expected_str, actual_str }) },
                         });
@@ -1416,8 +1518,7 @@ pub const Compiler = struct {
             try state_mod.pushScope(self);
             pushed_scope = true;
             errdefer if (pushed_scope) state_mod.popScope(self);
-            try state_mod.predeclareTypeAliases(self, exprs);
-            try state_mod.predeclareFunctionBindings(self, exprs);
+            try state_mod.predeclare(self, exprs);
         }
         self.upvalue_cache.clearRetainingCapacity();
         for (exprs, 0..) |expr, idx| {
@@ -1466,9 +1567,9 @@ pub const Compiler = struct {
             } else try self.compile(binding.value, true);
 
             const inferred_type = if (binding.type_name) |tn|
-                try type_serde.evalTypeExpr(self, tn)
+                try types.evalTypeExpr(self.check(), tn)
             else
-                type_check.inferExprType(self, binding.value);
+                self.inferExprType(binding.value);
             try state_mod.setLocalTypeHint(self, name, inferred_type);
 
             if (ast.isDiscardName(name)) return;
@@ -1578,7 +1679,7 @@ pub const Compiler = struct {
                 .slot = @intCast(idx),
                 .mutable = true,
                 .initialized = true,
-                .type_info = if (param.type_name) |tn| try type_serde.evalTypeExpr(self, tn) else null,
+                .type_info = if (param.type_name) |tn| try types.evalTypeExpr(self.check(), tn) else null,
                 .type_explicit = param.type_name != null,
             };
             try fn_state.locals.append(self.alloc, local);
@@ -1586,7 +1687,7 @@ pub const Compiler = struct {
             if (param.type_name) |type_name| {
                 try fn_state.type_hints.append(self.alloc, .{
                     .name = param.name,
-                    .type_info = try type_serde.evalTypeExpr(self, type_name),
+                    .type_info = try types.evalTypeExpr(self.check(), type_name),
                 });
             }
         }
@@ -1610,7 +1711,7 @@ pub const Compiler = struct {
         if (return_type) |rt| {
             _ = rt;
         } else {
-            const inferred_type = type_check.inferExprType(self, body);
+            const inferred_type = self.inferExprType(body);
             sig.return_type = inferred_type;
 
             // propagate to parent state so callers find it via

@@ -46,7 +46,7 @@ revo
 
 #### nix
 
-this project has a flake which exposes revo as a package on `default`. you can open a shell with revo using `nix shell git+https://github.com/if-not-nil/revo.git`. there is also a function that bundles a revo script into a nix package.
+this project has a flake which exposes revo as a package on `default`. you can open a shell with revo using `nix shell github:if-not-nil/revo?dir=ext`. there is also a function that bundles a revo script into a nix package.
 
 #### windows
 

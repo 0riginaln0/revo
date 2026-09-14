@@ -303,7 +303,7 @@ pub const Session = struct {
         defer {
             for (syms) |*s| {
                 self.gpa.free(s.name);
-                if (s.type_name) |*ti| revo.lang.types.deinitType(ti, self.gpa);
+                if (s.type_name) |*ti| revo.lang.compiler.types.deinitType(ti, self.gpa);
             }
             self.gpa.free(syms);
         }
@@ -390,6 +390,10 @@ pub const Session = struct {
         // complete expression or an unfinished fragment like opening of a block
         var parse_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer parse_arena.deinit();
+
+        // lol
+        revo.lang.Parser.repl_mode = true;
+        defer revo.lang.Parser.repl_mode = false;
 
         const parse_ok = switch (revo.lang.parseSourceReport(parse_arena.allocator(), snippet) catch |err| {
             try out.print("parse error: {}\n", .{err});

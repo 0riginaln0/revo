@@ -8,9 +8,9 @@ pub const has_async_backend = switch (builtin.target.os.tag) {
 };
 
 pub const async_backend_impl = if (has_async_backend)
-    @import("./runtime/async_backend_posix.zig")
+    @import("./vm/runtime/async_backend_posix.zig")
 else
-    @import("./runtime/async_backend_none.zig");
+    @import("./vm/runtime/async_backend_none.zig");
 
 pub const Runtime = struct {
     alloc: std.mem.Allocator,
@@ -420,7 +420,7 @@ pub const EvalFailure = vm.EvalFailure;
 pub const EvalResult = vm.EvalResult;
 
 pub const argparse = @import("./argparse.zig");
-pub const async_backend = @import("./runtime/async_backend.zig");
+pub const async_backend = @import("./vm/runtime/async_backend.zig");
 pub const lang = @import("./lang/root.zig");
 pub const pretty = @import("./pretty.zig");
 pub const std_lib = @import("./std/root.zig");

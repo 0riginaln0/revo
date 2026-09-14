@@ -1,0 +1,33 @@
+print
+("hi")
+## [x]
+it must be that fn names and parens have to "hug" to get a call, so no whitespace between them
+the code above should work like
+	print;
+	("hi")
+##
+
+# [x] error match expression requires at least one arm [vim.NIL]
+:ok |> match "hi"
+		| "hi" => 3
+
+##
+[ ] change generics syntax to this
+[ ] eliminaaate all unbounded lookahead
+##
+fn identity<T>(x: T) x
+let id_int = identity<int>(42)
+
+
+
+do
+	total = total + len(detector_handle_frame(det, sim_simulate(sim, time)))
+	total
+end
+# [ ] must be equivalent to
+do
+	total += sim_simulate(sim, time)
+				|> detector_handle_frame(det, _)
+				|> len() # with or without these parens
+	total
+end

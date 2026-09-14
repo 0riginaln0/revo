@@ -1,59 +1,52 @@
-```text
+* issues/
+
+when an issue is fixed, just tick a checkbox next to it
+
+all issues are open
+
+these are features and should only be added after bug fixes
+
+anyone can just dump a crash log/repr whenever they find it
+
+#+begin_src txt
 p for planned,
 ? for maybe,
 x for done,
 / for partially done
-```
+#+end_src
 
-### core
+** cleanliness
 
-- [x] variable arguments in user code
-- [x] default function arguments
-- [x] ambient type declarations
-  - [x] maybe via ambient `.d.rv` declaration files that are not parse-only without side-effects?
-- [x] predictable type inference and typechecker
-  - [x] needed for zerocost comptime type-checking (e.g., picking the right loop iterator)
-  - [x] struct layouts now comptime
+- [ ] put env into Runtime struct, expose a way to get env from revo
+- [ ] find more things that belong in the Runtime struct, e.g. the things
+      someone porting and embedding revo might want to change. params should be
+      comptime-known whenever possible
 
-### macros & metaprogramming
+** cli-adjacent
 
-- [x] macro enhancements
-  - [x] proc macros
-  - [ ] crystal-ish macros
-    - [x] quasiquoting
-  - [x] macros importable on the compiler's side
-    - [x] clearly scoped instead of global: namespace and restrict based on current module name
+- [x] find an actual library (preferrably small) that will let it do stuff like `-D -e` == `-De`
+      didnt, finished `src/argparse.zig` instead
 
-### tests & docs
+- [ ] expose to revo, library should mirror python's argparse
 
-- [x] comptime test system
-  - [x] normal tests
+** proc/macro/ast serde
 
-    ```ruby
-    test "test name" do
-        assert!(:true)
-    end
-    ```
+- [ ] make proc operate on lexer tokens
+  - [ ] add revo.* functions to then operate on them
+- [ ] find ways to the macro input param and its outputs
 
-  - [ ] doctests (like ex)
+** wasm
 
-    ```ruby
-    #*
-    > double(n: positive number) -> n * 2
-    >> double(2)
-    {:ok, 4}
-    >> double("hi")
-    {:err, "arg 0 is not a positive number"}
-    *#
-    fn double(n: number) match n
-    | x when x > 0 and number?(x) ok(x*2)
-    | _ err("arg 0 is not a positive number")
-    ```
+- [x] give revo.js two classes - freestanding and wasi. they will use separate binaries
+- [x] make wasi32 a first class citizen. use browser-wasi-shim for wasi
+- [x] make the website (~/projects/web/revo.lung.fyi/) use wasi, integrate lsp into the editor at /ide
 
-- [x] doc comment system
-- [x] annotate more code (backwardly done after writing rn)
+** attributes
 
-### standard library
+- [ ] `@inline` attribute for "always inline this function"
+- [ ] `@macro_name!()` attribute for transforming a function using a macro called `macro_name` when attached
+
+** standard library
 
 - [x] clean up the standard library
   - [x] clear abstraction for defining functions together with their docs and type signatures
@@ -76,7 +69,7 @@ x for done,
 - [ ] termios
 - [ ] data structures (tbd)
 
-### extensions & interop
+** extensions & interop
 
 - [x] better ext interfaces
   - [x] more functions exposed to c
@@ -87,38 +80,37 @@ x for done,
   - [ ] spyware: wraps data/function and shows all available stats (`__index`, `__newindex`, `__call`, etc.)
   - [ ] `fn about(any)`: vm stores as much build-time information about everything as possible; exposed as a table
 
-### repl
+** repl
 
 - [x] repl
   - [ ] live ast checking (not possible with isocline afaik)
+  - [ ] persistent bindings via compile flag maychance
 
-## performance
+** scheduler, async & i/o
 
-### scheduler, async & i/o
-
-- [ ] m:n thread mapping
+- [ ] m:n threads, workstealing global
 - [ ] rewrite i/o
       if `Io.Evented` is complete and enough, none of this matters
 - [x] async runtime
-- [x] `poll` (any posix)
-- [ ] `kqueue` (bsd and macos)
-- [ ] `uring` (linux)
+- [x] `poll`
+- [ ] `kqueue`
+- [ ] `io_uring`
 - [ ] `Runtime` struct as a configurer
   - [ ] add default presets; make the lookup `inline`-able and eventually fold into an enum + type system
   - [ ] move `module_cache`, `debug_infos`, `bootstrap_globals` from vm to runtime (a la lua)
   - [ ] scheduler (a la node): design tbd
 - todo: universal individual build step access from within revo code
 
-## std/core
+** std/core
 
-### expose zig code as stdlib
+*** expose zig code as stdlib
 
 - [x] language's ast, assembler, lexer, and parser
 - [x] http client/server
 - [x] json parsing and generation
 - [x] build system itself
 
-### language features
+*** language features
 
 - [ ] bigints
 - [ ] zerocosts
@@ -134,29 +126,24 @@ x for done,
     1 + inspect(2) == 3
     ```
 
-## tooling
+*** tests & docs
 
-### cli
+- [ ] doctests (like ex)
 
-- [x] break&fix unwinding
-  - [ ] when reflection exists, pull useful data from a recovered vm state
-- [x] break&fix error spans
-- [ ] progress indicators
-- [x] doc subcommand
-  - [x] doc for zig functions
-        may be irrelevant if all signatures move to ambient declaration files
+#+begin_src revo
+#*
+> double(n: positive number) -> n * 2
+>> double(2)
+{:ok, 4}
+>> double("hi")
+{:err, "arg 0 is not a positive number"}
+*#
+fn double(n: number) match n
+| x: number when x > 0 => ok(x*2)
+| _ err("arg 0 is not a positive number")
+#+end_src
 
-### build system
-
-- [ ] built-in build/task system (similar to zig)
-  - package manager uses a global cache
-  - no lockfile for single scripts, only `build.rv`
-  - pulls via https git (unless ssh or http explicitly specified)
-  - versions based on git tags
-  - manifest stored in repo as `manifest.ini` / `manifest.toml` / serialized revo table *(undecided)*
-  - see design notes below for single-file and `build.rv` examples
-
-### lsp
+*** lsp
 
 - [ ] procedural per-project revo-defined code actions
   - [ ] `hooks:action()`: ast-transforming code actions
@@ -169,34 +156,27 @@ x for done,
   - [p] no `unwrap` or top-level `?`
 - [ ] live ast checking in repl
 
-## cool but optional
+** build system
 
-- [ ] lisp mode
-- [ ] reconstruct syntax from ast
-- [ ] untyped data
-  java is fully typed, therefore it doesn't need to store data as typed
-  when the type system is complete and 100% of revo code can be adequately typed, this should be possible
+- package manager uses a global cache
+- no lockfile for single scripts, only for `build.rv`
+- pulls via https git (unless ssh or http explicitly specified)
+- versions based on git tags
+- manifest stored in repo as `manifest.ini` / `manifest.toml` / serialized revo table *(undecided)*
+- see design notes below for single-file and `build.rv` examples
 
-## apdx: build system design notes
-
-<details>
-<summary>single-file package usage</summary>
-
-```ex
+#+begin_src revo
 import {
     "git:github.com/if-not-nil/md-tcp",
     markdown_over_tcp = "git:github.com/if-not-nil/md-tcp"
 }
 
 markdown_over_tcp:serve(6767)
-```
+#+end_src
 
-</details>
+**build.rv for exe**
 
-<details>
-<summary>build.rv for an application</summary>
-
-```ruby
+#+begin_src revo
 import!("build")
 
 build(fn(b) do
@@ -217,14 +197,11 @@ build(fn(b) do
     })
   end))
 end)
-```
+#+end_src
 
-</details>
+**build.rv for a lib**
 
-<details>
-<summary>build.rv for a library</summary>
-
-```ruby
+#+begin_src revo
 import!("build")
 
 build(fn(b) do
@@ -237,6 +214,13 @@ build(fn(b) do
     b:build_manifest("./manifest.ini")
   end))
 end)
-```
+#+end_src
 
-</details>
+** cool but optional
+
+- [ ] lisp mode
+- [ ] reconstruct syntax from ast
+- [ ] untyped data
+  java is fully typed, therefore it doesn't need to store data as typed
+  when the type system is complete and 100% of revo code can be adequately
+	typed, this should be possible

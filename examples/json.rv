@@ -15,7 +15,7 @@
 fn parse_json(s: string) -> !{num, table}
 	parse(s, 0)
 
-fn parse(s, i) do
+fn parse(s, i) do # [ ] type inferred as :nil here
 	match s[i]
 		| c when is_numeric(c) => parse_num(s, i)
 		| 'n' => parse_null(s, i)
@@ -24,6 +24,7 @@ fn parse(s, i) do
 		| '[' => parse_list(s, i)
 		| '{' => parse_map(s, i)
 		| '"' => parse_string(s, i)
+		| _ => :nil
 end
 
 fn is_numeric(c) c:len() > 0 and "-0123456789.":contains?(c)

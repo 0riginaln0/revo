@@ -435,22 +435,22 @@ test "functions return exactly one value" {
 }
 
 test "functions reject wrong arity" {
-    try t.expectCompileError(
+    try t.expectSemanticError(
         \\ const id = fn(x) x
         \\ id()
-    , .ParseError);
-    try t.expectCompileError(
+    );
+    try t.expectSemanticError(
         \\ const forty_two = fn() 42
         \\ forty_two(1)
-    , .ParseError);
-    try t.expectCompileError(
+    );
+    try t.expectSemanticError(
         \\ const all = fn(a, b, c) a + b * c
         \\ all(1, 2)
-    , .ParseError);
-    try t.expectCompileError(
+    );
+    try t.expectSemanticError(
         \\ const all = fn(a, b, c) a + b * c
         \\ all(1, 2, 3, 4)
-    , .ParseError);
+    );
 }
 
 test "function pool prototype ownership and upvalue slot reuse" {

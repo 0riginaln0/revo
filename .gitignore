@@ -25,3 +25,10 @@ _ign*
 # nix build artifacts
 result
 result-*
+
+# dev files i end up committing on accident
+/asdf.rv
+/foo.rv
+/bar.rv
+/a.rv
+/b.rv
