@@ -16,7 +16,7 @@ const Method = std.http.Method;
 const RedirectBehavior = std.http.Client.Request.RedirectBehavior;
 
 pub const Impl = struct {
-    pub fn fetch(vm: *VM, raw_method: Ts.atom, url: Ts.any, opts: Ts.any) !HostResult {
+    pub fn fetch(vm: *VM, raw_method: Ts.atom, url: Ts.any, opts: Ts.table_sentinel) !HostResult {
         // both this and the ambient sig intentionally omit CONNECT,
         //   bc that opens a tunnel and is not fetch-able
         const method = try buildMethod(raw_method, vm);
@@ -44,7 +44,7 @@ pub const Impl = struct {
         var request: std.http.Client.FetchOptions = .{ .location = .{ .url = url_string }, .method = method, .redirect_behavior = redirect_behavior };
 
         // add body to the request, if provided
-        const body = try buildBody(method, opts, vm);
+        const body = try buildBody(method, opts.value, vm);
         defer if (body) |b| {
             if (b.owned) vm.runtime.alloc.free(b.slice);
         };
@@ -63,7 +63,7 @@ pub const Impl = struct {
         const max_headers = 50;
         var extra_headers = try std.ArrayList(std.http.Header).initCapacity(vm.runtime.alloc, max_headers);
         defer extra_headers.deinit(vm.runtime.alloc);
-        const headers = switch (try buildHeaders(opts, &extra_headers, vm)) {
+        const headers = switch (try buildHeaders(opts.value, &extra_headers, vm)) {
             .err => |e| return HostResult{ .err = e },
             .value => |v| v,
         };
@@ -134,10 +134,11 @@ fn buildMaxRedirects(options: Data, vm: *VM) !HostErrOr(?u16) {
     return .{ .value = null };
 }
 
-fn buildHeaders(options: Data, extra_headers: *std.ArrayList(std.http.Header), vm: *VM) !HostErrOr(std.http.Client.Request.Headers) {
+fn buildHeaders(options: Ts.table, extra_headers: *std.ArrayList(std.http.Header), vm: *VM) !HostErrOr(std.http.Client.Request.Headers) {
     var headers = std.http.Client.Request.Headers{};
 
-    if (vm.getField(options, "headers")) |id| {
+    var options_table = try vm.tables.get(@intFromEnum(options));
+    if (options_table.getRaw(try vm.ownDataString("headers"), vm)) |id| {
         if (id.asTable()) |table_id| {
             var table: *Table = try vm.tables.get(table_id);
             // hash part only: array entries are not headers
@@ -173,18 +174,16 @@ fn setKnownHeader(headers: *std.http.Client.Request.Headers, key: []const u8, va
     return false;
 }
 
-fn buildBody(method: Method, opts: Data, vm: *VM) !?Body {
+fn buildBody(method: Method, opts: Ts.table, vm: *VM) !?Body {
     if (!method.requestHasBody()) {
         return null;
     }
-    if (opts.asTable() != null) {
-        if (vm.getField(opts, "body")) |id| {
-            if (id.asStr()) |s| {
-                return .{ .slice = vm.stringValue(s) };
-            }
-            // anything else is json, the default content-type is json too (TODO detect it)
-            return .{ .slice = try @import("json.zig").encodeAlloc(id, vm), .owned = true };
+    if (vm.getField(Data.new.table(@intFromEnum(opts)), "body")) |id| {
+        if (id.asStr()) |s| {
+            return .{ .slice = vm.stringValue(s) };
         }
+        // anything else is json, the default content-type is json too (TODO detect it)
+        return .{ .slice = try @import("json.zig").encodeAlloc(id, vm), .owned = true };
     }
 
     return null;

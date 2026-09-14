@@ -4,11 +4,11 @@ the default Content-Type is json
 
 examples:
 ```revo
-http.fetch(:get, "https://example.com", {})
+http.fetch(:get, "https://example.com")
 http.fetch(:post, "https://example.com", {
 	body = { foo = "bar" }
 })
 ```
 *#
-pub declare http.fetch = fn(method: :get | :post | :put | :delete | :head | :options | :patch | :trace, url: any, opts: table) -> !string
+pub declare http.fetch = fn(method: :get | :post | :put | :delete | :head | :options | :patch | :trace, url: any, ?opts: table) -> !string
 

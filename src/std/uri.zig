@@ -13,8 +13,8 @@ const Component = std.Uri.Component;
 const Table = revo.table.Table;
 
 pub const Impl = struct {
-    pub fn decode(vm: *VM, self: Ts.any) !HostResult {
-        const source = vm.stringValue(self.asString().?);
+    pub fn decode(vm: *VM, self: Ts.string) !HostResult {
+        const source = vm.stringValue(@intFromEnum(self));
         const uri = try std.Uri.parse(source);
         const root_id = try vm.tables.create();
 
@@ -26,7 +26,7 @@ pub const Impl = struct {
         try parseQuery(&uri, root_id, vm);
         try parsePort(&uri, root_id, vm);
 
-        return .data(Data.new.table(root_id));
+        return .Ok(vm, Data.new.table(root_id));
     }
 
     pub fn encode(vm: *VM, self: Ts.table) !HostResult {
@@ -45,7 +45,7 @@ pub const Impl = struct {
 
         const slice = try out.toOwnedSlice();
         const data = try vm.adoptDataString(slice);
-        return HostResult.Ok(vm, data);
+        return .Ok(vm, data);
     }
 };
 

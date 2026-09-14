@@ -1221,6 +1221,9 @@ pub const T = struct {
     pub const table = enum(mem.TableID) { _ };
     pub const any = Data;
 
+    /// optional table parameter
+    pub const table_sentinel = Optional(.table, @as(T.table, @enumFromInt(0)));
+
     /// usage: `T.Optional(.bool, false)`, `T.Optional(.number, 10.0)`
     pub fn Optional(comptime spec: TypeSpec, comptime default_val: anytype) type {
         const VT = switch (spec) {

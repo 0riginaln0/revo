@@ -1,9 +1,47 @@
 #! parse uri strings !#
 
-#* parses string as uri *#
-pub declare uri.decode = fn(value: string) -> !table
+#*
+parses string as uri
 
-#* formats uri table as string *#
-pub declare uri.encode = fn(value: table) -> !string
+examples:
+```revo
+uri.decode("https://example.com/hi/there?search&page=3#woah")
+{ :ok, {
+  scheme = "https",
+  host = "example.com",
+  path = "/hi/there",
+  query = { "search", page = 3 },
+  fragment = "woah"
+} }
+```
+*#
 
-pub type uri.Hi = {n: string}
+pub declare uri.decode = fn(value: string) -> !uri.Uri
+
+#*
+formats uri table as string
+
+examples:
+```revo
+uri.encode({
+  scheme = "https",
+  user = :nil,
+  host = "example.com",
+  path = "/hi/there",
+  query = { "search", "page" = 3 },
+  fragment = :nil
+})
+{ :ok, "https://example.com/hi/there?search&page=3" }
+```
+*#
+pub declare uri.encode = fn(value: uri.Uri) -> !string
+
+#* parts of a uri, all fields must be set *#
+pub type uri.Uri = {
+  scheme: string,
+  user: string?,
+  host: string?,
+  path: string?,
+  query: table<string, string | num> | :nil,
+  fragment: string?,
+}
