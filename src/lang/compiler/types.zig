@@ -739,7 +739,6 @@ pub const type_name_map: std.StaticStringMap(TypeInfo) = std.StaticStringMap(Typ
     .{ "string", TypeInfo{ .tag = .string } },
     .{ "bool", TypeInfo{ .tag = .bool } },
     .{ "any", TypeInfo{ .tag = .any } },
-    .{ "nil", TypeInfo{ .tag = .{ .atom = ":nil" } } },
     .{ "table", TABLE_GENERIC },
     .{ "function", TypeInfo{ .tag = .{ .function = &ANY_FN_SIG } } },
     .{ "atom", TypeInfo{ .tag = .{ .atom = "" } } }, // empty atom payload is the "any atom" sentinel

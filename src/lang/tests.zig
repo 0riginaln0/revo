@@ -5002,7 +5002,7 @@ test "manifest dotted macros rescope under the import name" {
 
 test "stdlib dotted type resolves qualified, unknown qualified errors" {
     try t.topNumber(
-        \\ const u: uri.Hi = {n = "x"}
+        \\ const u: uri.Uri = { scheme = "https", user = :nil, host = "example.com", path = "/hi/there", query = { "search", "page" = 3 }, fragment = :nil }
         \\ 1
     , 1);
     try t.expectSemanticError(
