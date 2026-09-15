@@ -1,11 +1,8 @@
 const Ts = root.T;
 
 pub const Impl = struct {
-    pub fn encode(vm: *VM, data: Ts.any) !HostResult {
-        var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
-        defer out.deinit();
-        try writeJsonValue(data, vm, &out.writer);
-        const slice = try out.toOwnedSlice();
+    pub fn encode(vm: *VM, data: Ts.any, pretty: Ts.Optional(.bool, false)) !HostResult {
+        const slice = try encodeAllocPretty(data, vm, pretty.value);
         const result = try vm.adoptDataString(slice);
         return HostResult.Ok(vm, result);
     }
@@ -25,99 +22,93 @@ pub const impls = root.impls(Impl).val;
 
 /// ret owned json string
 pub fn encodeAlloc(data: Data, vm: *VM) ![]const u8 {
+    return encodeAllocPretty(data, vm, false);
+}
+
+/// ret owned json string; pretty selects indented output
+pub fn encodeAllocPretty(data: Data, vm: *VM, pretty: bool) ![]u8 {
     var out = std.Io.Writer.Allocating.init(vm.runtime.alloc);
     defer out.deinit();
-    try writeJsonValue(data, vm, &out.writer);
+    var stringify: json.Stringify = .{
+        .writer = &out.writer,
+        .options = .{
+            .whitespace = if (pretty) .indent_2 else .minified,
+        },
+    };
+
+    try (JsonValue{ .vm = vm, .data = data }).jsonStringify(&stringify);
     return out.toOwnedSlice();
 }
 
-fn writeJsonValue(data: Data, vm: *VM, writer: *std.Io.Writer) anyerror!void {
-    return switch (data.tag()) {
-        .number => blk: {
-            const n = data.asNum().?;
-            if (!std.math.isFinite(n)) return error.UnsupportedJsonValue;
-            if (@trunc(n) == n and @abs(n) < 9.0e18) {
-                break :blk try writer.print("{d}", .{@as(i64, @intFromFloat(n))});
-            }
-            break :blk try writer.print("{d}", .{n});
-        },
-        .string => try writeJsonString(writer, vm.stringValue(data.asString().?)),
-        .atom => blk: {
-            const id = data.asAtom().?;
-            const atom = vm.stringValue(id);
-            if (std.mem.eql(u8, atom, "nil")) break :blk try writer.writeAll("null");
-            if (std.mem.eql(u8, atom, "true")) break :blk try writer.writeAll("true");
-            if (std.mem.eql(u8, atom, "false")) break :blk try writer.writeAll("false");
-            break :blk try writeJsonString(writer, atom);
-        },
-        .table => try writeTableJson(data.asTable().?, vm, writer),
-        .function => return error.UnsupportedJsonValue,
-        .foreign => return error.UnsupportedJsonValue,
-    };
-}
+const JsonValue = struct {
+    vm: *VM,
+    data: Data,
 
-fn writeArrayJson(items: []const Data, vm: *VM, writer: *std.Io.Writer) anyerror!void {
-    try writer.writeByte('[');
-    for (items, 0..) |item, idx| {
-        if (idx != 0) try writer.writeByte(',');
-        try writeJsonValue(item, vm, writer);
+    pub fn jsonStringify(self: @This(), jws: anytype) anyerror!void {
+        const vm = self.vm;
+        return switch (self.data.tag()) {
+            .number => {
+                const n = self.data.asNum().?;
+                if (!std.math.isFinite(n)) return error.UnsupportedJsonValue;
+                if (@trunc(n) == n and @abs(n) < 9.0e18) {
+                    try jws.write(@as(i64, @intFromFloat(n)));
+                } else {
+                    try jws.write(n);
+                }
+            },
+            .string => try jws.write(vm.stringValue(self.data.asString().?)),
+            .atom => {
+                const id = self.data.asAtom().?;
+                if (id == revo.core_atoms.atomId(.nil)) {
+                    try jws.write(null);
+                } else if (id == revo.core_atoms.atomId(.true)) {
+                    try jws.write(true);
+                } else if (id == revo.core_atoms.atomId(.false)) {
+                    try jws.write(false);
+                } else {
+                    try jws.write(vm.stringValue(id));
+                }
+            },
+            .table => try writeTableJson(vm, self.data.asTable().?, jws),
+            .function => return error.UnsupportedJsonValue,
+            .foreign => return error.UnsupportedJsonValue,
+        };
     }
-    try writer.writeByte(']');
-}
+};
 
-fn writeTableJson(id: revo.memory.TableID, vm: *VM, writer: *std.Io.Writer) anyerror!void {
+fn writeTableJson(vm: *VM, id: revo.memory.TableID, jws: anytype) anyerror!void {
     const table = try vm.tables.get(id);
-    if (table.hash.count == 0) return writeArrayJson(table.array.items, vm, writer);
+    if (table.hash.count == 0) {
+        try jws.beginArray();
+        for (table.array.items) |item| {
+            try (JsonValue{ .vm = vm, .data = item }).jsonStringify(jws);
+        }
+        try jws.endArray();
+        return;
+    }
 
     // keyed entries encoded as a json object; integer slots become "0".."n-1"
     // keys so nothing is dropped
-    try writer.writeByte('{');
-    var first = true;
+    try jws.beginObject();
     for (table.array.items, 0..) |item, idx| {
-        if (!first) try writer.writeByte(',');
-        first = false;
         var buf: [20]u8 = undefined;
         const key_str = try std.fmt.bufPrint(&buf, "{d}", .{idx});
-        try writeJsonString(writer, key_str);
-        try writer.writeByte(':');
-        try writeJsonValue(item, vm, writer);
+        try jws.objectField(key_str);
+        try (JsonValue{ .vm = vm, .data = item }).jsonStringify(jws);
     }
 
     const entries = try table.keyedEntries(vm.runtime.alloc);
     defer vm.runtime.alloc.free(entries);
     for (entries) |entry| {
-        if (!first) try writer.writeByte(',');
-        first = false;
         const key_str = switch (entry.key.tag()) {
             .atom => vm.stringValue(entry.key.asAtom().?),
             .string => vm.stringValue(entry.key.asString().?),
             else => return error.UnsupportedJsonValue,
         };
-        try writeJsonString(writer, key_str);
-        try writer.writeByte(':');
-        try writeJsonValue(entry.value, vm, writer);
+        try jws.objectField(key_str);
+        try (JsonValue{ .vm = vm, .data = entry.value }).jsonStringify(jws);
     }
-    try writer.writeByte('}');
-}
-
-fn writeJsonString(writer: *std.Io.Writer, str: []const u8) anyerror!void {
-    try writer.writeByte('"');
-    for (str) |c| {
-        switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x08 => try writer.writeAll("\\b"),
-            0x0c => try writer.writeAll("\\f"),
-            else => if (c < 0x20)
-                try writer.print("\\u{x:0>4}", .{c})
-            else
-                try writer.writeByte(c),
-        }
-    }
-    try writer.writeByte('"');
+    try jws.endObject();
 }
 
 fn fromJsonValue(value: json.Value, vm: *VM) anyerror!Data {
