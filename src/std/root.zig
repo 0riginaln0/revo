@@ -251,6 +251,38 @@ pub const TypeSpec = union(enum) {
             else => null,
         };
     }
+
+    /// stable tag for crossing the extension boundary in
+    /// `HostBinding.param_types` (low 7 bits; the high bit and `end`
+    /// live on `HostBinding`)
+    pub fn toTag(self: TypeSpec) u8 {
+        return switch (self) {
+            .number => 0,
+            .string => 1,
+            .atom => 2,
+            .function => 3,
+            .table => 4,
+            .bool => 5,
+            .any => 6,
+        };
+    }
+
+    /// inverse of `toTag` over the low 7 bits
+    ///
+    /// unknown tags map to `.any`
+    /// so a newer extension never hard-fails an older host
+    /// , it just type-checks looser
+    pub fn fromTag(t: u8) TypeSpec {
+        return switch (t) {
+            0 => .number,
+            1 => .string,
+            2 => .atom,
+            3 => .function,
+            4 => .table,
+            5 => .bool,
+            else => .any,
+        };
+    }
 };
 
 pub fn typeFromName(name: []const u8) ?TypeSpec {
@@ -880,8 +912,8 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
         if (!can_dlopen) {
             return .errImportFailed("dynamic library loading not supported on this platform");
         }
-        // try native (host function) path first; extensions that export
-        // `revo_native_bindings` get full arity/type checking
+        // `revo.ext` path first
+        // get full arity/type checking
         if (revo.ffi.loadNative(vm, resolved_path)) |native_mods| {
             defer vm.runtime.alloc.free(native_mods);
             const t_id = try vm.tables.create();
@@ -896,7 +928,7 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
         }
 
         const mods = revo.ffi.loadC(vm, resolved_path) catch |err| switch (err) {
-            error.NoBindings => return .errImportFailed("extension has no revo_native_bindings or revo_bindings export"),
+            error.NoBindings => return .errImportFailed("extension has no revo_bindings or revo_bindings export"),
             else => return .errImportFailed(@errorName(err)),
         };
         defer vm.runtime.alloc.free(mods);

@@ -13,6 +13,8 @@ tuples and structs are gone now, most breaking change yet
 
 ### Added
 
+- stdlib-style native extension api, `revo.ext`
+  - see `examples/foreign/raylib`
 - structural table types: annotate tables by shape with `{ name: string, age: num }`
   - structs deprecated in favour of this, should be removed by 0.1.3
   - open subtyping: extra fields are ok, missing or mistyped fields are compile errors

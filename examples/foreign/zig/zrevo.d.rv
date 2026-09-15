@@ -14,7 +14,7 @@ pub declare zadd = fn(a: number, b: number) -> number
 pub declare zecho = fn(s: string) -> string
 
 #* set global called name to value *#
-pub declare zsetglobal = fn(name: string, value) -> number
+pub declare zsetglobal = fn(name: string, value: any) -> number
 
 #* get a string of parts separated by separator *#
 pub declare zconcat = fn(parts: table, sep: string) -> string

@@ -10,4 +10,4 @@ import 'zrevo.so'
 # and all bindings land in this module's table
 print("zadd:", zrevo.zadd(3, 4))
 print("zecho:", zrevo.zecho("hello"))
-print("zconcat:", zrevo.zconcat(("a", "b", "c"), "/"))
+print("zconcat:", zrevo.zconcat({"a", "b", "c"}, "/"))

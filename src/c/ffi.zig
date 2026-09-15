@@ -13,6 +13,7 @@ const functions = vm.functions;
 const RevoBinding = functions.RevoBinding;
 const HostBinding = functions.HostBinding;
 const HostFunc = revo.std_lib.HostFunc;
+const TypeSpec = revo.std_lib.TypeSpec;
 
 // for error/missing returns
 const nil_val = Data.new.nil();
@@ -242,7 +243,7 @@ pub fn loadC(vm_ptr: *VM, lib_path: []const u8) ![]functions.CFunction {
     var lib = try std.DynLib.open(lib_path);
 
     const bindings_ptr: [*]const RevoBinding = lib.lookup([*]const RevoBinding, "revo_bindings") orelse {
-        std.debug.print("error: extension '{s}' has no revo_bindings export\n", .{lib_path});
+        // callers report this themselves (import names both symbols)
         return error.NoBindings;
     };
 
@@ -292,10 +293,10 @@ const WinDynLib = struct {
 const DynLib = if (builtin.target.os.tag == .windows) WinDynLib else std.DynLib;
 
 ///
-/// load a shared lib's `revo_native_bindings` as host functions
+/// load a shared lib's `revo_bindings` as host functions
 ///
-/// each binding's fn_ptr is a HostFn (*const fn ([]const Data, *VM) HostResult)
-/// so the vm does arity n type checking on call
+/// the sister `<stem>.d.rv` manifest, when present,
+/// is validated against the table, drifts kill it and themselves
 pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
     if (builtin.target.os.tag == .wasi or builtin.target.os.tag == .freestanding) {
         return error.OsNotSupported;
@@ -303,9 +304,13 @@ pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
 
     var lib = try std.DynLib.open(lib_path);
 
-    const bindings_ptr: [*]const HostBinding = lib.lookup([*]const HostBinding, "revo_native_bindings") orelse {
+    const bindings_ptr: [*]const HostBinding = lib.lookup([*]const HostBinding, "revo_bindings") orelse {
         return error.NoBindings;
     };
+
+    // process-lifetime, untracked by debug allocators (like the spec cache):
+    // valid as long as the lib is loaded, which is forever
+    const pa = std.heap.page_allocator;
 
     var registered = try std.ArrayList(HostFunc).initCapacity(vm_ptr.runtime.alloc, 16);
     defer registered.deinit(vm_ptr.runtime.alloc);
@@ -314,20 +319,59 @@ pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
     while (i < 4096) : (i += 1) {
         const b = bindings_ptr[i];
         const name_ptr: ?[*:0]const u8 = @ptrCast(b.name);
-
         if (name_ptr == null) break;
         const fn_ptr: ?*const anyopaque = @ptrCast(b.fn_ptr);
-
         if (fn_ptr == null) return error.InvalidBinding;
         const name = std.mem.span(name_ptr.?);
 
+        // low 7 bits are the spec, high bit marks omittable trailing args, end terminates
+        //
+        // required count is the first marked slot
+        var decoded: [16]TypeSpec = undefined;
+        var count: usize = 0;
+        var required: ?usize = null;
+
+        for (b.param_types) |tag| {
+            if (tag == HostBinding.end) break;
+            if (required == null and tag & HostBinding.optional != 0) required = count;
+            decoded[count] = TypeSpec.fromTag(tag & 0x7F);
+            count += 1;
+        }
+
+        const min: usize = required orelse count;
+        const unbounded = b.total_arity == HostBinding.unbounded;
+        if (!unbounded and b.total_arity < count) return error.InvalidBinding;
+        const max: usize = if (unbounded) min else b.total_arity;
+
         try registered.append(vm_ptr.runtime.alloc, .{
             .name = name,
-            .arity = b.arity,
-            .variadic = b.variadic,
-            .param_types = &.{},
+            .arity = min,
+            .total_arity = if (max == min) 0 else max,
+            .variadic = unbounded,
+            .param_types = try pa.dupe(TypeSpec, decoded[0..count]),
             .func = @ptrCast(@alignCast(fn_ptr.?)),
         });
+    }
+
+    // no manifest means an untyped import
+    if (revo.extensionManifestFor(vm_ptr.runtime.io, vm_ptr.runtime.alloc, lib_path) catch null) |manifest| {
+        defer vm_ptr.runtime.alloc.free(manifest);
+
+        if (std.Io.Dir.cwd().readFileAlloc(
+            vm_ptr.runtime.io,
+            manifest,
+            vm_ptr.runtime.alloc,
+            std.Io.Limit.unlimited,
+        ) catch null) |src| {
+            defer vm_ptr.runtime.alloc.free(src);
+            const checklist = try vm_ptr.runtime.alloc.alloc(revo.std_lib.api.Impl, registered.items.len);
+            defer vm_ptr.runtime.alloc.free(checklist);
+
+            for (registered.items, 0..) |hf, k|
+                checklist[k] = .{ .name = hf.name, .f = hf };
+
+            try revo.std_lib.api.validateExtensionSpecs(vm_ptr.runtime.alloc, src, checklist);
+        }
     }
 
     try vm_ptr.loaded_extensions.append(vm_ptr.runtime.alloc, lib);

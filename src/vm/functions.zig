@@ -34,22 +34,33 @@ pub const Frame = struct {
 
 pub const HostFn = *const fn (args: []const Data, vm: *revo.VM) anyerror!HostResult;
 
-/// binding table entry for a dlopen'd extension; every binding lands in
-/// the module table under the import's name. the typed interface for an
-/// extension is its sibling `<stem>.d.rv` manifest
+/// binding table entry for a dlopen'd C extension
 pub const RevoBinding = extern struct {
     name: [*:0]const u8,
     fn_ptr: *const anyopaque,
 };
 
-/// native binding entry for zig extensions that use HostFn directly
-/// extensions gotta export a null-terminated array of these as `revo_native_bindings`
-/// the vm registers each as a host function with arity checking
+/// native binding entry for zig extensions, ext.zig
+///
+/// format:
+/// `param_types` is the checked prefix
+/// , each byte a `TypeSpec` tag with `optional` or'd in when the arg may be omitted
+///     (`T.Optional`, which must trail);
+/// unused slots are `end`
+///
+/// `total_arity` is max args, `unbounded` for variadic tails
+/// . required count is the first `optional` slot (or the tag count);
+/// args past the tags, up to `total_arity`, are unchecked
+///
 pub const HostBinding = extern struct {
     name: [*:0]const u8,
     fn_ptr: *const anyopaque,
-    arity: u8,
-    variadic: bool,
+    param_types: [16]u8,
+    total_arity: u8, // the leftover are variadic, max u8 for "yes this is very variadic"
+
+    pub const optional: u8 = 0x80;
+    pub const end: u8 = 0xFF;
+    pub const unbounded: u8 = 0xFF;
 };
 
 pub const CFnPtr = *const fn (

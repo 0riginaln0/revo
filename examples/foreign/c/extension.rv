@@ -10,5 +10,5 @@ print(extension.strlen("hello"))
 print(extension.typ(5))
 print(extension.regex("^h", "hello"))
 
-print(extension.concat(("a", "b", "c"), "-"))
-print(extension.concat(("revo", "rules"), ", "))
+print(extension.concat({"a", "b", "c"}, "-"))
+print(extension.concat({"revo", "rules"}, ", "))

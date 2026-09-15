@@ -36,23 +36,23 @@ pub declare begin_drawing = fn() -> :nil
 #* end drawing mode *#
 pub declare end_drawing = fn() -> :nil
 
-#* clear background with color (r, g, b) *#
-pub declare clear_background = fn(r: number, g: number, b: number) -> :nil
+#* clear background with color (r, g, b, ?a: alpha, default 255) *#
+pub declare clear_background = fn(r: number, g: number, b: number, ?a: number) -> :nil
 
 #* draw text at position *#
-pub declare draw_text = fn(text: string, x: number, y: number, size: number, r: number, g: number, b: number) -> :nil
+pub declare draw_text = fn(text: string, x: number, y: number, size: number, r: number, g: number, b: number, ?a: number) -> :nil
 
 #*
 draw filled rectangle
 this is where we'll get to try type declarations
 *#
-pub declare draw_rectangle = fn(x: number, y: number, w: number, h: number, r: number, g: number, b: number) -> :nil
+pub declare draw_rectangle = fn(x: number, y: number, w: number, h: number, r: number, g: number, b: number, ?a: number) -> :nil
 
 #* draw filled circle *#
-pub declare draw_circle = fn(cx: number, cy: number, radius: number, r: number, g: number, b: number) -> :nil
+pub declare draw_circle = fn(cx: number, cy: number, radius: number, r: number, g: number, b: number, ?a: number) -> :nil
 
 #* draw line with thickness *#
-pub declare draw_line = fn(x1: number, y1: number, x2: number, y2: number, thick: number, r: number, g: number, b: number) -> :nil
+pub declare draw_line = fn(x1: number, y1: number, x2: number, y2: number, thick: number, r: number, g: number, b: number, ?a: number) -> :nil
 
 #* draw fps counter *#
 pub declare draw_fps = fn(x: number, y: number) -> :nil

@@ -136,6 +136,34 @@ pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
 /// the cache lives in page_allocator so no debug allocator tracks it
 pub fn freeLoadedSpecs(_: std.mem.Allocator, _: []const []const FnSpec) void {}
 
+/// extension version of the `loadAllSpecs` boot check
+pub fn validateExtensionSpecs(
+    alloc: std.mem.Allocator,
+    manifest_src: []const u8,
+    bindings: []const Impl,
+) !void {
+    const specs = try parseGroup(alloc, manifest_src);
+    defer {
+        for (specs) |s| s.deinit(alloc);
+        alloc.free(specs);
+    }
+
+    for (specs, 0..) |*s, i| {
+        if (s.is_type) continue;
+        var k: usize = 0;
+
+        if (i > 0) for (specs[0..i]) |other| {
+            if (other.is_type) continue;
+            if (std.mem.eql(u8, other.name, s.name)) k += 1;
+        };
+        if (implFor(bindings, s, k) == null) return error.ExtensionBindingMissing;
+    }
+
+    for (bindings) |imp| {
+        if (findSpec(specs, imp.name) == null) return error.ExtensionBindingUnused;
+    }
+}
+
 /// spans of every `pub macro` / `pub proc` decl in one source
 /// . span values only
 /// , no lifetimes involved

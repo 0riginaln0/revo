@@ -349,10 +349,10 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
     // no im not putting these into helpers
     var arg_list = [_]ap.Arg{
         .{ .name = "e", .short = 'e', .kind = .string, .description = "run code" },
-        .{ .name = "i", .short = 'i', .kind = .boolean, .description = "enter repl after executing" },
-        .{ .name = "d", .short = 'd', .kind = .boolean, .description = "output the program's result in display mode" },
-        .{ .name = "D", .short = 'D', .kind = .boolean, .description = "output the program's result in debug mode" },
-        .{ .name = "P", .short = 'P', .kind = .boolean, .description = "output the program's result in pretty mode" },
+        .{ .name = "interactive", .short = 'i', .kind = .boolean, .description = "enter repl after executing" },
+        .{ .name = "display", .short = 'd', .kind = .boolean, .description = "output the program's result in display mode" },
+        .{ .name = "debug", .short = 'D', .kind = .boolean, .description = "output the program's result in debug mode" },
+        .{ .name = "pretty", .short = 'p', .kind = .boolean, .description = "output the program's result in pretty mode" },
         .{ .name = "test", .kind = .boolean, .description = "run with test blocks" },
         .{ .name = "html", .kind = .boolean, .description = "render as html instead of markdown (doc)" },
         .{ .name = "splice", .kind = .boolean, .description = "splice output into markdown piped on stdin (doc)" },
