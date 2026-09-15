@@ -145,7 +145,7 @@ pub fn newSignature(alloc: std.mem.Allocator, parts: SignatureParts) std.mem.All
 ///
 /// unannotated params act as implicit generics
 ///
-/// `fn v2_new(x, y)` behaves like `fn v2_new[x, y](x: x, y: y)`
+/// `fn v2_new(x, y)` behaves like `fn v2_new<x, y>(x: x, y: y)`
 /// so `{ x = x }` infers `{ x: x }`
 /// and call sites substitute concrete arg types. `_` stays `any`
 ///

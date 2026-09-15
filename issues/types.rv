@@ -17,7 +17,7 @@ end
 let c = input()
 
 # [ ] return type inferred as string
-fn d[T](val: !T)
+fn d<T>(val: !T)
   if val[0] == :ok
     val[1]
   else "bad"

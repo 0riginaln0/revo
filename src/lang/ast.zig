@@ -123,6 +123,9 @@ pub const TypeExpr = struct {
         function: struct {
             params: []const FnParam,
             return_type: ?*TypeExpr,
+            /// `fn<T>` binders; empty for plain `fn`. binding scope lives
+            /// outside the tree (declare heads, fn exprs), never in it
+            type_params: []const []const u8 = &.{},
         },
         parameterized: struct {
             name: []const u8,
@@ -187,7 +190,16 @@ pub fn printTypeExpr(te: *const TypeExpr, writer: *std.Io.Writer) !void {
             try writer.writeByte('}');
         },
         .function => |f| {
-            try writer.writeAll("fn(");
+            try writer.writeAll("fn");
+            if (f.type_params.len > 0) {
+                try writer.writeByte('<');
+                for (f.type_params, 0..) |tp, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.writeAll(tp);
+                }
+                try writer.writeByte('>');
+            }
+            try writer.writeAll("(");
             for (f.params, 0..) |p, i| {
                 if (i > 0) try writer.writeAll(", ");
                 if (p.optional) try writer.writeByte('?');
@@ -256,9 +268,12 @@ pub fn cloneTypeExpr(alloc: std.mem.Allocator, te: *const TypeExpr) std.mem.Allo
                 .default_value = p.default_value,
                 .variadic = p.variadic,
             };
+            const type_params = try alloc.alloc([]const u8, f.type_params.len);
+            for (f.type_params, type_params) |tp, *dst| dst.* = try alloc.dupe(u8, tp);
             break :blk .{ .function = .{
                 .params = params,
                 .return_type = if (f.return_type) |rt| try cloneTypeExpr(alloc, rt) else null,
+                .type_params = type_params,
             } };
         },
         .parameterized => |p| blk: {
@@ -301,6 +316,8 @@ pub fn freeTypeExpr(alloc: std.mem.Allocator, te: *TypeExpr) void {
             }
             alloc.free(f.params);
             if (f.return_type) |rt| freeTypeExpr(alloc, rt);
+            for (f.type_params) |tp| alloc.free(tp);
+            alloc.free(f.type_params);
         },
         .parameterized => |p| {
             alloc.free(p.name);

@@ -422,8 +422,8 @@ pub const EvalResult = vm.EvalResult;
 
 pub const argparse = @import("./argparse.zig");
 pub const async_backend = @import("./vm/runtime/async_backend.zig");
+pub const ext = @import("./ext.zig");
 pub const lang = @import("./lang/root.zig");
 pub const pretty = @import("./pretty.zig");
 pub const std_lib = @import("./std/root.zig");
-pub const ext = @import("./ext.zig");
 pub const std_net = @import("./std/net.zig");

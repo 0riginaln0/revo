@@ -168,6 +168,7 @@ tuples and structs are gone now, most breaking change yet
 
 ### Changed
 
+- generics are `o.f<T>(x: T)` instead of `o.f[T](x: T)`
 - lang/ import untangle, breaking if you reached into it
   - one explicit `CheckCtx` interface (`compiler/types.zig`) replaces the four
     duck-typed scopes; inference fns take it instead of `anytype`
@@ -200,7 +201,7 @@ tuples and structs are gone now, most breaking change yet
 
 - compound ops (`a -= 1`, `b += 2`, `c ^= 3`) are real now and will not call the lhs twice
 - unannotated fn params are implicit generics, so table constructors specialize per call
-  `fn id(x) x` is `fn id[T](x: T) -> T`
+  `fn id(x) x` is `fn id<T>(x: T) -> T`
 
   aids tables massively
 
@@ -227,7 +228,7 @@ tuples and structs are gone now, most breaking change yet
 - `const x = import "raylib.so"` named imports now get the fields from the module's
   `.d.rv` manifest just like the normal `import "raylib.so"`
 - lsp signatures show generics and optional params:
-  `fn id[T](v: T) -> T`, `f(a: num, b?: num)` in hover and signature help
+  `fn id<T>(v: T) -> T`, `f(a: num, b?: num)` in hover and signature help
 - `revo -e` no longer runs piped stdin as a program first, stdin stays available
   for `input()`, so `echo hi | revo -e 'input()?'` runs the inline code
 - `join` nested inside a host call (eg `:map(fn(h) join h)`) waits by pumping

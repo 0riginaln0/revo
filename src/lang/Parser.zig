@@ -308,40 +308,35 @@ fn parseExpression(self: *Parser, min_bp: u8) anyerror!*Node {
             continue;
         }
 
-        // postfix: generic call `f[T](args)` or index `obj[key]`
+        // postfix: index `obj[key]`
         if (self.peek().type == .lbracket) {
-            if (left.expr == .ident) {
-                var i: usize = 1;
-                var is_type_args = false;
-                while (self.pos + i < self.tokens.len) {
-                    switch (self.tokens[self.pos + i].type) {
-                        .ident => i += 1,
-                        .comma => i += 1,
-                        .rbracket => {
-                            if (self.pos + i + 1 < self.tokens.len and self.tokens[self.pos + i + 1].type == .lparen)
-                                is_type_args = true;
-                            break;
-                        },
-                        else => break,
-                    }
-                }
-                if (is_type_args) {
-                    _ = try self.expect(.lbracket);
-                    const type_args = try self.parseTypeParamList();
-                    _ = try self.expect(.lparen);
-                    const args = try self.parseDelimitedExprList(.rparen);
-                    const close = try self.expect(.rparen);
-                    left = try self.allocExpr(Span.merge(left.span, close.span()), .{
-                        .call = .{ .callee = left, .args = args, .type_args = type_args },
-                    });
-                    continue;
-                }
-            }
             _ = try self.expect(.lbracket);
             const key = try self.parseBracketKey();
             const close = try self.expect(.rbracket);
             left = try self.allocExpr(Span.merge(left.span, close.span()), .{
                 .index = .{ .object = left, .key = key },
+            });
+            continue;
+        }
+
+        // postfix: generic call `f<T>(args)` (or `o.f<T>(args)`)
+        //
+        // ~ brackets must hug (`f <T>(x)` is `f < T(x)`)
+        // ~ speculation is bounded
+        //   ... so that a distant `>` doesnt do unbounded lookahead (see helper)
+        // ~ else `<` stays a comparison
+        if (self.peek().type == .lt and //
+            isPathReceiver(left) and //
+            self.tokens[self.pos].span().start == left.span.end and //
+            isGenericCallAhead(self.tokens, self.pos) //
+        ) {
+            _ = try self.expect(.lt);
+            const type_args = try self.parseTypeParamList();
+            _ = try self.expect(.lparen);
+            const args = try self.parseDelimitedExprList(.rparen);
+            const close = try self.expect(.rparen);
+            left = try self.allocExpr(Span.merge(left.span, close.span()), .{
+                .call = .{ .callee = left, .args = args, .type_args = type_args },
             });
             continue;
         }
@@ -704,7 +699,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
             });
         }
 
-        const type_params = if (self.match(.lbracket)) try self.parseTypeParamList() else &.{};
+        const type_params = if (self.match(.lt)) try self.parseTypeParamList() else &.{};
 
         if (self.check(.lparen)) {
             _ = try self.expect(.lparen);
@@ -986,7 +981,7 @@ fn parseDecl(self: *Parser, start: Token) anyerror!*Node {
     };
 }
 
-/// shared `Name`, `Target:key`, `a.b.c`, `[T]`, etc. for `declare` and `type`
+/// shared `Name`, `Target:key`, `a.b.c`, `<T>`, etc. for `declare` and `type`
 ///   so that dotted type heads parse identically
 ///
 /// `allow_core` is false for `type`:: metatable slots are values, not types.
@@ -1016,7 +1011,7 @@ fn parseDeclareHead(self: *Parser, first: Token, allow_core: bool) !struct { hea
 
         head = .{ .module = try segs.toOwnedSlice(self.alloc) };
     }
-    const tps = if (self.match(.lbracket)) try self.parseTypeParamList() else &.{};
+    const tps = if (self.match(.lt)) try self.parseTypeParamList() else &.{};
     return .{ .head = head, .tps = tps };
 }
 
@@ -1654,15 +1649,52 @@ fn parseSliceRest(self: *Parser, start: ?*Node, seen_step: ?*Node) anyerror!*Nod
     return self.allocSliceExpr(start, seen_step, expr);
 }
 
+/// 32 covers ~15 simple args
+const max_generic_lookahead_tokens = 32;
+
+/// ~ tokens[pos] starts hugging and `< ident (, ident)* >(`
+/// ~ lookahead only, consumes nothig
+fn isGenericCallAhead(tokens: []const Token, pos: usize) bool {
+    if (pos >= tokens.len or tokens[pos].type != .lt) return false;
+    var i: usize = 1;
+    var budget: usize = max_generic_lookahead_tokens;
+
+    while (budget > 0) {
+        if (pos + i >= tokens.len) return false;
+        budget -= 1;
+        switch (tokens[pos + i].type) {
+            .ident => i += 1,
+            .comma => i += 1,
+            .gt => {
+                if (pos + i + 1 >= tokens.len) return false;
+                const gt_tok = tokens[pos + i];
+                const lp_tok = tokens[pos + i + 1];
+                return lp_tok.type == .lparen and gt_tok.span().end == lp_tok.span().start;
+            },
+            else => return false,
+        }
+    }
+    return false;
+}
+
+/// generic type args apply to paths: bare `f` or dotted `o.f`
+fn isPathReceiver(node: *const Node) bool {
+    return switch (node.expr) {
+        .ident => true,
+        .field => |f| isPathReceiver(f.object),
+        else => false,
+    };
+}
+
 fn parseTypeParamList(self: *Parser) ![]const []const u8 {
     var tps = try std.ArrayList([]const u8).initCapacity(self.alloc, 2);
     errdefer tps.deinit(self.alloc);
-    while (!self.check(.rbracket)) {
+    while (!self.check(.gt)) {
         const tp = try self.expectIdent();
         try tps.append(self.alloc, tp.text);
         if (!self.match(.comma)) break;
     }
-    _ = try self.expect(.rbracket);
+    _ = try self.expect(.gt);
     return tps.toOwnedSlice(self.alloc);
 }
 
@@ -2520,7 +2552,7 @@ test "dotted heads" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const typed = try testing.parseOne(alloc, "pub type uri.Hi[T] = {n: T}");
+    const typed = try testing.parseOne(alloc, "pub type uri.Hi<T> = {n: T}");
     try std.testing.expect(typed.expr.decl.kind == .type_alias_decl);
     const alias = typed.expr.decl.inner.expr.type_alias;
     try std.testing.expectEqualStrings("uri", alias.name);
@@ -2547,4 +2579,28 @@ test "dotted heads" {
     }) |source| {
         try std.testing.expectError(error.UnexpectedToken, testing.parseOne(alloc, source));
     }
+}
+
+test "generic call angle brackets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const node = try testing.parseOne(alloc, "id<num>(42)");
+    const call = node.expr.call;
+    try std.testing.expectEqualStrings("id", call.callee.expr.ident);
+    try std.testing.expectEqual(@as(usize, 1), call.type_args.len);
+    try std.testing.expectEqualStrings("num", call.type_args[0]);
+    try std.testing.expectEqual(@as(usize, 1), call.args.len);
+
+    const dotted = try testing.parseOne(alloc, "m.id<T, U>(a, b)");
+    const dcall = dotted.expr.call;
+    try std.testing.expectEqual(@as(usize, 2), dcall.type_args.len);
+    try std.testing.expectEqualStrings("T", dcall.type_args[0]);
+    try std.testing.expectEqualStrings("U", dcall.type_args[1]);
+    try std.testing.expectEqual(@as(usize, 2), dcall.args.len);
+
+    // `f <T>(x)` is `(f < T) > (x)`, only hugging `f<T>(x)` applies type args
+    try testing.expectPrinted("f <T>(x)", "(> (< f T) x)");
+    try testing.expectPrinted("f<1>(x)", "(> (< f 1) x)");
 }

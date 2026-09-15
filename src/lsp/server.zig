@@ -274,7 +274,7 @@ const Handler = struct {
         const sig = try h.ws.signatureHelp(arena, file_id, ws_pos, .{}) orelse return null;
         // sig is arena-allocated; arena cleans up after handler returns
 
-        // build the label like `fn_name[T](param1: t1, param2?: t2): ret`
+        // build the label like `fn_name<T>(param1: t1, param2?: t2): ret`
         var label = try std.ArrayList(u8).initCapacity(arena, 64);
         try label.appendSlice(arena, sig.name);
         if (sig.type_params_text) |tps| try label.appendSlice(arena, tps);

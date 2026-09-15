@@ -123,38 +123,38 @@ let nested = outer(5)
 #
 
 # generic identity: T inferred from argument
-fn identity[T](x: T) x
+fn identity<T>(x: T) x
 let id_int = identity(42)
 let id_str = identity("hello")
 
 # repeated type param: both args must match
-fn repeat[T](x: T, y: T) x
+fn repeat<T>(x: T, y: T) x
 let rep = repeat(1, 2)
 # repeat(1, "asdf")   # argument 2 to `repeat` expects same type as argument 1
 
 
 # multiple type params with table return
-fn swap[T, U](a: T, b: U) -> {U, T}
+fn swap<T, U>(a: T, b: U) -> {U, T}
   return {b, a}
 
 let swapped = swap(1, "two")
 
 # compound return type with type param
-fn wrap[T](x: T) -> {:ok, T}
+fn wrap<T>(x: T) -> {:ok, T}
   return {:ok, x}
 let wrapped = wrap(42)
 
 # non-inferrable: return-only type param needs explicit annotation
-# provide type args at the call site: ident[T, U](args)
-fn make[T](x) -> T
+# provide type args at the call site: ident<T, U>(args)
+fn make<T>(x) -> T
   return x
 # let y = make(1)                # cannot infer T: only used in return
-let y = make[int](1)             # explicit T=int makes it work
+let y = make<int>(1)             # explicit T=int makes it work
 
 # return-only type param (zero runtime args)
-fn zero[T]() -> T
+fn zero<T>() -> T
   return 0
-let z = zero[int]()              # T=int, returns int 0
+let z = zero<int>()              # T=int, returns int 0
 
 
 # tables & field validation

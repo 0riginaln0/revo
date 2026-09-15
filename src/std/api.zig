@@ -7,7 +7,7 @@
 //! ~ `pub declare <head> = <type>` lines are sigs, `pub type N = <type>`
 //!   lines are type-only aliases with no impl
 //! ~ `#`/`##` lines are editorial comments
-//! ~ heads may carry a `[T]` generic suffix
+//! ~ heads may carry a `<T>` generic suffix
 //! ~ any `__` key lands in a metatable automatically
 //! ~ zig supplies impls only (`pub const impls: []const api.Impl` per file)
 //! ~ each spec stores the whole RHS type once; sig text, variadic-ness,
@@ -102,7 +102,10 @@ pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
         //    (and any future all-types group)
         // carry no impls and stay out of every surface instead of erroring
         if (ig.impls.len == 0) continue;
-        const specs = try parseGroup(pa, ig.src);
+        const specs = parseGroup(pa, ig.src) catch |err| {
+            std.debug.print("iface group '{s}' failed to parse: {s}\n", .{ ig.name, @errorName(err) });
+            return err;
+        };
         for (specs, 0..) |*s, i| {
             if (s.is_type) continue;
             var k: usize = 0;
@@ -352,7 +355,7 @@ pub fn renderSignature(w: *std.Io.Writer, spec: FnSpec) !void {
     try renderSignatureInner(w, spec, false);
 }
 
-/// head plus `[T]` suffix: `fs.open`, `string:len`, `table.unwrap_err[T]`
+/// head plus `<T>` suffix: `fs.open`, `string:len`, `table.unwrap_err<T>`
 fn renderHead(w: *std.Io.Writer, spec: FnSpec, strip_method: bool) !void {
     switch (spec.head.kind) {
         .global => try w.writeAll(spec.name),
@@ -363,12 +366,12 @@ fn renderHead(w: *std.Io.Writer, spec: FnSpec, strip_method: bool) !void {
             try w.print("{s}:{s}", .{ spec.head.target_name.?, spec.name }),
     }
     if (spec.type_params.len > 0) {
-        try w.writeByte('[');
+        try w.writeByte('<');
         for (spec.type_params, 0..) |tp, i| {
             if (i > 0) try w.writeAll(", ");
             try w.writeAll(tp);
         }
-        try w.writeByte(']');
+        try w.writeByte('>');
     }
 }
 
@@ -598,9 +601,17 @@ fn declSpecInner(alloc: std.mem.Allocator, alias: ast.TypeAlias, doc: ?[]const u
         }
     }
 
-    const owned_tps = try alloc.alloc([]const u8, alias.declare_tps.len);
+    // tps live on the head (`f<T> = ...`) or, for bare fn types, on the
+    // type itself (`f = fn<T>(...)`); both is an error
+    const fn_tps: []const []const u8 = if (alias.type_expr.kind == .function)
+        alias.type_expr.kind.function.type_params
+    else
+        &.{};
+    if (alias.declare_tps.len > 0 and fn_tps.len > 0) return error.DuplicateGenericParams;
+    const src_tps = if (alias.declare_tps.len > 0) alias.declare_tps else fn_tps;
+    const owned_tps = try alloc.alloc([]const u8, src_tps.len);
     errdefer alloc.free(owned_tps);
-    for (alias.declare_tps, owned_tps) |tp, *dst| dst.* = try alloc.dupe(u8, tp);
+    for (src_tps, owned_tps) |tp, *dst| dst.* = try alloc.dupe(u8, tp);
     errdefer for (owned_tps) |tp| alloc.free(tp);
 
     const type_tree = try revo.lang.ast.cloneTypeExpr(alloc, alias.type_expr);
@@ -686,6 +697,7 @@ pub fn skippableForDocs(err: anyerror) bool {
         error.UnknownMethodTarget,
         error.BadCoreKey,
         error.BadDoc,
+        error.DuplicateGenericParams,
         => true,
         else => false,
     };
@@ -861,7 +873,7 @@ test "parseGroup round trip: sig, params, doc, variadic, core key" {
         \\pub declare num.__call = fn(value: any) -> num
         \\
         \\#* generic suffix *#
-        \\pub declare table.unwrap_err[T] = fn(self: {:err, T}) -> T
+        \\pub declare table.unwrap_err<T> = fn(self: {:err, T}) -> T
         \\
         \\#* escaped "quotes" *#
         \\pub declare debug = fn() -> table
@@ -910,7 +922,7 @@ test "parseGroup round trip: sig, params, doc, variadic, core key" {
     {
         const sig = try renderAlloc(testing.allocator, unwrap_err);
         defer testing.allocator.free(sig);
-        try testing.expectEqualStrings("table.unwrap_err[T](self: {:err, T}) -> T", sig);
+        try testing.expectEqualStrings("table.unwrap_err<T>(self: {:err, T}) -> T", sig);
     }
     try testing.expectEqualStrings("unwrap_err", unwrap_err.name);
     var ubuf = std.Io.Writer.Allocating.init(testing.allocator);

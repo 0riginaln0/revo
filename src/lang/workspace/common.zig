@@ -181,20 +181,20 @@ pub fn freeSigMap(alloc: std.mem.Allocator, map: *const std.StringHashMapUnmanag
     mut.deinit(alloc);
 }
 
-/// `[T, U]` or null when empty
+/// `<T, U>` or null when empty
 /// caller owns the result
 pub fn formatTypeParams(alloc: std.mem.Allocator, type_params: []const []const u8) !?[]const u8 {
     if (type_params.len == 0) return null;
     var buf = std.Io.Writer.Allocating.init(alloc);
     errdefer buf.deinit();
-    try buf.writer.writeByte('[');
+    try buf.writer.writeByte('<');
 
     for (type_params, 0..) |tp, i| {
         if (i > 0) try buf.writer.writeAll(", ");
         try buf.writer.writeAll(tp);
     }
 
-    try buf.writer.writeByte(']');
+    try buf.writer.writeByte('>');
     const owned: []const u8 = try buf.toOwnedSlice();
     return owned;
 }

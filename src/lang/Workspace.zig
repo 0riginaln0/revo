@@ -53,7 +53,7 @@ pub const CacheEntry = struct {
 pub const FnSig = struct {
     params: []ParamInfo,
     return_type: ?types.TypeInfo = null,
-    /// pre-rendered `[T, U]` or null
+    /// pre-rendered `<T, U>` or null
     type_params_text: ?[]const u8 = null,
 };
 
@@ -143,7 +143,7 @@ pub const SignatureHelp = struct {
     name: []const u8,
     params: []ParamInfo,
     return_type: ?types.TypeInfo = null,
-    /// pre-rendered `[T, U]` or null; kept as text since no consumer
+    /// pre-rendered `<T, U>` or null; kept as text since no consumer
     /// needs the params structurally
     type_params_text: ?[]const u8 = null,
     doc: ?[]const u8,
@@ -417,23 +417,23 @@ const std = @import("std");
 const revo = @import("revo");
 const VM = revo.VM;
 
+const analyze_mod = @import("workspace/analyze.zig");
+const cache_mod = @import("workspace/cache.zig");
 const common = @import("workspace/common.zig");
 const completion_mod = @import("workspace/completion.zig");
 const defn = @import("workspace/definition.zig");
 const deps_mod = @import("workspace/deps.zig");
-const cache_mod = @import("workspace/cache.zig");
 const diagnostic = @import("diagnostic.zig");
 const hover_mod = @import("workspace/hover.zig");
 const imports = @import("workspace/imports.zig");
 const inlay = @import("workspace/inlay.zig");
+const pipeline = @import("pipeline.zig");
 const signature = @import("workspace/signature.zig");
 const store = @import("workspace/store.zig");
 const symbols_mod = @import("workspace/symbols.zig");
 const txt = @import("workspace/text.zig");
-const analyze_mod = @import("workspace/analyze.zig");
-const pipeline = @import("pipeline.zig");
-const types = @import("compiler/types.zig");
 const type_serde = @import("type_serde.zig");
+const types = @import("compiler/types.zig");
 
 pub const FileId = txt.FileId;
 pub const Position = txt.Position;

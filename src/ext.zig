@@ -25,9 +25,9 @@
 
 const std = @import("std");
 
+const api = @import("std/api.zig");
 const revo = @import("root.zig");
 const std_lib = @import("std/root.zig");
-const api = @import("std/api.zig");
 
 pub const T = std_lib.T;
 pub const TypeSpec = std_lib.TypeSpec;

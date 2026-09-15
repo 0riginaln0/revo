@@ -84,7 +84,7 @@ const Parser = struct {
     /// ~ ident? (optional): "number?" -> union_of(named("number"), atom(":nil"))
     /// ~ ident<T>:          "table<int>", "table<string, int>"
     /// ~ :atom (hash):      ":nil", ":ok", ":err"
-    /// ~ fn(T) -> U:        "fn(int) -> bool"
+    /// ~ fn(T) -> U:        "fn(int) -> bool", "fn<T>(x: T) -> T"
     /// ~ (T):               "(int | string)" (paren grouping)
     /// ~ {f: T, ...}:       "{ name: string, age: num }" (structural table)
     /// ~ {T, f: U, ...}:    "{ number, number, name: string }" (positional array entries)
@@ -129,12 +129,22 @@ const Parser = struct {
             },
             .kw_fn => {
                 const start = self.advance();
+                var tps = try std.ArrayList([]const u8).initCapacity(self.alloc, 2);
+                errdefer tps.deinit(self.alloc);
+                if (self.match(.lt)) {
+                    while (!self.check(.gt)) {
+                        const tp_tok = try self.expect(.ident);
+                        try tps.append(self.alloc, tp_tok.text);
+                        if (!self.match(.comma)) break;
+                    }
+                    _ = try self.expect(.gt);
+                }
                 _ = try self.expect(.lparen);
                 const params = try self.parseFnParams();
                 _ = try self.expect(.rparen);
                 const return_type = if (self.match(.arrow)) try self.parseExpr() else null;
                 return try ast.allocTypeExpr(self.alloc, self.span(start), .{
-                    .function = .{ .params = params, .return_type = return_type },
+                    .function = .{ .params = params, .return_type = return_type, .type_params = try tps.toOwnedSlice(self.alloc) },
                 });
             },
             .lparen => {

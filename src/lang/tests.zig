@@ -2830,11 +2830,11 @@ test "compiler: named parameters errors" {
 
 test "named parameters with generics" {
     try t.topNumber(
-        \\ fn identity[T](x: T) x
+        \\ fn identity<T>(x: T) x
         \\ identity(x = 42)
     , 42);
     try t.topString(
-        \\ fn identity[T](x: T) x
+        \\ fn identity<T>(x: T) x
         \\ identity(x = "hi")
     , "hi");
 }
@@ -4585,7 +4585,7 @@ test "generics identity fn enables add_imm" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn id[T](x: T) x
+        \\ fn id<T>(x: T) x
         \\ let y = id(42)
         \\ y + 1
         ,
@@ -4607,7 +4607,7 @@ test "generics identity fn with string compiles and runs" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn id[T](x: T) x
+        \\ fn id<T>(x: T) x
         \\ id("hello")
         ,
     }, .{});
@@ -4622,7 +4622,7 @@ test "generics compound return type {:ok, T} propagates inner type" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn wrap[T](x: T) -> {:ok, T} {:ok, x}
+        \\ fn wrap<T>(x: T) -> {:ok, T} {:ok, x}
         \\ let r = wrap(42)
         \\ r[1] + 1
         ,
@@ -4638,7 +4638,7 @@ test "generics multiple type params with table return compile" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn pair[T, U](a: T, b: U) -> {T, U}
+        \\ fn pair<T, U>(a: T, b: U) -> {T, U}
         \\ pair(1, "hi")
         ,
     }, .{});
@@ -4653,7 +4653,7 @@ test "generics non-inferrable type param (return-only) compiles" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn make[T]() 5
+        \\ fn make<T>() 5
         \\ make()
         ,
     }, .{});
@@ -4668,7 +4668,7 @@ test "generics repeated type param works" {
 
     const built = try lang.build(&vm, .{
         .text =
-        \\ fn same[T](a: T, b: T) a
+        \\ fn same<T>(a: T, b: T) a
         \\ let x = same(42, 99)
         \\ x + 1
         ,
@@ -4686,27 +4686,45 @@ test "generics repeated type param works" {
 
 test "explicit call-site type args resolve return types" {
     try t.topNumber(
-        \\ fn make[T]() -> T 5
-        \\ make[num]()
+        \\ fn make<T>() -> T 5
+        \\ make<num>()
     , 5);
     try t.topNumber(
-        \\ fn id[T](x: T) -> T x
-        \\ id[num](42)
+        \\ fn id<T>(x: T) -> T x
+        \\ id<num>(42)
     , 42);
+}
+
+test "explicit type args work on dotted receivers" {
+    try t.topNumber(
+        \\ fn id<T>(x: T) -> T x
+        \\ const m = {id = id}
+        \\ m.id<num>(42)
+    , 42);
+}
+
+test "unhugged brackets parse as comparison" {
+    // `id <num>(42)` is `(id < num) > (42)`, not a generic call:
+    // `num` is unbound either way, so this must be a semantic error
+    // rather than evaluating to 42
+    try t.expectSemanticError(
+        \\ fn id<T>(x: T) -> T x
+        \\ id <num>(42)
+    );
 }
 
 test "return-only type param stays any without explicit args" {
     // T appears only in the return, so a bare call leaves it unbound (any)
     // and a string binding compiles; it still runs fine
     try t.topNumber(
-        \\ fn make[T](x) -> T return x
+        \\ fn make<T>(x) -> T return x
         \\ let y = make(1)
         \\ let s: string = y
         \\ y
     , 1);
     // shape-bound params still infer without any explicit args
     try t.expectSemanticError(
-        \\ fn id[T](x: T) x
+        \\ fn id<T>(x: T) x
         \\ let y = id(42)
         \\ let s: string = y
     );
