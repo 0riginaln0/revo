@@ -1,13 +1,14 @@
 //! # Use this example
 //!
-//! first build with
-//!
+//! make sure headers are built into zig-out/include/
+//! ```
+//! zig build lib
+//! ```
+//! build bindgen with
 //! ```
 //! cargo build -p revo-sys --example basic
 //! ```
-//!
-//! then open `revo` and use the function to return 0
-//!
+//! then, open `revo` and use the extension's function to return 0
 //! ```rb
 //! import "./target/debug/examples/libbasic.dylib".hi()
 //! > 0

@@ -359,6 +359,12 @@ pub fn build(b: *Build) !void {
             .install_dir = .header,
         });
 
+        // rust bindgen
+        const cargo_build = b.addSystemCommand(&.{ "cargo", "build", "-m", "./extra/rust/Cargo.toml" });
+        const bindgen_step = b.step("bindgen", "Build bindings for Rust");
+        bindgen_step.dependOn(&cargo_build.step);
+        bindgen_step.dependOn(&header_install.step);
+
         b.getInstallStep().dependOn(&exe_install.step);
         lib_install.step.dependOn(&header_install.step);
 
