@@ -2,7 +2,26 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn check_zig_version() {
+    let out = Command::new("zig")
+        .arg("version")
+        .output()
+        .expect("`zig` not found in PATH (revo-sys needs zig 0.16 to build liberevo)");
+    let version = String::from_utf8_lossy(&out.stdout);
+    let mut nums = version
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<u64>().ok());
+    let (major, minor) = (nums.next().unwrap_or(0), nums.next().unwrap_or(0));
+    if (major, minor) < (0, 16) {
+        panic!("revo-sys needs zig >= 0.16, found `{}`", version.trim());
+    }
+}
+
 fn main() {
+    check_zig_version();
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
     let repo_root = manifest_dir
