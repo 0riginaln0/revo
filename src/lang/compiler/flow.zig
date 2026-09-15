@@ -397,6 +397,18 @@ pub fn compileMatch(
     errdefer state.popScope(self);
     errdefer restoreRegState(self, saved);
 
+    // slots n regs share the same frame storage
+    // , so locals must not alias live temporaries from enclosing expressions
+    // (like how thee `print` in `print(match ...)` lives in r0 while next_slot may still be 0)
+    //
+    // pin the slot allocator above active registers before declaring
+    if (self.slot_allocators.items.len > 0) {
+        const idx = self.slot_allocators.items.len - 1;
+        if (self.slot_allocators.items[idx] < self.active_registers) {
+            self.slot_allocators.items[idx] = @intCast(self.active_registers);
+        }
+    }
+
     // evaluated once, loaded per arm
     const subject_slot = try state.declareLocal(self, "__match_subject", false);
     try self.compile(subject, true);
@@ -405,6 +417,7 @@ pub fn compileMatch(
     state.reserveLocalSlots(self);
 
     const arm_base_registers = self.active_registers;
+    const subject_next_slot = self.slot_allocators.items[self.slot_allocators.items.len - 1];
     const subject_storage: VarStorage = .{ .local = subject_slot };
 
     var end_jumps = try std.ArrayList(usize).initCapacity(self.alloc, arms.len);
@@ -432,6 +445,11 @@ pub fn compileMatch(
             state.reserveLocalSlots(self);
         }
 
+        // bound slots are live for the whole arm; temporaries for pat
+        // checks, guards n the body must start above them
+        // , otherwise somethig like `load_global r1,:print` would clobber `v` in slot1
+        const arm_body_base = self.active_registers;
+
         // capture subject type before patternTypeInfo overwrites the hint
         const pre_narrow_subject_type = self.inferExprType(subject);
 
@@ -446,7 +464,7 @@ pub fn compileMatch(
         defer fail_list.deinit(self.alloc);
 
         for (arm.matchers, 0..) |matcher, mi| {
-            self.active_registers = arm_base_registers;
+            self.active_registers = arm_body_base;
             const matcher_expr: ?*const Node = switch (matcher) {
                 .wildcard => null,
                 .expr => |e| e,
@@ -478,7 +496,7 @@ pub fn compileMatch(
             self.alloc.free(fail_jumps);
         }
 
-        self.active_registers = arm_base_registers;
+        self.active_registers = arm_body_base;
         const body = self.irLen();
         for (body_jumps.items) |jump_idx| self.patchJumpToLabel(jump_idx, body);
 
@@ -504,6 +522,11 @@ pub fn compileMatch(
 
         state.popScope(self);
 
+        // bound slots (and any __bind_tmp/__match_tmp leaks) are dead after the arm
+        //
+        // reuse the same indices for the next arm
+        self.slot_allocators.items[self.slot_allocators.items.len - 1] = subject_next_slot;
+
         const next_arm = self.irLen();
         for (fail_list.items) |jump_idx| self.patchJumpToLabel(jump_idx, next_arm);
     }
@@ -517,6 +540,18 @@ pub fn compileMatch(
     for (end_jumps.items) |jump_idx| self.patchJump(jump_idx);
 
     self.active_registers = arm_base_registers + 1;
+
+    // locals (subject n arm bindings) are dead now
+    // , BUT arm_base can sit above the entry base
+    // , leaving a hole (e.g. `print(match ...)` has print in r0, subject in slot1, result in r2)
+    //
+    // calls require contiguous [callee, args], so compact the result down to the entry base
+    if (arm_base_registers != saved.active) {
+        try self.spans.append(self.alloc, self.active_span);
+        _ = try self.record(.move, &.{.{ .reg = try toRegister(arm_base_registers) }}, true, try toRegister(saved.active), 0);
+        self.active_registers = saved.active + 1;
+        if (self.max_registers < self.active_registers) self.max_registers = self.active_registers;
+    }
 }
 
 pub fn reserveRegisters(self: *Compiler, min_register: Register) void {

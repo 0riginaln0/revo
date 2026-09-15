@@ -1930,6 +1930,25 @@ test "match wildcards" {
     , 13);
 }
 
+test "match locals dont clobber enclosing call temps" {
+    // binder used inside a call in the arm body must see the subject,
+    // not callee (slots n registers share frame storage)
+    try t.topString(
+        \\ fn id(x) x
+        \\ id(match "hi" | v => id(v))
+    , "hi");
+    // match used as a call argument must leave its result contiguous with the callee ([callee, arg])
+    // , not stranded above a dead subject slot
+    try t.topNumber(
+        \\ fn id(x) x
+        \\ id(match 1 | 1 => 42 | _ => 0)
+    , 42);
+    try t.topString(
+        \\ fn id(x) x
+        \\ id(match "why is it a function" | :nil => :oops | v => id(v))
+    , "why is it a function");
+}
+
 test "match guards" {
     try t.topNumber(
         \\ const x = 15
