@@ -16,7 +16,7 @@
 
 use std::ffi::*;
 
-use revo_sys::*;
+use revo_sys::ffi::*;
 
 extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoData, out: *mut RevoData) {
     unsafe {

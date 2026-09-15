@@ -1,12 +1,20 @@
-#![allow(non_upper_case_globals)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
-
+//! the rust `revo.h` wrapper
+//! you want to work with the `VM` struct most the time
 use std::ffi::{CStr, CString};
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+/// bindgen wrappers. prefer to use root
+pub mod ffi {
+    #![allow(non_upper_case_globals)]
+    #![allow(non_camel_case_types)]
+    #![allow(non_snake_case)]
+
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+use ffi::*;
 
 fn last_error_ptr(ptr: *mut ErevoVM) -> String {
     if ptr.is_null() {
@@ -22,7 +30,44 @@ fn last_error_ptr(ptr: *mut ErevoVM) -> String {
     }
 }
 
+/// sometimes you get a bare false and no message
+/// revo has a little ERRNO of our own for that, right here
+fn err_or_unknown(vm_ptr: *mut ErevoVM) -> String {
+    let msg = last_error_ptr(vm_ptr);
+    if msg.is_empty() {
+        "revo call failed".to_owned()
+    } else {
+        msg
+    }
+}
+
+fn c_void_ptr(ptr: *mut ErevoVM) -> *mut std::ffi::c_void {
+    ptr as *mut std::ffi::c_void
+}
+
+fn boxed(tag: RevoType, id: u64) -> RevoData {
+    REVO_BOX_TAG | ((tag as u64) << REVO_TAG_SHIFT) | (id & REVO_PAYLOAD_MASK)
+}
+
+/// interned ids are never 0, so 0 means the call failed
+fn intern_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
+    let id = unsafe { revo_intern(c_void_ptr(vm_ptr), s.as_ptr() as u64, s.len()) };
+    if id == 0 {
+        return Err(format!("failed to intern string {s:?}"));
+    }
+    Ok(id)
+}
+
+fn intern_atom_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
+    let id = unsafe { revo_intern_atom(c_void_ptr(vm_ptr), s.as_ptr() as u64, s.len()) };
+    if id == 0 {
+        return Err(format!("failed to intern atom {s:?}"));
+    }
+    Ok(id)
+}
+
 /// tied to the vm, constants are stored over there and referenced over here
+#[derive(Debug)]
 pub struct Program<'vm> {
     ptr: *mut ErevoProgram,
     vm_ptr: *mut ErevoVM,
@@ -72,9 +117,18 @@ impl<'vm> Program<'vm> {
     }
 }
 
+/// a revo vm instance
+///
+/// explicitly `!Send + !Sync`
+///
+/// sorry for the field, it's zero-sized, see assertion below
+#[derive(Debug)]
 pub struct VM {
     ptr: *mut ErevoVM,
+    _not_thread_safe: PhantomData<Rc<()>>,
 }
+
+const _: () = assert!(std::mem::size_of::<VM>() == std::mem::size_of::<*mut ErevoVM>());
 
 impl Default for VM {
     fn default() -> Self {
@@ -86,7 +140,10 @@ impl VM {
     pub fn new() -> Self {
         let ptr = unsafe { erevo_vm_create() };
         assert!(!ptr.is_null(), "erevo_vm_create returned null (oom maybe)");
-        Self { ptr }
+        Self {
+            ptr,
+            _not_thread_safe: PhantomData,
+        }
     }
 
     pub fn last_error(&self) -> String {
@@ -109,6 +166,53 @@ impl VM {
 
         Data::from_raw(self.ptr, data).map_err(|e| e.to_string())
     }
+
+    /// read back a global; missing names come back as `:nil`
+    pub fn get_global(&self, name: &str) -> Result<Data, String> {
+        let raw = unsafe { revo_getglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len()) };
+        Data::from_raw(self.ptr, raw).map_err(|e| e.to_string())
+    }
+
+    /// bind a name to a value on the vm
+    pub fn set_global(&mut self, name: &str, val: &Data) -> Result<(), String> {
+        let raw = val.to_raw(self)?;
+        unsafe { revo_setglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len(), raw) };
+        Ok(())
+    }
+
+    /// call a revo function value with already-converted args
+    pub fn call(&mut self, func: &Data, args: &[Data]) -> Result<Data, String> {
+        if !matches!(func, Data::Function(_)) {
+            return Err(format!("call target is not a function: {func:?}"));
+        }
+
+        let func_raw = func.to_raw(self)?;
+        let mut argv = Vec::with_capacity(args.len());
+        for arg in args {
+            argv.push(arg.to_raw(self)?);
+        }
+
+        let argv_ptr = if argv.is_empty() {
+            std::ptr::null()
+        } else {
+            argv.as_ptr()
+        };
+
+        let mut out: RevoData = 0;
+        let ok = unsafe {
+            revo_call(
+                c_void_ptr(self.ptr),
+                func_raw,
+                argv.len() as u64,
+                argv_ptr,
+                &mut out,
+            )
+        };
+        if ok == 0 {
+            return Err(err_or_unknown(self.ptr));
+        }
+        Data::from_raw(self.ptr, out).map_err(|e| e.to_string())
+    }
 }
 
 impl Drop for VM {
@@ -119,6 +223,17 @@ impl Drop for VM {
     }
 }
 
+// i find it fucked up how i have to do all of this to make them distinct
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TableId(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FunctionId(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForeignId(u64);
+
 /// the actual revodata is f64 unless boxed
 /// this one has a fat size=32 cost slapped onto it
 /// and lives past vm lifetime, real data are owned by gc
@@ -127,9 +242,9 @@ pub enum Data {
     Num(f64),
     Atom(String),
     String(String),
-    Table(u64),
-    Function(u64),
-    Foreign(u64),
+    Table(TableId),
+    Function(FunctionId),
+    Foreign(ForeignId),
 }
 
 impl Display for Data {
@@ -138,9 +253,9 @@ impl Display for Data {
             Data::Num(n) => write!(f, "{n}"),
             Data::Atom(a) => write!(f, ":{a}"),
             Data::String(s) => write!(f, "{s}"),
-            Data::Table(id) => write!(f, "table#{id}"),
-            Data::Function(id) => write!(f, "function#{id}"),
-            Data::Foreign(id) => write!(f, "foreign#{id}"),
+            Data::Table(id) => write!(f, "table#{}", id.0),
+            Data::Function(id) => write!(f, "function#{}", id.0),
+            Data::Foreign(id) => write!(f, "foreign#{}", id.0),
         }
     }
 }
@@ -159,7 +274,24 @@ fn revo_type(d: RevoData) -> u64 {
 }
 
 impl Data {
-    /// private because we dont want boxes leaking into the public api
+    /// convert back into a raw box for passing into the vm
+    /// strings and atoms are interned, so this needs the vm
+    pub fn to_raw(&self, vm: &VM) -> Result<RevoData, String> {
+        self.to_raw_in(vm.ptr)
+    }
+
+    fn to_raw_in(&self, vm_ptr: *mut ErevoVM) -> Result<RevoData, String> {
+        match self {
+            Data::Num(n) => Ok(n.to_bits()),
+            Data::Atom(s) => Ok(boxed(RevoType_revo_atom, intern_atom_raw(vm_ptr, s)?)),
+            Data::String(s) => Ok(boxed(RevoType_revo_string, intern_raw(vm_ptr, s)?)),
+            Data::Table(id) => Ok(boxed(RevoType_revo_table, id.0)),
+            Data::Function(id) => Ok(boxed(RevoType_revo_function, id.0)),
+            Data::Foreign(id) => Ok(boxed(RevoType_revo_foreign, id.0)),
+        }
+    }
+
+    /// we dont want boxes leaking into the public api
     fn from_raw(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<Data, &'static str> {
         match revo_type(val) {
             t if t == RevoType_revo_number as u64 => Ok(Data::Num(f64::from_bits(val))),
@@ -169,26 +301,189 @@ impl Data {
             }
             t if t == RevoType_revo_string as u64 => Ok(Data::String(get_revo_str(vm_ptr, val)?)),
             t if t == RevoType_revo_table as u64 => {
-                let id = val & REVO_PAYLOAD_MASK;
-                Ok(Data::Table(id))
+                Ok(Data::Table(TableId(val & REVO_PAYLOAD_MASK)))
             }
             t if t == RevoType_revo_function as u64 => {
-                let id = val & REVO_PAYLOAD_MASK;
-                Ok(Data::Function(id))
+                Ok(Data::Function(FunctionId(val & REVO_PAYLOAD_MASK)))
             }
             t if t == RevoType_revo_foreign as u64 => {
-                let id = val & REVO_PAYLOAD_MASK;
-                Ok(Data::Foreign(id))
+                Ok(Data::Foreign(ForeignId(val & REVO_PAYLOAD_MASK)))
             }
             _ => Err("can't deduce the type"),
         }
     }
 }
 
+/// table handle, owned by the vm and managed by its gc
+#[derive(Debug)]
+pub struct Table<'vm> {
+    raw: RevoData,
+    vm_ptr: *mut ErevoVM,
+    _marker: PhantomData<&'vm VM>,
+}
+
+impl<'vm> Table<'vm> {
+    /// create an empty table
+    pub fn new(vm: &'vm VM) -> Self {
+        let raw = unsafe { revo_table_create(c_void_ptr(vm.ptr)) };
+        Self {
+            raw,
+            vm_ptr: vm.ptr,
+            _marker: PhantomData,
+        }
+    }
+
+    /// build an array table from items
+    pub fn from_items(vm: &'vm VM, items: &[Data]) -> Result<Self, String> {
+        let mut raw_items = Vec::with_capacity(items.len());
+        for item in items {
+            raw_items.push(item.to_raw(vm)?);
+        }
+        let items_ptr = if raw_items.is_empty() {
+            std::ptr::null()
+        } else {
+            raw_items.as_ptr()
+        };
+        let raw =
+            unsafe { revo_table_from_items(c_void_ptr(vm.ptr), raw_items.len() as u64, items_ptr) };
+        Ok(Self {
+            raw,
+            vm_ptr: vm.ptr,
+            _marker: PhantomData,
+        })
+    }
+
+    /// wrap a `Data::Table` from eval back into a handle
+    pub fn from_data(vm: &'vm VM, data: &Data) -> Result<Self, String> {
+        match data {
+            Data::Table(id) => Ok(Self {
+                raw: boxed(RevoType_revo_table, id.0),
+                vm_ptr: vm.ptr,
+                _marker: PhantomData,
+            }),
+            other => Err(format!("not a table: {other:?}")),
+        }
+    }
+
+    /// copy back out to an owned value for globals, args, ...
+    pub fn to_data(&self) -> Data {
+        Data::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
+    }
+
+    fn c_ptr(&self) -> *mut std::ffi::c_void {
+        c_void_ptr(self.vm_ptr)
+    }
+
+    /// number of entries; see `alen` for working the array part
+    pub fn len(&self) -> u64 {
+        unsafe { revo_table_len(self.c_ptr(), self.raw) }
+    }
+
+    /// array length
+    pub fn alen(&self) -> u64 {
+        unsafe { revo_table_alen(self.c_ptr(), self.raw) }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// missing keys come back as `None`
+    pub fn get(&self, key: &Data) -> Result<Option<Data>, String> {
+        let key_raw = key.to_raw_in(self.vm_ptr)?;
+        let mut out: RevoData = 0;
+        let ok = unsafe { revo_table_get(self.c_ptr(), self.raw, key_raw, &mut out) };
+        if ok == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+        ))
+    }
+
+    pub fn set(&mut self, key: &Data, val: &Data) -> Result<(), String> {
+        let key_raw = key.to_raw_in(self.vm_ptr)?;
+        let val_raw = val.to_raw_in(self.vm_ptr)?;
+        let ok = unsafe { revo_table_set(self.c_ptr(), self.raw, key_raw, val_raw) };
+
+        if ok == 0 {
+            return Err(err_or_unknown(self.vm_ptr));
+        }
+        Ok(())
+    }
+
+    /// returns whether anything was actually removed
+    pub fn remove(&mut self, key: &Data) -> Result<bool, String> {
+        let key_raw = key.to_raw_in(self.vm_ptr)?;
+        let ok = unsafe { revo_table_remove(self.c_ptr(), self.raw, key_raw) };
+
+        Ok(ok != 0)
+    }
+
+    /// array indexing
+    pub fn get_idx(&self, idx: u64) -> Result<Option<Data>, String> {
+        let mut out: RevoData = 0;
+        let ok = unsafe { revo_table_get_idx(self.c_ptr(), self.raw, idx, &mut out) };
+        if ok == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+        ))
+    }
+
+    pub fn push(&mut self, val: &Data) -> Result<(), String> {
+        let val_raw = val.to_raw_in(self.vm_ptr)?;
+        let ok = unsafe { revo_table_push(self.c_ptr(), self.raw, val_raw) };
+        if ok == 0 {
+            return Err(err_or_unknown(self.vm_ptr));
+        }
+        Ok(())
+    }
+
+    /// field access by name (`t.x`)
+    pub fn get_name(&self, name: &str) -> Result<Option<Data>, String> {
+        let mut out: RevoData = 0;
+        let ok = unsafe {
+            revo_table_get_name(
+                self.c_ptr(),
+                self.raw,
+                name.as_ptr() as u64,
+                name.len(),
+                &mut out,
+            )
+        };
+        if ok == 0 {
+            return Ok(None);
+        }
+        Ok(Some(
+            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+        ))
+    }
+
+    pub fn set_name(&mut self, name: &str, val: &Data) -> Result<(), String> {
+        let val_raw = val.to_raw_in(self.vm_ptr)?;
+        let ok = unsafe {
+            revo_table_set_name(
+                self.c_ptr(),
+                self.raw,
+                name.as_ptr() as u64,
+                name.len(),
+                val_raw,
+            )
+        };
+        if ok == 0 {
+            return Err(err_or_unknown(self.vm_ptr));
+        }
+        Ok(())
+    }
+}
+
 /// copies eagerly, strings randomly die of gc under vm's rule
 fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<String, &'static str> {
     let id = val & REVO_PAYLOAD_MASK;
-    let raw_ptr = vm_ptr as *mut std::ffi::c_void;
+    let raw_ptr = c_void_ptr(vm_ptr);
     let len = unsafe { revo_string_length(raw_ptr, id) };
     let ptr = unsafe { revo_string_data(raw_ptr, id) };
 
