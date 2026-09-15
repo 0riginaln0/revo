@@ -358,7 +358,6 @@ pub fn build(b: *Build) !void {
             .install_subdir = "revo",
             .install_dir = .header,
         });
-
         b.getInstallStep().dependOn(&exe_install.step);
         lib_install.step.dependOn(&header_install.step);
 
