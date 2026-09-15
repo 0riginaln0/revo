@@ -119,6 +119,7 @@ fn writeNum(data: Data, vm: *VM, writer: *Writer) anyerror!void {
 }
 
 test "csv encode" {
+    // will fail until stt have default values, it's ok
     try testing.topString(
         \\ csv.encode({{"a", :b, 3}, {1.2, 0.3, "1.2"}, {1,2,3}}, {}):unwrap()
     , "a,b,3\r\n1.2,0.3,1.2\r\n1,2,3\r\n");
