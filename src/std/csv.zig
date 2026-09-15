@@ -16,8 +16,8 @@ const Dialect = csv.Dialect;
 const Ts = root.T;
 
 pub const Impl = struct {
-    pub fn encode(vm: *VM, data: Ts.any, raw_opts: Ts.table) !HostResult {
-        const dialect = switch (try buildOpts(raw_opts, vm)) {
+    pub fn encode(vm: *VM, data: Ts.any, raw_opts: Ts.table_sentinel) !HostResult {
+        const dialect = switch (try buildOpts(raw_opts.value, vm)) {
             .err => |e| return HostResult{ .err = e },
             .value => |v| v,
         };
@@ -33,8 +33,8 @@ pub const Impl = struct {
         return HostResult.Ok(vm, result);
     }
 
-    pub fn decode(vm: *VM, source: Ts.string, raw_opts: Ts.table) !HostResult {
-        const dialect = switch (try buildOpts(raw_opts, vm)) {
+    pub fn decode(vm: *VM, source: Ts.string, raw_opts: Ts.table_sentinel) !HostResult {
+        const dialect = switch (try buildOpts(raw_opts.value, vm)) {
             .err => |e| return HostResult{ .err = e },
             .value => |v| v,
         };
