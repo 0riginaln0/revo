@@ -5069,4 +5069,3 @@ test "manifest .d.rv types .so imports, sig fallback without one" {
         }
     }
 }
-

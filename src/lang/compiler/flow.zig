@@ -433,7 +433,7 @@ pub fn compileMatch(
         }
 
         // capture subject type before patternTypeInfo overwrites the hint
-        const pre_narrow_subject_type = self.inferExprType( subject);
+        const pre_narrow_subject_type = self.inferExprType(subject);
 
         //
         // matchers are alternatives:
@@ -909,7 +909,7 @@ fn compileConditional(
     errdefer state.popScope(self);
     if (else_expr) |branch| {
         try self.compile(branch, true);
-        _ = self.inferExprType( branch);
+        _ = self.inferExprType(branch);
     } else try self.pushNil();
     state.popScope(self);
 

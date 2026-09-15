@@ -335,7 +335,7 @@ pub const Session = struct {
         return false;
     }
 
-    /// :h <module> 
+    /// :h <module>
     /// group doc plus one signature per member
     fn helpModule(self: *Session, out: *std.Io.Writer, name: []const u8) !bool {
         var found = false;

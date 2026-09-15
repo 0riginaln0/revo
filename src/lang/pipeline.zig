@@ -1,4 +1,3 @@
-
 //! parse -> expand -> check -> lower orchestration
 //! stage companions live in pipeline/: module_scope (@exports wiring)
 //! and import_preload (compile-time import extraction)
