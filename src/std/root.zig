@@ -928,7 +928,9 @@ pub fn import(args: []const Data, vm: *VM) !HostResult {
         }
 
         const mods = revo.ffi.loadC(vm, resolved_path) catch |err| switch (err) {
-            error.NoBindings => return .errImportFailed("extension has no revo_bindings or revo_bindings export"),
+            error.NoBindings => {
+                return .errImportFailed("extension has no revo_native_bindings_ex or revo_bindings export");
+            },
             else => return .errImportFailed(@errorName(err)),
         };
         defer vm.runtime.alloc.free(mods);

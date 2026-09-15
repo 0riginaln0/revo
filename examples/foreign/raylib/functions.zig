@@ -222,4 +222,4 @@ const Impl = struct {
     }
 };
 
-pub export const revo_bindings = ext.bindingsFor(Impl);
+pub export const revo_native_bindings_ex = ext.bindingsFor(Impl);

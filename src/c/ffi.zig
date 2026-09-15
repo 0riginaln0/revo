@@ -304,9 +304,10 @@ pub fn loadNative(vm_ptr: *VM, lib_path: []const u8) ![]HostFunc {
 
     var lib = try std.DynLib.open(lib_path);
 
-    const bindings_ptr: [*]const HostBinding = lib.lookup([*]const HostBinding, "revo_bindings") orelse {
-        return error.NoBindings;
-    };
+    const bindings_ptr: [*]const HostBinding =
+        lib.lookup([*]const HostBinding, "revo_native_bindings_ex") orelse {
+            return error.NoBindings;
+        };
 
     // process-lifetime, untracked by debug allocators (like the spec cache):
     // valid as long as the lib is loaded, which is forever

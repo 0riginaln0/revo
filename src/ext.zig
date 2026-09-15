@@ -17,7 +17,7 @@
 //!     }
 //! };
 //!
-//! pub export const revo_bindings = ext.bindingsFor(Impl);
+//! pub export const revo_native_bindings_ex = ext.bindingsFor(Impl);
 //! ```
 //!
 //! args here are runtime, full comptime type information is still .d.rv
@@ -103,7 +103,7 @@ pub fn bindings(comptime list: []const api.Impl) [list.len + 1]revo.functions.Ho
 }
 
 /// build a null-terminated `HostBinding` table from a stdlib-style
-/// `Impl` struct: `pub export const revo_bindings =
+/// `Impl` struct: `pub export const revo_native_bindings_ex =
 /// ext.bindingsFor(Impl);`
 pub fn bindingsFor(comptime S: type) [(impls(S).val.len) + 1]revo.functions.HostBinding {
     return bindings(impls(S).val);
