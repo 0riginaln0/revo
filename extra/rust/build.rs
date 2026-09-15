@@ -1,7 +1,17 @@
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn main() {
+    let status = Command::new("zig")
+        .args(["build", "lib"])
+        .status()
+        .expect("Failed to run `zig build lib`");
+
+    if !status.success() {
+        panic!("`zig build lib` failed");
+    }
+
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
