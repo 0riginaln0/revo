@@ -2,13 +2,26 @@
 fetch an http request
 the default Content-Type is json
 
+fetch options are `headers` (key-value table), `body`, and `max_redirects`
+any fetch option can be `:nil`
+
+setting `max_redirects` to a number will follow redirects for the specified count. `:nil` leaves redirection up to the caller.
+
 examples:
 ```revo
 http.fetch(:get, "https://example.com")
 http.fetch(:post, "https://example.com", {
-	body = { foo = "bar" }
+	body = { foo = "bar", headers = :nil, max_redirects = :nil }
 })
 ```
 *#
-pub declare http.fetch = fn(method: :get | :post | :put | :delete | :head | :options | :patch | :trace, url: any, ?opts: table) -> !string
+pub declare http.fetch = fn(method: :get | :post | :put | :delete | :head | :options | :patch | :trace, url: any, ?opts: http.FetchOpts) -> !string
 
+type http.HeaderValue = string | num | :nil
+
+#* fetch options, all fields must be set *#
+pub type http.FetchOpts = {
+	headers: table<string, http.HeaderValue> | :nil,
+	body: string?,
+	max_redirects: num?,
+}

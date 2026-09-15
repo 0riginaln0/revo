@@ -4,8 +4,8 @@
 parses string as uri
 
 examples:
-```revo
-uri.decode("https://example.com/hi/there?search&page=3#woah")
+```repl
+rεvo > uri.decode("https://example.com/hi/there?search&page=3#woah")
 { :ok, {
   scheme = "https",
   host = "example.com",
@@ -22,15 +22,15 @@ pub declare uri.decode = fn(value: string) -> !uri.Uri
 formats uri table as string
 
 examples:
-```revo
-uri.encode({
-  scheme = "https",
-  user = :nil,
-  host = "example.com",
-  path = "/hi/there",
-  query = { "search", "page" = 3 },
-  fragment = :nil
-})
+```repl
+rεvo > uri.encode({
+     >   scheme = "https",
+     >   user = :nil,
+     >   host = "example.com",
+     >   path = "/hi/there",
+     >   query = { "search", "page" = 3 },
+     >   fragment = :nil
+     > })
 { :ok, "https://example.com/hi/there?search&page=3" }
 ```
 *#

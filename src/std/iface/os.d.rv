@@ -1,7 +1,7 @@
 #! process and host access: cwd, exit, subprocesses, stdin lines, importing modules, running tests !#
 
 #* reads one line from stdin, or until a custom delimiter (?opts: { delimiter: string|:nil|:eof }) *#
-pub declare input = fn(?opts: table...) -> !string
+pub declare input = fn(?opts: os.InputOpts...) -> !string
 
 #* returns current working directory path *#
 pub declare cwd = fn() -> string
@@ -27,3 +27,7 @@ pub declare getenv = fn(name: string) -> string?
 #* sets an environment variable, returns :ok *#
 pub declare setenv = fn(name: string, value: string) -> :ok
 
+#* read input options *#
+pub type InputOpts = {
+  delimiter: string | :nil | :eof
+}
