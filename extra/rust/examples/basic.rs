@@ -18,14 +18,12 @@ use std::ffi::*;
 
 use revo_sys::*;
 
-// unsafe impl Sync for Binding {}
-
 extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoData, out: *mut RevoData) {
     unsafe {
         *out = 0;
     }
 }
-// the array must end with a NULL/NULL terminator row
+
 #[unsafe(no_mangle)]
 pub static revo_bindings: [RevoBinding; 2] = [
     RevoBinding {
