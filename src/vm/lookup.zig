@@ -1,5 +1,6 @@
 const revo = @import("revo");
 
+const std = @import("std");
 const Data = @import("memory.zig").Data;
 const mem = @import("memory.zig");
 const VM = @import("VM.zig");
@@ -32,14 +33,20 @@ pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("op
             // numeric character access: "str"[n]
             if (key.asNum()) |n| {
                 const str = self.stringValue(object.asString().?);
-                // get the last value of the string
-                if (n == -1) {
-                    return .{ .value = try self.ownDataStringNoDedup(str[str.len - 1 .. str.len]), .from_meta = false };
+                // get the nth-last value of the string
+
+                // revo.asIndex does not and should not allow negative integers, duplicated here
+                if (!std.math.isFinite(n) or @floor(n) != n) return null;
+                const idx = @as(usize, @intFromFloat(@abs(n)));
+
+                // negative index, counting from the end. slice needs to be handled separately in execSlice
+                if (n < 0) {
+                    if (str.len < idx) return null;
+                    return .{ .value = try self.ownDataStringNoDedup(&.{str[str.len - idx]}), .from_meta = false };
                 }
-                const idx = revo.asIndex(n) catch return null;
-                if (idx > str.len) {
-                    try self.setRuntimeMessageFmt("string index {d} out of range (len {d})", .{ idx, str.len });
-                }
+
+                // an oob lookup should return null, rather than panicking
+                // if it needs to panic, it'll be handled from above
                 if (idx < str.len) {
                     return .{ .value = try self.ownDataStringNoDedup(str[idx .. idx + 1]), .from_meta = false };
                 }

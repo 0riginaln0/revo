@@ -3898,7 +3898,7 @@ test "string index out of range errors" {
     , .TypeError, "string index 5 out of range (len 5)");
 }
 
-test "string negative index accesses last character" {
+test "string negative index accesses nth-last character" {
     try t.topString(
         \\ let s: string = "hello"
         \\ s[-1]
@@ -3907,6 +3907,10 @@ test "string negative index accesses last character" {
         \\ let s: string = "x"
         \\ s[-1]
     , "x");
+    try t.topString(
+        \\ let s: string = "abcd"
+        \\ s[-2]
+    , "c");
 }
 //
 // any type accepts everything

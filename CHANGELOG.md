@@ -135,6 +135,12 @@ tuples and structs are gone now, most breaking change yet
   cli prints it as help output,\
   lsp offers it as a quickfix anywhere inside the match
 
+- string from-the-end indexing
+  ```ruby
+  "asdf"[-1] == "f"
+  "asdf"[-2] == "d"
+  ```
+
 - diagnostics have severity (err, warning, note, help) and slug codes. works for lsp as well
 
 - std:
