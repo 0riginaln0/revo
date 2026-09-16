@@ -28,12 +28,12 @@
           stdenv.mkDerivation {
             name = "revo";
             version = "git";
-            src = ./.;
+            src = ../../.;
             nativeBuildInputs = [ zig ];
             preBuild =
               let
                 zigDeps = zig.fetchDeps {
-                  src = ./.;
+                  src = ../../.;
                   pname = "revo-deps";
                   version = "git";
                   fetchAll = true;
