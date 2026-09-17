@@ -415,6 +415,127 @@ int main(void) {
     assert(revo_bool_val(revo_nil()) == 0);
   }
 
+  T("revo_type foreign tag") {
+    int marker = 1234;
+    RevoData f = revo_foreign_new(&marker);
+    assert(revo_type(f) == revo_foreign);
+    assert(revo_foreign == 13);
+  }
+
+  T("foreign wrap and unwrap round-trip") {
+    int marker = 42;
+    RevoData f = revo_foreign_new(&marker);
+    assert(revo_is_foreign(f));
+    assert(!revo_is_number(f));
+    assert(!revo_is_string(f));
+    assert(!revo_is_atom(f));
+    assert(!revo_is_table(f));
+    assert(!revo_is_function(f));
+    assert(!revo_is_nil(f));
+    assert(revo_foreign_ptr(f) == &marker);
+  }
+
+  T("foreign null needs is_foreign to disambiguate") {
+    RevoData null_foreign = revo_foreign_new(NULL);
+    assert(revo_is_foreign(null_foreign));
+    assert(revo_foreign_ptr(null_foreign) == NULL);
+    assert(revo_foreign_ptr(revo_num(1.0)) == NULL);
+    assert(!revo_is_foreign(revo_num(1.0)));
+    assert(revo_foreign_ptr(revo_nil()) == NULL);
+    assert(!revo_is_foreign(revo_nil()));
+  }
+
+  T("foreign survives globals, tables, and calls") {
+    static int state = 7;
+    RevoData f = revo_foreign_new(&state);
+
+    revo_setglobal_cstr(vm, "c_foreign", f);
+    RevoData back = revo_getglobal_cstr(vm, "c_foreign");
+    assert(revo_is_foreign(back));
+    assert(revo_foreign_ptr(back) == &state);
+
+    RevoData ft = revo_table_create(vm);
+    assert(revo_table_set_name(vm, ft, (uint64_t)(uintptr_t)"ptr", 3, f));
+    assert(revo_table_get_name(vm, ft, (uint64_t)(uintptr_t)"ptr", 3, &tval));
+    assert(revo_is_foreign(tval));
+    assert(revo_foreign_ptr(tval) == &state);
+
+    ok = erevo_eval(vm, "test", "fn(x) x", &val);
+    check(ok);
+    RevoData farg[1] = {f};
+    call_ok = revo_call(vm, val, 1, farg, &call_result);
+    assert(call_ok);
+    assert(revo_is_foreign(call_result));
+    assert(revo_foreign_ptr(call_result) == &state);
+  }
+
+  T("revo_ref pins values across gc") {
+    RevoData rt = revo_table_create(vm);
+    assert(revo_table_set_name(vm, rt, (uint64_t)(uintptr_t)"v", 1,
+                               revo_num(7.0)));
+    uint64_t r = revo_ref(vm, rt);
+    assert(r != 0);
+    assert(revo_ref(vm, revo_nil()) == 0);
+
+    // force collections
+    for (int i = 0; i < 5000; i++) {
+      ok = erevo_eval(vm, "test", "{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}", &tval);
+      check(ok);
+    }
+
+    RevoData pinned = revo_getref(vm, r);
+    assert(revo_is_table(pinned));
+    assert(revo_table_get_name(vm, pinned, (uint64_t)(uintptr_t)"v", 1, &tval));
+    assert(revo_is_number(tval));
+    assert(fabs(revo_num_value(tval) - 7.0) < 1e-12);
+
+    revo_unref(vm, r);
+    assert(revo_is_nil(revo_getref(vm, r)));
+    assert(revo_is_nil(revo_getref(vm, 0)));
+    assert(revo_is_nil(revo_getref(vm, 999999)));
+    revo_unref(vm, 0);
+    revo_unref(vm, 999999);
+  }
+
+  T("table finalizer runs on sweep") {
+    // finalizer closing over the flag table
+    ok = erevo_eval(vm, "test", "fn(flag) fn(t) do flag.hit = 41 t end", &val);
+    check(ok);
+    assert(revo_is_function(val));
+
+    RevoData flag = revo_table_create(vm);
+    assert(revo_table_set_name(vm, flag, (uint64_t)(uintptr_t)"hit", 3,
+                               revo_num(0.0)));
+    RevoData fargs[1] = {flag};
+    RevoData fin_fn;
+    call_ok = revo_call(vm, val, 1, fargs, &fin_fn);
+    assert(call_ok);
+    assert(revo_is_function(fin_fn));
+    // pin the finalizer
+    uint64_t fin_ref = revo_ref(vm, fin_fn);
+    assert(fin_ref != 0);
+
+    RevoData doomed = revo_table_create(vm);
+    assert(revo_table_set_finalizer(vm, doomed, fin_fn));
+    assert(!revo_table_set_finalizer(vm, revo_num(1.0), fin_fn));
+    assert(!revo_table_set_finalizer(vm, doomed, revo_num(1.0)));
+    assert(revo_table_remove_finalizer(vm, doomed));
+    assert(!revo_table_remove_finalizer(vm, doomed));
+    assert(!revo_table_remove_finalizer(vm, revo_num(1.0)));
+    assert(revo_table_set_finalizer(vm, doomed, fin_fn)); // re-arm
+
+    // doomed is c-local only; churn sweeps it
+    for (int i = 0; i < 5000; i++) {
+      ok = erevo_eval(vm, "test", "{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}", &tval);
+      check(ok);
+    }
+
+    assert(revo_table_get_name(vm, flag, (uint64_t)(uintptr_t)"hit", 3, &tval));
+    assert(revo_is_number(tval));
+    assert(fabs(revo_num_value(tval) - 41.0) < 1e-12);
+    revo_unref(vm, fin_ref);
+  }
+
   //
   // error handling
   //

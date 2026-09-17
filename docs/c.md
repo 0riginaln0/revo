@@ -128,7 +128,9 @@ typedef uint64_t RevoData;
 ```
 
 numbers are the raw f64 bits; boxed values pack the type nibble (bits
-51-48) and an intern id (low 48 bits, never a pointer) behind a box tag:
+51-48) and a payload (low 48 bits) behind a box tag. the payload is an
+intern id,, except `foreign`, whose payload is the low 48 bits of the
+wrapped pointer:
 
 ```c
 typedef enum {
@@ -137,7 +139,7 @@ typedef enum {
     revo_atom = 9,
     revo_function = 10,
     revo_table = 11,
-    revo_foreign = 15,
+    revo_foreign = 13,
 } RevoType;
 ```
 
@@ -160,6 +162,7 @@ double   revo_num_value(RevoData);
 uint64_t revo_string_id(RevoData);
 uint64_t revo_atom_id(RevoData);
 uint64_t revo_table_id(RevoData);
+void    *revo_foreign_ptr(RevoData);  // null if not foreign (see below)
 int      revo_bool_val(RevoData);   // 0 or 1, 0 if not bool
 int      revo_type(RevoData);       // the RevoType of the value
 ```
@@ -173,6 +176,7 @@ int revo_is_string(RevoData);
 int revo_is_atom(RevoData);
 int revo_is_function(RevoData);
 int revo_is_table(RevoData);
+int revo_is_foreign(RevoData);
 int revo_is_bool(RevoData);
 ```
 
@@ -187,17 +191,112 @@ this means you don't have to intern them manually
 
 ### foreign
 
-this is how you trade data between c and revo
-
-wrap and unwrap raw `void*` pointers. the caller manages the pointer's lifetime
+opaque handles. a foreign wraps a raw `void*` revo never touches.
+caller owns the memory
 
 ```c
 RevoData v = revo_foreign_new(ptr);    // wrap
-void *p = revo_foreign_ptr(v);         // unwrap, null if not foreign
+void *p = revo_foreign_ptr(v);         // unwrap
+int is_f = revo_is_foreign(v);         // check
 ```
 
 {{< ref "pub fn revo_foreign_new(" >}}
 {{< ref "pub fn revo_foreign_ptr(" >}}
+
+**null is ambiguous.** `revo_foreign_ptr` is null for non-foreign
+values and null ptrs:
+
+```c
+if (!revo_is_foreign(v)) {
+    // not foreign at all
+} else {
+    void *p = revo_foreign_ptr(v);  // null here means a genuine null ptr
+}
+```
+
+**low 48 bits only** (`REVO_PAYLOAD_MASK`). fits canonical user ptrs on
+x86_64/arm64; no tagged ptrs or high-bit integers
+
+**lifetime.** the box holds the address, not the pointee. `malloc` +
+explicit `free`; revo is never the owner:
+
+```c
+typedef struct { double total; } Total;
+
+void total_new(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+    (void)argc; (void)argv;
+    Total *t = malloc(sizeof(Total));
+    if (!t) { *out = revo_nil(); return; }
+    t->total = 0;
+    *out = revo_foreign_new(t);
+}
+
+void total_add(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+    (void)vm;
+    if (argc < 2 || !revo_is_foreign(argv[0]) || !revo_is_number(argv[1])) {
+        *out = revo_nil();
+        return;
+    }
+    Total *t = revo_foreign_ptr(argv[0]);
+    if (!t) { *out = revo_nil(); return; }
+    t->total += revo_num_value(argv[1]);
+    *out = revo_num(t->total);
+}
+
+void total_free(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+    (void)vm; (void)argc;
+    if (argc >= 1 && revo_is_foreign(argv[0])) free(revo_foreign_ptr(argv[0]));
+    *out = revo_nil();
+}
+```
+
+**transport.** ordinary values: globals, table fields, call args, `*out`
+
+```revo
+type(ptr)    # :foreign
+foreign?(ptr) # :true
+```
+
+ptr identity, opaque render (`<foreign *>`)
+
+### rooting
+
+a `RevoData` in a c local roots nothing. values reachable only from c
+can be swept (ids reused) by the next collection. pin what you hold
+across calls:
+
+```c
+uint64_t r = revo_ref(vm, val);  // 0 on failure
+// eval / call freely; revo_getref(vm, r) stays valid
+RevoData same = revo_getref(vm, r);
+revo_unref(vm, r);               // release exactly once
+```
+
+ids monotonic, never reused: stale reads `:nil`. `revo_ref` on `:nil`
+is 0; `revo_getref` on 0/unknown/released is `:nil`; `revo_unref`
+there is a noop. globals root too
+
+{{< ref "pub fn revo_ref(" >}}
+{{< ref "pub fn revo_getref(" >}}
+{{< ref "pub fn revo_unref(" >}}
+
+### finalizers
+
+explicit `free` stays primary: gc promises no timing. a table can
+carry a finalizer running once with the table as sole arg when swept
+(leftovers run at destroy):
+
+```c
+bool ok = revo_table_set_finalizer(vm, handle_table, fin_fn);
+bool dropped = revo_table_remove_finalizer(vm, handle_table);
+```
+
+same mechanism as `regex`/sockets: `_ptr` field, freed in finalizer
+*and* explicit `free`, both tolerating a missing `_ptr`. keep `fin_fn`
+reachable til it fires
+
+{{< ref "pub fn revo_table_set_finalizer(" >}}
+{{< ref "pub fn revo_table_remove_finalizer(" >}}
 
 ### strings
 
@@ -337,7 +436,8 @@ a worked-through example is at {{< ref "examples/c/extension.c" >}}, rebuild the
 **data conversion**
 
 `RevoData` is nanboxed: numbers are the raw f64 bits, everything else
-is the type nibble plus an interned id packed into the low 48 bits.
+is the type nibble plus a payload packed into the low 48 bits (an intern
+id, except foreign, which stores the low 48 bits of the pointer).
 the type helpers read a c value out of the same word:
 
 ```ruby
@@ -349,7 +449,7 @@ the type helpers read a c value out of the same word:
 fn()           - revo_is_function - revo_function_id
 {} (table)     - revo_is_table    - revo_table_id
 {1, 2} (table) - revo_is_table    - revo_table_id
-foreign ptr    - revo_type(v) == revo_foreign - revo_foreign_ptr
+foreign ptr    - revo_is_foreign      - revo_foreign_ptr
 ```
 
 a value can be moved through any of the constructors in its row
@@ -412,5 +512,5 @@ cc -shared -fPIC -o extension.dylib extension.c -I/path/to/zig-out/include
 - `-fPIC` for shared libraries
 - don't store `RevoData` values past the call; intern or copy what
   you need
-- if you need persistent state, make a table in revo and pass it as
-  context
+- persistent native state is a `revo_foreign_new` ptr passed as context;
+  otherwise a revo table

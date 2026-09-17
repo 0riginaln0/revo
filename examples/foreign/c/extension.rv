@@ -12,3 +12,10 @@ print(extension.regex("^h", "hello"))
 
 print(extension.concat({"a", "b", "c"}, "-"))
 print(extension.concat({"revo", "rules"}, ", "))
+
+# foreign demo ::: the counter lives in malloc'd c memory, revo holds the handle
+let t = extension.total_new()
+print(type(t))  # :foreign
+print(extension.total_add(t, 5))
+print(extension.total_add(t, 7))
+extension.total_free(t)

@@ -86,7 +86,16 @@ int main(void) {
   printf("table.x = ");
   print_value(vm, tval);
 
-	//
+  // foreign round-trip through a global; c owns the memory
+  static int native_state = 7;
+  RevoData handle = revo_foreign_new(&native_state);
+  printf("foreign is_foreign? %d tag=%d\n", revo_is_foreign(handle), revo_type(handle));
+  revo_setglobal_cstr(vm, "handle", handle);
+  val = revo_getglobal_cstr(vm, "handle");
+  printf("foreign round-trip ok? %d\n",
+         revo_is_foreign(val) && revo_foreign_ptr(val) == &native_state);
+
+  //
   // check nil, bool helpers
   printf("nil is_nil? %d\n", revo_is_nil(revo_nil()));
   printf("true is_bool? %d\n", revo_is_bool(revo_bool(1)));

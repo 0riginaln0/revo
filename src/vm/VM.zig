@@ -213,6 +213,11 @@ gc_mark_stack: std.ArrayList(MarkItem),
 gc_finalizers: std.AutoHashMap(mem.TableID, Data),
 gc_in_finalizer: bool = false,
 
+/// pinned for c callers (`revo_ref`), roots til `revo_unref`
+/// , ids monotonic, never reused, 0 never valid
+c_refs: std.AutoHashMap(u64, Data),
+c_ref_next: u64 = 1,
+
 const MarkItem = union(enum) {
     data: Data,
     table: mem.TableID,
@@ -291,6 +296,7 @@ pub fn init(runtime: revo.Runtime) !VM {
         .loaded_extensions = .empty,
         .gc_mark_stack = gc_mark_stack,
         .gc_finalizers = std.AutoHashMap(mem.TableID, Data).init(rt.alloc),
+        .c_refs = std.AutoHashMap(u64, Data).init(rt.alloc),
     };
     if (revo.can_async) {
         if (makeWakeupPipe()) |fds| {
@@ -371,6 +377,7 @@ pub fn deinit(self: *VM) void {
         }
     }
     self.gc_finalizers.deinit();
+    self.c_refs.deinit();
     self.sched.deinit();
     self.tables.deinit();
     self.functions.deinit();
@@ -410,6 +417,11 @@ pub fn registerFinalizer(self: *VM, table_id: mem.TableID, func: Data) !void {
 
 pub fn unregisterFinalizer(self: *VM, table_id: mem.TableID) void {
     _ = self.gc_finalizers.remove(table_id);
+}
+
+/// true when the table has a finalizer pending
+pub fn hasFinalizer(self: *VM, table_id: mem.TableID) bool {
+    return self.gc_finalizers.contains(table_id);
 }
 
 pub fn moduleStamp(self: *VM, path: []const u8) !ModuleStamp {

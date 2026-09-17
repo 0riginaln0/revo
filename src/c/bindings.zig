@@ -93,14 +93,14 @@ pub fn data(allocator: Allocator) !std.ArrayList(u8) {
         \\// a revo value, nanboxed in a single u64
         \\typedef uint64_t RevoData;
         \\
-        \\// type tags; they are the stored tag nibbles (bits 51-48 of the box)
+        \\// tags mirror vm.memory.Type; number never boxed
         \\typedef enum {
         \\  revo_number = 0,
         \\  revo_string = 8,
         \\  revo_atom = 9,
         \\  revo_function = 10,
         \\  revo_table = 11,
-        \\  revo_foreign = 15,
+        \\  revo_foreign = 13,
         \\} RevoType;
         \\
         \\// guaranteed to be of these ids
@@ -121,8 +121,8 @@ pub fn data(allocator: Allocator) !std.ArrayList(u8) {
         \\} RevoAtom;
         \\
         \\// nanbox layout: numbers are raw f64 bits, boxed values are
-        \\// (REVO_BOX_TAG | (type << 48) | id), so the payload of a boxed
-        \\// value is an intern id, never a pointer
+        \\// (REVO_BOX_TAG | (type << 48) | payload)
+        \\// payload is an intern id, except foreign: low 48 ptr bits
         \\#define REVO_BOX_TAG 0x7FF8000000000000ULL
         \\#define REVO_TAG_SHIFT 48
         \\#define REVO_TAG_MASK 0xFULL
@@ -150,6 +150,7 @@ pub fn data(allocator: Allocator) !std.ArrayList(u8) {
         \\static inline int revo_is_atom(RevoData d) { return revo_type(d) == revo_atom; }
         \\static inline int revo_is_function(RevoData d) { return revo_type(d) == revo_function; }
         \\static inline int revo_is_table(RevoData d) { return revo_type(d) == revo_table; }
+        \\static inline int revo_is_foreign(RevoData d) { return revo_type(d) == revo_foreign; }
         \\static inline int revo_is_bool(RevoData d) { return revo_is_atom(d) && ((d & REVO_PAYLOAD_MASK) == ra_true || (d & REVO_PAYLOAD_MASK) == ra_false); }
         \\static inline int revo_bool_val(RevoData d) { return revo_is_bool(d) ? ((d & REVO_PAYLOAD_MASK) == ra_true ? 1 : 0) : 0; }
         \\

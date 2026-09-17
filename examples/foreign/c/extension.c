@@ -4,10 +4,12 @@
 //
 // the shared lib exports revo_bindings which import(".so") picks up
 //
-// values cross the boundary nanboxed: a RevoData is a u64. numbers are raw
-// f64 bits, boxed values carry an intern id in the low 48 bits, never a
-// pointer. read strings with revo_string_data / revo_string_length and
-// create them with revo_intern + revo_string.
+// boundary :nanboxed RevoData (u64)
+// . numbers are raw f64 bits
+// . boxed carry tag + payload: intern id,
+//   ptr bits for foreign
+// strings- data/length to read, intern + string to make
+// native state: foreign_new/ptr, caller owns
 //
 
 #include "revo.h"
@@ -161,6 +163,49 @@ static void regex_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result
   *out_result = revo_bool(match == 0);
 }
 
+// foreign demo ::: an opaque native counter
+// . revo holds the malloc'd struct as a foreign value and
+// hands it back on each call; free it explicitly
+typedef struct {
+  double total;
+} total_t;
+
+static void total_new_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
+  (void)vm;
+  (void)argc;
+  (void)argv;
+  total_t *t = (total_t *)malloc(sizeof(total_t));
+  if (!t) {
+    *out_result = revo_nil();
+    return;
+  }
+  t->total = 0;
+  *out_result = revo_foreign_new(t);
+}
+
+static void total_add_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
+  (void)vm;
+  if (argc < 2 || !revo_is_foreign(argv[0]) || !revo_is_number(argv[1])) {
+    *out_result = revo_nil();
+    return;
+  }
+  total_t *t = (total_t *)revo_foreign_ptr(argv[0]);
+  if (!t) {
+    *out_result = revo_nil();
+    return;
+  }
+  t->total += revo_num_value(argv[1]);
+  *out_result = revo_num(t->total);
+}
+
+static void total_free_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
+  (void)vm;
+  if (argc >= 1 && revo_is_foreign(argv[0])) {
+    free(revo_foreign_ptr(argv[0]));
+  }
+  *out_result = revo_nil();
+}
+
 // the type interface lives in the sibling extension.d.rv manifest, not here.
 // every binding lands in this module's table at import time
 __attribute__((visibility("default"))) const RevoBinding revo_bindings[] = {
@@ -171,5 +216,8 @@ __attribute__((visibility("default"))) const RevoBinding revo_bindings[] = {
   {"typ", typ_fn},
   {"regex", regex_fn},
   {"concat", concat_fn},
+  {"total_new", total_new_fn},
+  {"total_add", total_add_fn},
+  {"total_free", total_free_fn},
   {NULL, NULL},
 };

@@ -137,6 +137,11 @@ pub inline fn markRoots(self: *VM) void {
     while (globals_it.next()) |global|
         pushMark(self, global.value_ptr.*);
 
+    // c pins (`revo_ref`), alive til `revo_unref`
+    var ref_it = self.c_refs.iterator();
+    while (ref_it.next()) |entry|
+        pushMark(self, entry.value_ptr.*);
+
     for (self.constants.items) |data|
         pushMark(self, data);
 

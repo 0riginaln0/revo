@@ -222,14 +222,61 @@ pub export fn revo_string_length(vm_ptr: *anyopaque, id: u64) callconv(.c) usize
     return slice.len;
 }
 
-/// wrap a raw pointer as a foreign value, caller manages lifetime
+/// wrap a raw ptr; caller owns it, gc ignores it
+/// , low 48 bits only. null in, null out: `revo_is_foreign` first
 pub export fn revo_foreign_new(ptr: ?*anyopaque) callconv(.c) Data {
     return Data.new.foreign(ptr);
 }
 
-/// extract the raw pointer from a foreign value (null if not foreign)
+/// unwrap; null when not foreign and when wrapping null
 pub export fn revo_foreign_ptr(val: Data) callconv(.c) ?*anyopaque {
     return val.asForeign();
+}
+
+/// pin a value past gc; registry id, 0 on failure
+/// , nil pins to 0, 0 never valid, ids never reused
+pub export fn revo_ref(vm_ptr: *anyopaque, val: Data) callconv(.c) u64 {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    if (val.asAtom()) |aid| {
+        if (aid == revo.core_atoms.atomId(.nil)) return 0;
+    }
+    const id = v.c_ref_next;
+    v.c_refs.put(id, val) catch return 0;
+    v.c_ref_next +%= 1;
+    if (v.c_ref_next == 0) v.c_ref_next = 1;
+    return id;
+}
+
+/// release a pin once; noop on 0/unknown
+pub export fn revo_unref(vm_ptr: *anyopaque, ref_id: u64) callconv(.c) void {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    _ = v.c_refs.remove(ref_id);
+}
+
+/// read back a pin; nil on 0/unknown/released
+pub export fn revo_getref(vm_ptr: *anyopaque, ref_id: u64) callconv(.c) Data {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    return v.c_refs.get(ref_id) orelse nil_val;
+}
+
+/// run `func(table)` once when swept, errors swallowed
+/// , leftovers at destroy; false unless table + function
+/// , keep `func` reachable; explicit free unregisters
+pub export fn revo_table_set_finalizer(vm_ptr: *anyopaque, table: Data, func: Data) callconv(.c) bool {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const tid = table.asTable() orelse return false;
+    if (func.asFunction() == null) return false;
+    v.registerFinalizer(tid, func) catch return false;
+    return true;
+}
+
+/// drop a pending finalizer; true only when one was there
+pub export fn revo_table_remove_finalizer(vm_ptr: *anyopaque, table: Data) callconv(.c) bool {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const tid = table.asTable() orelse return false;
+    if (!v.hasFinalizer(tid)) return false;
+    v.unregisterFinalizer(tid);
+    return true;
 }
 
 /// register a shared lib's revo_bindings into the module table; types come
