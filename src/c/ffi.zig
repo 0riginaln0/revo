@@ -259,6 +259,27 @@ pub export fn revo_getref(vm_ptr: *anyopaque, ref_id: u64) callconv(.c) Data {
     return v.c_refs.get(ref_id) orelse nil_val;
 }
 
+/// reads like host arity errors: `wants N args, got M`
+pub export fn revo_c_err_arity(vm_ptr: *anyopaque, got: u64, expected: u64) callconv(.c) c_int {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    v.setRuntimeMessageFmt("wants {d} args, got {d}", .{ expected, got }) catch {};
+    return functions.c_err_arity;
+}
+
+/// `expected` is a c string, `got` renders through typeof
+pub export fn revo_c_err_type(vm_ptr: *anyopaque, arg: u64, expected: [*:0]const u8, got: Data) callconv(.c) c_int {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    v.setRuntimeMessageFmt("arg {d}: wants {s}, got {s}", .{ arg, std.mem.span(expected), revo.std_lib.typeof(got, v) }) catch {};
+    return functions.c_err_type;
+}
+
+/// `msg` borrowed for the call only, copied before return
+pub export fn revo_c_err_other(vm_ptr: *anyopaque, msg: [*:0]const u8) callconv(.c) c_int {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    v.setRuntimeMessage(std.mem.span(msg)) catch {};
+    return functions.c_err_other;
+}
+
 /// run `func(table)` once when swept, errors swallowed
 /// , leftovers at destroy; false unless table + function
 /// , keep `func` reachable; explicit free unregisters

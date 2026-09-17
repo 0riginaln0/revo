@@ -406,7 +406,16 @@ extensions are shared libraries that export a `revo_bindings` array.
 every c function follows this signature:
 
 ```c
-typedef void (*RevoFn)(void *vm, size_t argc, RevoData *argv, RevoData *out);
+typedef int (*RevoFn)(void *vm, size_t argc, RevoData *argv, RevoData *out);
+```
+
+return `REVO_OK` (0), anything else raises (`*out` ignored on err):
+
+```c
+#define REVO_OK 0
+#define REVO_ERR_ARITY 1
+#define REVO_ERR_TYPE 2
+#define REVO_ERR_OTHER 3
 ```
 
 a minimal extension:
@@ -414,8 +423,10 @@ a minimal extension:
 ```c
 #include "revo.h"
 
-void greet(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+int greet(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+    (void)vm; (void)argc; (void)argv;
     *out = revo_num(42.0);
+    return REVO_OK;
 }
 
 __attribute__((visibility("default")))
@@ -424,6 +435,28 @@ const RevoBinding revo_bindings[] = {
     {NULL, NULL},
 };
 ```
+
+**errors.** the big `HostResult` three: arity, type, other
+return the helper's result directly:
+
+```c
+if (argc < 2) return revo_c_err_arity(vm, argc, 2);
+if (!revo_is_number(argv[0])) return revo_c_err_type(vm, 0, "number", argv[0]);
+if (!ok) return revo_c_err_other(vm, "boom");
+```
+
+```c
+int revo_c_err_arity(void *vm, uint64_t got, uint64_t expected);
+int revo_c_err_type(void *vm, uint64_t arg, const char *expected, RevoData got);
+int revo_c_err_other(void *vm, const char *msg);
+```
+
+`got` renders through `typeof`; messages copy before return, literals fine
+bare `REVO_ERR_*` without a helper raises with a generic message
+
+{{< ref "pub fn revo_c_err_arity(" >}}
+{{< ref "pub fn revo_c_err_type(" >}}
+{{< ref "pub fn revo_c_err_other(" >}}
 
 each binding is just `name` and `fn_ptr`. the typed interface lives in a
 sibling `.d.rv` manifest, and every binding lands in the module table under
@@ -507,8 +540,10 @@ cc -shared -fPIC -o extension.dylib extension.c -I/path/to/zig-out/include
 
 #### best practices
 
-- validate arguments manually (functions are variadic for now)
-- always set `*out`, even for nil
+- validate arguments manually (functions are variadic for now);
+  arity/type/other failures `return revo_c_err_*`, see above
+- on success set `*out` (even nil) + `return REVO_OK`; `*out`
+  ignored on err paths
 - `-fPIC` for shared libraries
 - don't store `RevoData` values past the call; intern or copy what
   you need

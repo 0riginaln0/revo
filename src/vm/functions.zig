@@ -68,7 +68,14 @@ pub const CFnPtr = *const fn (
     argc: usize,
     argv: [*]const Data,
     out_result: *Data,
-) callconv(.c) void;
+) callconv(.c) c_int;
+
+/// cfn return codes, mirrored as REVO_* in revo.h
+/// , 0 ok (`*out` used), anything else raises (`*out` ignored)
+pub const c_ok: c_int = 0;
+pub const c_err_arity: c_int = 1;
+pub const c_err_type: c_int = 2;
+pub const c_err_other: c_int = 3;
 /// TODO: make functions have fixed arity too
 pub const VARIADIC: u8 = 0xFF;
 

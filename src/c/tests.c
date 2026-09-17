@@ -31,7 +31,7 @@ static int failed = 0;
     assert(cond);                                                            \
   } while (0)
 
-int main(void) {
+int main(int argc, char **argv) {
   puts("c api tests");
 
   ErevoVM *vm;
@@ -578,6 +578,46 @@ int main(void) {
 
   T("erevo_vm_last_error null returns empty") {
     assert(strcmp(erevo_vm_last_error(NULL), "") == 0);
+  }
+
+  //
+  // cfn errors end to end (needs the test .so path as argv[1];
+  // skipped when built standalone)
+  //
+  if (argc > 1) {
+    T("import test extension") {
+      char src[4096];
+      snprintf(src, sizeof(src), "import \"%s\"", argv[1]);
+      ok = erevo_eval(vm, "test", src, &val);
+      check(ok);
+      assert(revo_is_table(val));
+      revo_setglobal_cstr(vm, "tmod", val);
+    }
+
+    T("cfn ok path through the .so") {
+      ok = erevo_eval(vm, "test", "tmod.add(3, 4)", &val);
+      check(ok);
+      assert(revo_is_number(val));
+      assert(fabs(revo_num_value(val) - 7.0) < 1e-12);
+    }
+
+    T("cfn arity error fails eval with message") {
+      ok = erevo_eval(vm, "test", "tmod.add(1)", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+    }
+
+    T("cfn type error fails eval with message") {
+      ok = erevo_eval(vm, "test", "tmod.add(1, \"x\")", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+    }
+
+    T("cfn other error fails eval with message") {
+      ok = erevo_eval(vm, "test", "tmod.concat({1}, \"-\")", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+    }
   }
 
   //

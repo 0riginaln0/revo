@@ -415,6 +415,26 @@ pub fn build(b: *Build) !void {
         //
         const test_c_step = b.step("test-c", "run c api tests");
         {
+            // real .so the c suite imports for e2e cfn coverage (ok paths + HostResult err propagation)
+            const test_ext_mod = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = !is_freestanding,
+            });
+            test_ext_mod.addCSourceFile(.{
+                .file = b.path("examples/foreign/c/extension.c"),
+                .flags = &.{
+                    "-std=c99", "-Wall", "-Wextra", "-fPIC",
+                },
+            });
+            test_ext_mod.addIncludePath(header_wf.getDirectory());
+            const test_ext_lib = b.addLibrary(.{
+                .name = "revo_test_ext",
+                .root_module = test_ext_mod,
+                .linkage = .dynamic,
+            });
+            test_ext_lib.linker_allow_shlib_undefined = true;
+
             const c_test_exe = b.addExecutable(.{
                 .name = "revo-c-test",
                 .root_module = b.createModule(.{
@@ -423,6 +443,7 @@ pub fn build(b: *Build) !void {
                     .link_libc = !is_freestanding,
                 }),
             });
+            c_test_exe.rdynamic = true;
             c_test_exe.root_module.addCSourceFile(.{
                 .file = b.path("src/c/tests.c"),
                 .flags = &.{
@@ -434,6 +455,8 @@ pub fn build(b: *Build) !void {
             c_test_exe.root_module.linkSystemLibrary("m", .{ .needed = true });
 
             const c_test_run = b.addRunArtifact(c_test_exe);
+            // argv[1]: test .so path, absent when built standalone
+            c_test_run.addFileArg(test_ext_lib.getEmittedBin());
             test_c_step.dependOn(&c_test_run.step);
         }
     }

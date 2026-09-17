@@ -1347,12 +1347,22 @@ fn callNonClosureFunction(
                 c_args[i] = arg;
 
             var c_result: mem.Data = .{ .bits = 0 };
-            f.fn_ptr(
+            self.clearRuntimeMessage();
+            const rc = f.fn_ptr(
                 @ptrCast(self),
                 argc,
                 c_args.ptr,
                 &c_result,
             );
+            if (rc != root.functions.c_ok) {
+                if (self.runtime_message == null)
+                    try self.setRuntimeMessage("c function failed");
+                return switch (rc) {
+                    root.functions.c_err_arity => error.WrongArity,
+                    root.functions.c_err_type => error.TypeError,
+                    else => error.Panic,
+                };
+            }
             try self.ensureAbsoluteSlot(base + instr.c);
             try self.writeRegisterFast(
                 base,

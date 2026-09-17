@@ -23,6 +23,7 @@ const TypeTranslation = struct {
 const TRANSLATOR = [_]TypeTranslation{
     .{ .zig = "u64", .c = "uint64_t" },
     .{ .zig = "usize", .c = "size_t" },
+    .{ .zig = "c_int", .c = "int" },
     .{ .zig = "void", .c = "void" },
     .{ .zig = "bool", .c = "int" },
     .{ .zig = "*anyopaque", .c = "void*" },
@@ -154,8 +155,15 @@ pub fn data(allocator: Allocator) !std.ArrayList(u8) {
         \\static inline int revo_is_bool(RevoData d) { return revo_is_atom(d) && ((d & REVO_PAYLOAD_MASK) == ra_true || (d & REVO_PAYLOAD_MASK) == ra_false); }
         \\static inline int revo_bool_val(RevoData d) { return revo_is_bool(d) ? ((d & REVO_PAYLOAD_MASK) == ra_true ? 1 : 0) : 0; }
         \\
-        \\// function ptr type
-        \\typedef void (*RevoFn)(void *vm, size_t argc, RevoData *argv, RevoData *out_result);
+        \\// function ptr type; returns REVO_OK (0), anything else raises
+        \\// (`*out` used on ok only, ignored on err)
+        \\typedef int (*RevoFn)(void *vm, size_t argc, RevoData *argv, RevoData *out_result);
+        \\
+        \\// c errors, returned directly (`return revo_c_err_arity(...)`)
+        \\#define REVO_OK 0
+        \\#define REVO_ERR_ARITY 1
+        \\#define REVO_ERR_TYPE 2
+        \\#define REVO_ERR_OTHER 3
         \\
         \\// function binding; the typed interface lives in a sibling
         \\// `<stem>.d.rv` manifest, not here
