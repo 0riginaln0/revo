@@ -9,6 +9,10 @@ const HostResult = root.HostResult;
 const Ts = root.T;
 
 pub const Impl = struct {
+    pub fn __call(vm: *VM, self: Ts.any, pattern: Ts.string) !HostResult {
+        _ = self;
+        return compile(vm, pattern);
+    }
     pub fn compile(vm: *VM, pattern: Ts.string) !HostResult {
         const pattern_str = try vm.runtime.alloc.dupe(u8, vm.stringValue(@intFromEnum(pattern)));
         defer vm.runtime.alloc.free(pattern_str);

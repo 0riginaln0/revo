@@ -1,3 +1,11 @@
+//!
+//! welcome to vm
+//! this is for values, fibers, calls, and memory pools
+//!
+//! if you're looking for the dispatch loop, see `exec.zig`
+//!   , this file holds the state it runs on plus the call machinery
+//!
+
 pub const INITIAL_HOT_FRAMES = 16;
 pub const INIT_REG_COUNT = 256;
 pub const ProgramCounter = usize;
@@ -76,12 +84,29 @@ pub const Fiber = struct {
     state: State,
     in_runq: bool,
     wait: WaitKind,
+    /// woken value lands here when set, else it gets pushed on the stack
     parked_result_slot: ?usize,
     // will be set to no_result in init
     result: Data = Data.new.nil(),
     // error channel maybe
     err_atom: ?mem.AtomID = null,
+    /// fibers joining on this one, woken at finish
     waiters: std.ArrayList(FiberID),
+    // host call a fresh fiber runs on first dispatch
+    // ; closures run bytecode instead and never set this.
+    // run: execute the call; done: a wake delivered the result
+    // into regs[0] already, just finish. never re-runs.
+    pending_host: ?HostStart = null,
+
+    pub const HostStart = union(enum) {
+        run: PendingHost,
+        done: void,
+    };
+
+    pub const PendingHost = struct {
+        func: mem.FunctionID,
+        argc: opcode.Register,
+    };
 
     pub fn init(alloc: std.mem.Allocator, id: FiberID, program: []const Instruction, reg_count: usize) !Fiber {
         const registers = try alloc.alloc(Data, reg_count);
@@ -107,6 +132,7 @@ pub const Fiber = struct {
             .parked_result_slot = null,
             .waiters = waiters,
             .result = revo.Data.new.core(.nil),
+            .pending_host = null,
         };
 
         return self;
@@ -130,6 +156,14 @@ pub const Fiber = struct {
 // concurrency
 sched: Scheduler,
 runtime: revo.Runtime,
+// held for a whole dispatch; released on park/yield/halt
+gil: Scheduler.SpinLock = .{},
+/// workers set this and stop the pool on first failure
+mt_failed: std.atomic.Value(bool) = .init(false),
+/// the failure itself, reported by the main thread
+mt_failure: ?EvalFailure = null,
+/// how deep runReport is nested; idle math exempts our own quanta
+run_depth: usize = 0,
 
 constants: std.ArrayList(Data),
 stdlib_globals: Globals,
@@ -186,13 +220,40 @@ const MarkItem = union(enum) {
     upvalue: root.functions.UpvalueID,
 };
 
+/// nonblocking self-pipe for scheduler wakeups
+/// , null when uncreatable (callers fall back to bounded poll timeouts)
+/// null when uncreatable, callers fall back to bounded poll timeouts
+fn makeWakeupPipe() ?[2]c_int {
+    var fds: [2]c_int = undefined;
+    if (std.c.pipe(&fds) == -1) return null;
+    errdefer {
+        _ = std.c.close(fds[0]);
+        _ = std.c.close(fds[1]);
+    }
+    inline for (fds) |fd| {
+        const cur = std.c.fcntl(fd, std.posix.F.GETFL, @as(c_int, 0));
+        if (cur == -1) return null;
+        const nb = std.c.fcntl(fd, std.posix.F.SETFL, cur | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+        if (nb == -1) return null;
+        const clo = std.c.fcntl(fd, std.posix.F.SETFD, @as(c_int, std.posix.FD_CLOEXEC));
+        if (clo == -1) return null;
+    }
+    return fds;
+}
+
 pub fn init(runtime: revo.Runtime) !VM {
     var rt = runtime;
     rt.diag_arena = null;
+
+    if (rt.threads == 0) rt.threads = 1;
+    if (rt.threads > 1 and !revo.can_async) rt.threads = 1;
+    if (rt.threads > 64) rt.threads = 64;
+
     try rt.ensureDiagArena();
     errdefer rt.deinitDiagArena();
     var sched = try Scheduler.init(rt.alloc);
     errdefer sched.deinit();
+    sched.thread_count = rt.threads;
     var constants = try std.ArrayList(Data).initCapacity(rt.alloc, 16);
     errdefer constants.deinit(rt.alloc);
     var tables = try TablePool.init(rt.alloc);
@@ -209,6 +270,7 @@ pub fn init(runtime: revo.Runtime) !VM {
     errdefer loading_stack.deinit(rt.alloc);
     var gc_mark_stack = try std.ArrayList(MarkItem).initCapacity(rt.alloc, 256);
     errdefer gc_mark_stack.deinit(rt.alloc);
+
     var vm: VM = .{
         .runtime = rt,
         .sched = sched,
@@ -230,12 +292,16 @@ pub fn init(runtime: revo.Runtime) !VM {
         .gc_mark_stack = gc_mark_stack,
         .gc_finalizers = std.AutoHashMap(mem.TableID, Data).init(rt.alloc),
     };
-    try revo.async_backend_impl.init(&vm.runtime.async_backend);
-    errdefer revo.async_backend_impl.deinit(&vm.runtime.async_backend);
+    if (revo.can_async) {
+        if (makeWakeupPipe()) |fds| {
+            vm.sched.wakeup_r = fds[0];
+            vm.sched.wakeup_w = fds[1];
+        }
+    }
 
     try vm.package_path.appendSlice(rt.alloc, &.{ "./?", "./lib/?", "/usr/local/lib/revo/?" });
 
-    try vm.sched.fibers.append(rt.alloc, .{
+    _ = try vm.sched.appendFiber(.{
         .id = 0,
         .pc = 0,
         .program = &.{},
@@ -274,7 +340,13 @@ pub fn deinit(self: *VM) void {
     self.clearProgramDebugInfo();
     self.clearPanicMessage();
     self.clearRuntimeMessage();
-    revo.async_backend_impl.deinit(&self.runtime.async_backend);
+    if (revo.can_async) {
+        if (self.sched.wakeup_r >= 0) _ = std.c.close(self.sched.wakeup_r);
+        if (self.sched.wakeup_w >= 0) _ = std.c.close(self.sched.wakeup_w);
+        self.sched.wakeup_r = -1;
+        self.sched.wakeup_w = -1;
+    }
+
     self.constants.deinit(self.runtime.alloc);
     self.globals.deinit();
     self.const_globals.deinit();
@@ -331,6 +403,7 @@ pub fn deinit(self: *VM) void {
     self.runtime.deinitDiagArena();
 }
 
+/// func runs when the table gets swept
 pub fn registerFinalizer(self: *VM, table_id: mem.TableID, func: Data) !void {
     try self.gc_finalizers.put(table_id, func);
 }
@@ -834,6 +907,7 @@ pub inline fn currentClosureIn(self: *VM, fiber: *Fiber) !?*root.functions.Closu
     };
 }
 
+/// open upvalues stay sorted by slot, closers pop from the end
 pub inline fn captureUpvalue(self: *VM, slot_index: usize) !root.functions.UpvalueID {
     const fiber = self.currentFiber();
     const open = &fiber.open_upvalues;
@@ -898,12 +972,20 @@ pub inline fn storeUpvalueData(self: *VM, upvalue_id: root.functions.UpvalueID, 
 pub inline fn storeUpvalueDataIn(self: *VM, fiber: *Fiber, upvalue_id: root.functions.UpvalueID, value: Data) !void {
     const upvalue = try self.functions.getUpvalue(upvalue_id);
     if (upvalue.open_index) |slot_index| {
-        fiber.registers[slot_index] = value;
+        // open upvalues live in the owner's registers
+        // ; shared closures can run cross-fiber, so that need not be us
+        const owner_regs = if (upvalue.owner_fiber_id) |fid|
+            self.sched.fibers.items[fid].registers
+        else
+            fiber.registers;
+        std.debug.assert(slot_index < owner_regs.len);
+        owner_regs[slot_index] = value;
     } else {
         upvalue.closed = value;
     }
 }
 
+/// snapshot upvalues per child, so loopscope reuse never leaks into an offspring
 fn detachClosureForFiber(self: *VM, closure_id: mem.FunctionID) !mem.FunctionID {
     const func = try self.functions.get(closure_id);
     const closure = switch (func.*) {
@@ -950,7 +1032,7 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
     // . any cached fiber pointer dangles after
     //   that, so track the fiber by id
     //     and re-fetch after each nested run
-    const fiber_id = self.sched.current_fiber;
+    const fiber_id = self.sched.currentID();
     var fiber = self.currentFiber();
     const initial_frame_depth = fiber.frames.items.len;
     const initial_pc = fiber.pc;
@@ -968,28 +1050,9 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
     const callee_slot = fiber.registers_len - 1;
 
     // on error.Parked the fiber suspends mid-callee: frames, registers, and
-    // pc must survive so the io waiter can resume the callee where it
-    // stopped. every other error unwinds back to the caller state.
-    const unwind = struct {
-        fn go(
-            v: *VM,
-            f: *Fiber,
-            slot_len: usize,
-            pc: usize,
-            frame_depth: usize,
-        ) void {
-            f.registers_len = slot_len;
-            f.pc = pc;
-            v.closeUpvalues(slot_len) catch {};
-            while (f.frames.items.len > frame_depth) {
-                _ = f.frames.pop();
-            }
-            f.top_base = if (f.frames.items.len == 0)
-                0
-            else
-                f.frames.items[f.frames.items.len - 1].base;
-        }
-    }.go;
+    // pc must survive so the io waiter can resume where it stopped
+    // . every other error unwinds back to the caller state
+    const unwind = unwindToCaller;
 
     // note: callee already rooted at callee_slot above
     // callee_slot points to where we stored it; args start at callee_slot + 1
@@ -1014,7 +1077,7 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
     const argc: opcode.Register = @intCast(argc_usize);
 
     self.callRegister(.{ .op = .call, .a = call_reg, .b = argc, .c = call_reg }) catch |e| {
-        fiber = &self.sched.fibers.items[fiber_id];
+        fiber = self.sched.fibers.items[fiber_id];
         if (e == error.Parked) {
             self.rerouteParked(fiber, base, caller_frame_depth, result_reg);
             return e;
@@ -1023,10 +1086,10 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
         return e;
     };
 
-    fiber = &self.sched.fibers.items[fiber_id];
+    fiber = self.sched.fibers.items[fiber_id];
     if (fiber.frames.items.len > caller_frame_depth) {
         const exec_result = vm_exec.execFiberUntilDepth(self, caller_frame_depth) catch |e| {
-            fiber = &self.sched.fibers.items[fiber_id];
+            fiber = self.sched.fibers.items[fiber_id];
             if (e == error.Parked) {
                 self.rerouteParked(fiber, base, caller_frame_depth, result_reg);
                 return e;
@@ -1037,10 +1100,25 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
         if (exec_result) |_| return error.Panic;
     }
 
-    fiber = &self.sched.fibers.items[fiber_id];
+    fiber = self.sched.fibers.items[fiber_id];
     const result = fiber.registers[callee_slot];
     fiber.registers_len = callee_slot;
     return result;
+}
+
+/// put caller regs, pc, and frames back after a failed nested call
+/// , parked fibers keep their state, everything else unwinds here
+fn unwindToCaller(v: *VM, f: *Fiber, slot_len: usize, pc: usize, frame_depth: usize) void {
+    f.registers_len = slot_len;
+    f.pc = pc;
+    v.closeUpvalues(slot_len) catch {};
+    while (f.frames.items.len > frame_depth) {
+        _ = f.frames.pop();
+    }
+    f.top_base = if (f.frames.items.len == 0)
+        0
+    else
+        f.frames.items[f.frames.items.len - 1].base;
 }
 
 /// reroute a parked callee's wake-up or ret to a dispatch result register.
@@ -1458,6 +1536,7 @@ inline fn fillMissingSlots(regs: []Data, base: usize, total_arity: u8, register_
     );
 }
 
+/// closures push a frame and return, hosts run inline and may park
 pub fn callRegister(
     self: *VM,
     instr: Instruction,
@@ -1649,8 +1728,7 @@ pub fn callRegister(
         else => {
             const got = switch (callee.tag()) {
                 .number => "number",
-                .atom => if (callee.bits == revo.Data.new.core(.missing).bits //
-                or callee.bits == revo.Data.new.core(.missing).bits)
+                .atom => if (callee.bits == revo.Data.new.core(.missing).bits)
                     "<non-existing function>"
                 else
                     "atom",
@@ -1672,6 +1750,7 @@ pub fn callRegister(
     );
 }
 
+/// pop a frame into the caller slot; an empty fiber finishes instead
 pub fn returnRegister(
     self: *VM,
     instr: Instruction,
@@ -1692,7 +1771,7 @@ pub fn returnRegister(
     fiber.program = frame.program;
 
     const returning_to_exit =
-        self.sched.current_fiber == 0 and
+        self.sched.currentID() == 0 and
         fiber.frames.items.len <= 1;
 
     if (returning_to_exit) if (self.resultParts(result)) |parts| {
@@ -1706,7 +1785,7 @@ pub fn returnRegister(
     if (fiber.frames.items.len == 0 or
         fiber.pc >= fiber.program.len)
     {
-        const finished_id = self.sched.current_fiber;
+        const finished_id = self.sched.currentID();
         // close the dying fiber's open upvalues before its register buffer is
         // dropped or its id reused: closures held by other fibers read the
         // final value from `closed`, never from a dead fiber's slots
@@ -1730,6 +1809,114 @@ pub fn returnRegister(
     fiber.registers[result_slot] = result;
 }
 
+/// what a spawn runs: a function id plus the table itself when spawned
+/// through `__call`
+const SpawnTarget = struct { func_id: mem.FunctionID, self_arg: ?Data };
+
+/// resolve a spawn callee to a function
+/// , `__call` tables spawn like direct calls do, with the table passed first
+fn resolveSpawnTarget(self: *VM, callee: Data) EvalError!SpawnTarget {
+    if (callee.asFunction()) |fid| return .{ .func_id = fid, .self_arg = null };
+    if (callee.asTable()) |_| {
+        const mm = try self.resolveField(callee, Data.new.atom(revo.core_atoms.atomId(.__call)), null) orelse {
+            try self.setRuntimeMessage("spawn expects function!");
+            return error.NotAFunction;
+        };
+        const func_id = mm.value.asFunction() orelse {
+            try self.setRuntimeMessage("spawn expects function!");
+            return error.NotAFunction;
+        };
+        return .{ .func_id = func_id, .self_arg = callee };
+    }
+    try self.setRuntimeMessage("spawn expects function!");
+    return error.NotAFunction;
+}
+
+/// reuse a dead fiber id or allocate a fresh one, reset for `program` with
+/// room for `reg_need` registers
+/// , cache the parents registers first, the append below may realloc
+fn reuseSpawnFiber(self: *VM, parent: *Fiber, program: []const Instruction, reg_need: usize) !FiberID {
+    const child_id: FiberID = if (self.sched.free_fibers.pop()) |fid| blk: {
+        const f = self.sched.fibers.items[fid];
+        f.pc = 0;
+        f.program = program;
+        f.debug_info_id = parent.debug_info_id;
+        f.running = false;
+        f.state = .ready;
+        f.in_runq = false;
+        f.wait = .none;
+        f.parked_result_slot = null;
+        f.err_atom = null;
+        f.pending_host = null;
+        f.registers_len = 0;
+        f.frames.items.len = 0;
+        f.top_base = 0;
+        f.open_upvalues.items.len = 0;
+        f.waiters.items.len = 0;
+        break :blk fid;
+    } else if (self.sched.free_slots.pop()) |fid| blk: {
+        // buffers were freed at death; re-init the slot
+        const child = try Fiber.init(self.runtime.alloc, fid, program, reg_need);
+        self.sched.fibers.items[fid].* = child;
+        break :blk fid;
+    } else blk: {
+        const fid = self.sched.fibers.items.len;
+        const child = try Fiber.init(self.runtime.alloc, fid, program, reg_need);
+        break :blk try self.sched.appendFiber(child);
+    };
+
+    const child = self.sched.fibers.items[child_id];
+    if (reg_need > child.registers.len)
+        child.registers = try self.runtime.alloc.realloc(child.registers, reg_need);
+    child.registers_len = reg_need;
+    @memset(child.registers[0..reg_need], revo.Data.new.core(.missing));
+    return child_id;
+}
+
+/// copy spawn args from the parent into the child at `dst_base`
+/// , `self_arg` goes first when present
+fn copySpawnArgs(
+    parent_regs: []const Data,
+    parent_len: usize,
+    child: *Fiber,
+    dst_base: usize,
+    base: usize,
+    callee_reg: opcode.Register,
+    eff_argc: usize,
+    self_arg: ?Data,
+) void {
+    const self_arg_count: usize = @intFromBool(self_arg != null);
+    for (0..eff_argc) |idx| {
+        if (idx == 0 and self_arg != null) {
+            child.registers[dst_base + idx] = self_arg.?;
+            continue;
+        }
+        const src_reg = callee_reg + 1 + @as(opcode.Register, @intCast(idx - self_arg_count));
+        const src_slot = base + src_reg;
+        child.registers[dst_base + idx] = if (src_slot < parent_len)
+            parent_regs[src_slot]
+        else
+            revo.Data.new.core(.missing);
+    }
+}
+
+/// publish the `{:fiber, id}` handle into the parents result register
+fn publishSpawnHandle(self: *VM, base: usize, result_reg: opcode.Register, child_id: FiberID) !void {
+    try self.sched.enqueueRunnable(child_id);
+    const result_slot = base + result_reg;
+    const cur = self.currentFiber();
+    if (result_slot >= cur.registers_len) {
+        try ensureRegCapacity(cur, self.runtime.alloc, result_slot + 1);
+        cur.registers_len = result_slot + 1;
+    }
+    self.noteGCPressure(@sizeOf(Data) * 2 + 64);
+    cur.registers[result_slot] = try self.tableOfSlice(&[_]Data{
+        Data.new.atom(revo.core_atoms.atomId(.fiber)),
+        Data.new.num(@as(i64, @intCast(child_id))),
+    });
+}
+
+/// start a fiber and hand back its handle; __call tables pass self first
 pub inline fn spawnRegister(
     self: *VM,
     instr: Instruction,
@@ -1738,27 +1925,25 @@ pub inline fn spawnRegister(
     const argc: usize = instr.b;
     const fiber = self.currentFiber();
     const callee = regRead(fiber.registers, base, instr.a);
-    const closure_id = callee.asFunction() orelse {
-        try self.setRuntimeMessage("spawn expects function!");
-        return error.NotAFunction;
-    };
 
-    const func = try self.functionFast(closure_id);
+    const target = try resolveSpawnTarget(self, callee);
+    const func_id = target.func_id;
+    const self_arg = target.self_arg;
+    const eff_argc = argc + @intFromBool(self_arg != null);
+
+    const func = try self.functionFast(func_id);
     const closure = switch (func.*) {
         .closure => |f| f,
-        else => {
-            try self.setRuntimeMessage("spawn expects closure!");
-            return error.NotAFunction;
-        },
+        .host, .c_function => return try self.spawnHostRegister(instr, base, func_id, argc, self_arg),
     };
 
     if (closure.arity != root.functions.VARIADIC and
-        (argc < closure.arity or argc > closure.total_arity))
+        (eff_argc < closure.arity or eff_argc > closure.total_arity))
     {
         @branchHint(.unlikely);
         try self.setRuntimeMessageFmt(
             "fiber closure `{s}` wants between {d} and {d} args, got {d}",
-            .{ closure.name, closure.arity, closure.total_arity, argc },
+            .{ closure.name, closure.arity, closure.total_arity, eff_argc },
         );
         return error.WrongArity;
     }
@@ -1772,53 +1957,12 @@ pub inline fn spawnRegister(
     const parent_regs = fiber.registers;
     const parent_regs_len = fiber.registers_len;
 
-    const child_id: FiberID = if (self.sched.free_fibers.pop()) |fid| blk: {
-        const f = &self.sched.fibers.items[fid];
-        f.pc = 0;
-        f.program = child_program;
-        f.debug_info_id = fiber.debug_info_id;
-        f.running = false;
-        f.state = .ready;
-        f.in_runq = false;
-        f.wait = .none;
-        f.parked_result_slot = null;
-        f.err_atom = null;
-        f.registers_len = 0;
-        f.frames.items.len = 0;
-        f.top_base = 0;
-        f.open_upvalues.items.len = 0;
-        f.waiters.items.len = 0;
-        break :blk fid;
-    } else if (self.sched.free_slots.pop()) |fid| blk: {
-        // buffers were freed at death; re-init the slot
-        const child = try Fiber.init(self.runtime.alloc, fid, child_program, closure.register_count);
-        self.sched.fibers.items[fid] = child;
-        break :blk fid;
-    } else blk: {
-        const fid = self.sched.fibers.items.len;
-        var child = try Fiber.init(self.runtime.alloc, fid, child_program, closure.register_count);
-        errdefer child.deinit(self.runtime.alloc);
-        try self.sched.fibers.append(self.runtime.alloc, child);
-        break :blk fid;
-    };
+    const need_regs = @max(closure.register_count, eff_argc);
+    const child_id = try self.reuseSpawnFiber(fiber, child_program, need_regs);
+    const child = self.sched.fibers.items[child_id];
+    copySpawnArgs(parent_regs, parent_regs_len, child, 0, base, instr.a, eff_argc, self_arg);
 
-    const child = &self.sched.fibers.items[child_id];
-
-    if (closure.register_count > child.registers.len)
-        child.registers = try self.runtime.alloc.realloc(child.registers, closure.register_count);
-    child.registers_len = closure.register_count;
-    @memset(child.registers[0..closure.register_count], revo.Data.new.core(.missing));
-
-    for (0..argc) |idx| {
-        const src_reg = instr.a + 1 + @as(opcode.Register, @intCast(idx));
-        const src_slot = base + src_reg;
-        child.registers[idx] = if (src_slot < parent_regs_len)
-            parent_regs[src_slot]
-        else
-            revo.Data.new.core(.missing);
-    }
-
-    const child_closure_id = try self.detachClosureForFiber(closure_id);
+    const child_closure_id = try self.detachClosureForFiber(func_id);
     try child.frames.append(self.runtime.alloc, .{
         .return_addr = @intCast(child.program.len),
         .base = 0,
@@ -1831,14 +1975,38 @@ pub inline fn spawnRegister(
     child.top_base = 0;
     child.pc = closure.addr;
 
-    try self.sched.enqueueRunnable(child_id);
-    const result_slot = base + instr.c;
-    const cur = self.currentFiber();
-    if (result_slot >= cur.registers_len) {
-        try ensureRegCapacity(cur, self.runtime.alloc, result_slot + 1);
-        cur.registers_len = result_slot + 1;
-    }
-    cur.registers[result_slot] = Data.new.num(@as(i64, @intCast(child_id)));
+    try self.publishSpawnHandle(base, instr.c, child_id);
+}
+
+/// run a host fn on a fresh fiber through pending_host
+fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.FunctionID, argc: usize, self_arg: ?Data) EvalError!void {
+    const fiber = self.currentFiber();
+    const parent_regs = fiber.registers;
+    const parent_regs_len = fiber.registers_len;
+    const eff_argc = argc + @intFromBool(self_arg != null);
+    const need = eff_argc + 1;
+
+    const child_id = try self.reuseSpawnFiber(fiber, &.{}, need);
+    const child = self.sched.fibers.items[child_id];
+    child.registers[0] = Data.new.function(func_id);
+    copySpawnArgs(parent_regs, parent_regs_len, child, 1, base, instr.a, eff_argc, self_arg);
+
+    // dummy root frame so park paths have a frame to hang the result slot on
+    // ; the entry prologue runs the call, this frame never dispatches
+    try child.frames.append(self.runtime.alloc, .{
+        .return_addr = 0,
+        .base = 0,
+        .program = &.{},
+        .call_site_pc = null,
+        .result_register = 0,
+        .register_count = @min(need, std.math.maxInt(root.functions.RegisterCount)),
+        .closure_id = func_id,
+    });
+    child.top_base = 0;
+    child.pc = 0;
+    child.pending_host = .{ .run = .{ .func = func_id, .argc = @intCast(eff_argc) } };
+
+    try self.publishSpawnHandle(base, instr.c, child_id);
 }
 
 // gc

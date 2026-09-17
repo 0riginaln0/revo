@@ -164,6 +164,37 @@ tuples and structs are gone now, most breaking change yet
   constructors with `is_ok`/`is_err`/`ok_value` checks; lookups report
   presence through the return value, `len`/`alen` split made explicit
 
+- optional fiber thread pool: `revo --threads=N`
+
+    ```ruby
+    fn w() do
+      system{"sleep", "1"}
+    end
+
+    spawn w()
+    spawn w()
+    # 2s with no --threads set
+    # 1s with at least --threads=2
+    ```
+
+  - ready fibers dispatch on N-1 workers sharing one heap under a gil;
+    each fiber still runs cooperatively (to park/yield/halt), workers just
+    pick up the next runnable one at fiber boundaries
+
+  - `spawn`/`join`/`yield`/`sleep`/`chan` and sockets behave the same
+
+  - share mutable state through tables
+    (spawned closures still snapshot upvalues, so locals stay per-fiber by design)
+
+  - blocking `file.read`, `file.write`, and `system` drop the GIL, so other
+    fibers run while one blocks
+    (four `sleep 1` subprocesses finish in 1s under `--threads=4`, 4s solo)
+
+- `spawn` takes a call now, and returns a `{:fiber, id}` handle
+  `spawn f(x)` instead of `spawn fn() ... end`; `join` takes the handle,
+  bare numbers no longer join. handles destructure with `match`.
+  any callable goes, including host builtins and `__call` tables
+
 ### Removed
 
 - loop-accumulator promotion pass
@@ -237,7 +268,7 @@ tuples and structs are gone now, most breaking change yet
   `fn id<T>(v: T) -> T`, `f(a: num, b?: num)` in hover and signature help
 - `revo -e` no longer runs piped stdin as a program first, stdin stays available
   for `input()`, so `echo hi | revo -e 'input()?'` runs the inline code
-- `join` nested inside a host call (eg `:map(fn(h) join h)`) waits by pumping
+- `join` nested inside a host call (eg `:map(fn(h) join(h))`) waits by pumping
   the scheduler instead of falling through with the fiber handle
 - `spawn` snapshots upvalues instead of sharing them, so fibers spawned in a
   `for` loop each see their own iteration value instead of all seeing the last

@@ -200,7 +200,6 @@ const std = @import("std");
 const json = std.json;
 
 const revo = @import("../root.zig");
-const mem = revo.memory;
 const Data = revo.Data;
 const VM = revo.VM;
 const root = @import("root.zig");

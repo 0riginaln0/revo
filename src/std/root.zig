@@ -1,7 +1,12 @@
 //!
-//! welcome to std's root
+//! welcome to std root
 //!
-//! this is the public interface and the collection of top-level globals
+//! this is the one public interface and the collection of top-level globals
+//!
+//! ~ host functions are plain zig fns with a `(vm, typed-args...)` signature
+//!   , `def` derives their arity and `TypeSpec`s at comptime
+//!   , `impls` collects them into `api.Impl` arrays
+//!   , and the dispatcher in `VM.zig` checks arity and types before calling
 //!
 
 const builtin = @import("builtin");
@@ -83,6 +88,7 @@ pub const root_impls: []const api.Impl = impls(Impl).val ++ &[_]api.Impl{
     .{ .name = "chan", .f = defineVariadic(&[_]TypeSpec{}, chan_new) },
     .{ .name = "send", .f = define(&[_]TypeSpec{ .table, .any }, chan_send) },
     .{ .name = "recv", .f = define(&[_]TypeSpec{.table}, chan_recv) },
+    .{ .name = "join", .f = define(&[_]TypeSpec{.table}, join) },
     .{ .name = "assert", .f = define(&[_]TypeSpec{.any}, assert_) },
     .{ .name = "assert_eq", .f = define(&[_]TypeSpec{ .any, .any }, assert_eq) },
     .{ .name = "panic", .f = defineVariadic(&[_]TypeSpec{}, panic_) },
@@ -220,6 +226,7 @@ pub fn unwrapArgs(comptime specs: []const TypeSpec, args: []const Data) Args(spe
 
 pub const ResultTag = enum { ok, err };
 
+/// the typed parameter vocab; `T` maps zig types onto these
 pub const TypeSpec = union(enum) {
     number,
     string,
@@ -628,6 +635,63 @@ pub fn chan_recv(args: []const Data, vm: *VM) !HostResult {
     return .parked();
 }
 
+/// validate `args[0]` as a `:fiber, id` table and extract the fiber id
+/// , well-formed but unknown ids report separately so the message
+/// doesn't blame the shape
+const FidParse = union(enum) { ok: usize, bad_shape, bad_id };
+
+// TODO: this must return a real zig error union
+fn fiberIdOf(args: []const Data, vm: *VM) FidParse {
+    const table_id = args[0].asTable() orelse return .bad_shape;
+    const t = vm.tables.get(table_id) catch return .bad_shape;
+    if (t.array.items.len < 2) return .bad_shape;
+
+    const fiber_atom = revo.core_atoms.fiber.atomId();
+    if (t.array.items[0].asAtom() != fiber_atom) return .bad_shape;
+
+    const fid_num = t.array.items[1].asNum() orelse return .bad_shape;
+    const fid_int = revo.memory.numToI64(fid_num) orelse return .bad_id;
+    if (fid_int < 0) return .bad_id;
+
+    const fid: usize = @intCast(fid_int);
+    if (fid >= vm.sched.fibers.items.len) return .bad_id;
+
+    return .{ .ok = fid };
+}
+
+/// > join(handle: table) -> any
+/// blocks until the fiber completes and returns its result
+pub fn join(args: []const Data, vm: *VM) !HostResult {
+    const target_id: usize = switch (fiberIdOf(args, vm)) {
+        .ok => |id| id,
+        .bad_shape => return .errType(0, "fiber handle", typeof(args[0], vm)),
+        .bad_id => return .{ .err = .{ .type_error = .{
+            .arg = 0,
+            .expected = "live fiber handle",
+            .got = typeof(args[0], vm),
+        } } },
+    };
+    if (target_id == vm.sched.currentID())
+        return HostResult.errAssertionFailed("cannot join self");
+
+    const target = vm.sched.fibers.items[target_id];
+    if (target.state == .dead) return .data(target.result);
+
+    if (vm.host_call_depth > 0) {
+        if (try revo.vm.exec.pumpUntilDone(vm, target_id)) |failure| {
+            if (revo.lang.diagnostic.primarySpan(failure.report)) |span| {
+                vm.panic_span = span.span;
+            }
+            return HostResult.errAssertionFailed(failure.report.message);
+        }
+        return .data(vm.sched.fibers.items[target_id].result);
+    }
+
+    try target.waiters.append(vm.runtime.alloc, vm.sched.currentID());
+    vm.sched.parkCurrent(.{ .join = target_id });
+    return .parked();
+}
+
 /// converts value to number
 /// accepts number (passthrough) or string (parsed)
 /// errors on other types
@@ -707,6 +771,14 @@ pub fn panic_(args: []const Data, vm: *VM) !HostResult {
     return .other("panic");
 }
 
+/// abnormal `system` exit as `{:err, {:NonZeroExit, code}}`
+/// , keeps the numeric status so scripts can match on it
+fn exitStatusErr(vm: *VM, code: u8) !HostResult {
+    const tag = try vm.internAtom("NonZeroExit");
+    const detail = try vm.tableOfSlice(&[_]Data{ Data.new.atom(tag), Data.new.num(code) });
+    return HostResult.errData(vm, detail);
+}
+
 pub fn system_(tbl: []const Data, vm: *VM) !HostResult {
     const args = tbl[0].asTable().?;
     const table = try vm.tables.get(args);
@@ -739,14 +811,28 @@ pub fn system_(tbl: []const Data, vm: *VM) !HostResult {
     multi_reader.init(vm.runtime.alloc, vm.runtime.io, mr_buf.toStreams(), &.{ proc.stdout.?, proc.stderr.? });
     defer multi_reader.deinit();
 
+    const depth = revo.vm.exec.gilDropForBlocking(vm);
+    errdefer revo.vm.exec.gilTakeAfterBlocking(vm, depth);
+
     try multi_reader.fillRemaining(.none);
 
-    _ = try proc.wait(vm.runtime.io);
+    const term = try proc.wait(vm.runtime.io);
+
+    revo.vm.exec.gilTakeAfterBlocking(vm, depth);
 
     const so = try vm.adoptDataString(try multi_reader.toOwnedSlice(0));
     const se = try vm.adoptDataString(try multi_reader.toOwnedSlice(1));
-    const res = try vm.tableOfSlice(&[_]Data{ so, se });
-    return .Ok(vm, res);
+    switch (term) {
+        .exited => |code| if (code == 0) {
+            const res = try vm.tableOfSlice(&[_]Data{ so, se });
+            return .Ok(vm, res);
+        } else {
+            return exitStatusErr(vm, code);
+        },
+        // no numeric status to report here, the atoms say what happened
+        .signal, .stopped => return HostResult.Err(vm, "Signaled"),
+        .unknown => return HostResult.Err(vm, "UnknownExit"),
+    }
 }
 
 // for some reason leftover buffer persists between input() calls so multiline os reads
@@ -883,6 +969,7 @@ pub fn setenv_(args: []const Data, vm: *VM) !HostResult {
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const libc_setenv = setenv;
 
+/// resolve + cache + run; `.d.rv` is compile-time only, `.so` loads native
 pub fn import(args: []const Data, vm: *VM) !HostResult {
     if (args.len != 1) return .errArity(args.len, 1);
 
@@ -1005,6 +1092,8 @@ pub const HostErrPayload = union(enum) {
     other: []const u8,
 };
 
+/// the return convention: `.ok` carries a value, `.err` carries a shape
+/// , `parked` suspends the fiber instead of returning
 pub const HostResult = union(enum) {
     ok: Data,
     err: HostErrPayload,

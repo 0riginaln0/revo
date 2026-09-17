@@ -584,7 +584,7 @@ test "repl parked metamethod resumes with correct result" {
 
     try std.testing.expect(try env.session.step(&env.out.writer,
         \\ const ch = chan()
-        \\ spawn fn() send(ch, 42)
+        \\ spawn (fn() send(ch, 42))()
         \\ const t = set_meta({}, { __index = fn(_self, k) recv(ch) })
         \\ t.foo
     ));
@@ -605,16 +605,37 @@ test "repl closing a socket wakes a parked recv with SocketClosed" {
         \\ const port = srv.port
         \\ const client = (net.connect("127.0.0.1", port))?
         \\ const results = chan()
-        \\ spawn fn() do
+        \\ spawn (fn() do
         \\   const r = client:recv({ mode = :read_some, max_bytes = 1024 })
         \\   send(results, r)
-        \\ end
+        \\ end)()
         \\ sleep(5)
         \\ client:close()
         \\ recv(results)
     ));
 
     try std.testing.expect(std.mem.find(u8, env.out.written(), ":SocketClosed") != null);
+}
+
+test "repl spawned host connect completes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env = try initTestEnv(alloc);
+
+    try std.testing.expect(try env.session.step(&env.out.writer,
+        \\ const srv = (net.listen(0))?
+        \\ const port = srv.port
+        \\ const h = spawn net.connect("127.0.0.1", port)
+        \\ const conn = srv:accept()?
+        \\ const c = (join(h)):unwrap()
+        \\ c:send("yo\n")?
+        \\ conn:recv({ mode = :read_line })?
+        \\ conn:close()?
+        \\ c:close()?
+    ));
+
+    try std.testing.expect(std.mem.find(u8, env.out.written(), "yo") != null);
 }
 
 test "repl prints results" {

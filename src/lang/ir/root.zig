@@ -169,7 +169,6 @@ pub fn lowerInst(alloc: std.mem.Allocator, out: *std.ArrayList(Instruction), ins
         },
         .call, .spawn => bc = .{ .op = op, .a = r, .b = @intCast(bx), .c = r },
         .call_field => bc = .{ .op = op, .a = r, .b = @intCast(bx), .c = r },
-        .join => bc = .{ .op = op, .a = r },
         .yield => bc = .{ .op = op },
         .move => {
             const source_reg = valueReg(inst.operands[0]);

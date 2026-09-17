@@ -78,6 +78,7 @@ pub const core_atoms = enum(usize) {
     cur,
     count,
     loop,
+    fiber,
 
     pub const lastFalse = @intFromEnum(@This().false);
 

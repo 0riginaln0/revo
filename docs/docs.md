@@ -251,10 +251,10 @@ the fundamental types are:
     ```revo
     fn make_counter() do
       let x = 0
-      const inc = fn()
-        x = x + 1
+      return fn() do
+        x += 1
         x
-      inc
+      end
     end
 
     const counter = make_counter()
@@ -321,7 +321,7 @@ the fundamental types are:
     ```
 
   found in the [std docs](./std.md#string)
-- tables (array part)
+- tables (array part/tuple)
   sequences with 0-based indexing, useful for error handling and
   storing data you know the shape of.
 
@@ -332,8 +332,8 @@ the fundamental types are:
     # destructuring
     const {x, y} = {10, 20}
 
-    # functions can return multiple values cleanly
-    const vector_mul = fn(a, b, factor)
+    # functions can return multiple values
+    fn vector_mul(a, b, factor)
         {a * factor, b * factor}
 
     const {vx, vy} = vector_mul(4, 6, 2)
@@ -1197,8 +1197,11 @@ revo.eval("print(1 + 2)") # 3
 ## fibers and channels
 
 fibers are cooperative (not preemptive). the main fiber runs first and the run queue is FIFO.
-`spawn` takes a function call expression and runs it in a new fiber. `join` blocks until it's done
-and returns the result:
+
+`spawn` takes a function call expression and runs it in a new fiber
+, returning a `{:fiber, id}` handle
+
+`join` is a builtin that blocks until it's done and returns the result
 
 ```revo
 let add = fn(a, b) a + b
@@ -1212,7 +1215,8 @@ is ready. buffered channels block only when full:
 ```revo
 # unbuffered
 const ch = chan(0)
-const s = spawn(fn() send(ch, 42))
+const sender = fn() send(ch, 42)
+const s = spawn sender()
 recv(ch) # 42
 join(s)
 
@@ -1314,10 +1318,18 @@ other fibers while the kernel finishes the handshake.
 
 `os` - system access (read from stdin, etc.)
 
-`system` - run a subprocess and return its output:
+`system` - run a subprocess and capture its output:
 
 ```revo
-system({"echo", "hello"}) # ("hello\n", "")
+system({"echo", "hello"}) # {:ok, {"hello\n", ""}}
+```
+
+exit 0 gives `{:ok, {stdout, stderr}}`; anything else is an error.
+non-zero exit carries its code, signal death reports `:Signaled`:
+
+```revo
+system({"bash", "-c", "exit 3"}) # {:err, {:NonZeroExit, 3}}
+system({"bash", "-c", "kill -TERM $$"}) # {:err, :Signaled}
 ```
 
 strings interpolate expressions with `#{{}}`. normal interpolation uses display formatting;

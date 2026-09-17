@@ -24,3 +24,4 @@ pub declare revo.build = fn(code: string) -> !string
 #* version of your revo installation, like "revo v1.2.3" *#
 pub declare revo.version = fn() -> string
 
+pub declare revo.threads = fn() -> num

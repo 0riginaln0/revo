@@ -1,8 +1,15 @@
+//!
+//! dispatcher: runq, blocking waits, and the bytecode loop
+//!
+//! ~ `runReport` is the one entry point, `waitForActivity` is the idle step
+//! ~ workers steal whole fibers, the gil guards the heap
+//!
+
 pub fn runReport(self: *VM) !@TypeOf(self.*).EvalResult {
     self.clearPanicMessage();
     self.clearRuntimeMessage();
 
-    const fid = self.sched.current_fiber;
+    const fid = self.sched.currentID();
     const fiber = self.currentFiber();
     if (fiber.frames.items.len == 0) {
         try self.pushRootFrame(fiber, 16);
@@ -13,56 +20,185 @@ pub fn runReport(self: *VM) !@TypeOf(self.*).EvalResult {
     self.sched.setFiberState(fid, .ready);
     try self.sched.enqueueRunnable(fid);
 
-    while (true) {
-        if (try runReadyFibers(self)) |failure| {
-            return .{ .err = failure };
-        }
+    self.run_depth += 1;
+    defer self.run_depth -= 1;
 
-        // wait errors become eval failures here so the main loop keeps a
-        // narrow error set for its compile-time callers
-        const live = waitForActivity(self) catch |e| return .{ .err = self.evalFailure(e) };
-        if (!live) break;
+    const was_exempt = shutdown_exempt;
+    if (self.run_depth > 1) shutdown_exempt = true;
+    defer shutdown_exempt = was_exempt;
+
+    // nested report with a live pool
+    // ; ask workers to drain so the import runs near-solo
+    // ; the outer loop rebuilds the pool after
+    if (self.run_depth > 1 and self.sched.workers.items.len > 0) {
+        std.debug.assert(gil_depth > 0);
+        self.sched.requestShutdown();
     }
+
+    if (self.run_depth == 1 and revo.can_async and self.sched.thread_count > 1) {
+        while (true) {
+            self.mt_failed.store(false, .release);
+            self.mt_failure = null;
+            self.sched.shutdown.store(false, .release);
+            spawnWorkers(self) catch {
+                if (try runLoop(self)) |failure| return .{ .err = failure };
+                return .ok;
+            };
+            const r = runLoop(self);
+            self.sched.requestShutdown();
+            joinWorkers(self);
+            const failure = r catch |e| return e;
+            if (failure) |f| return .{ .err = f };
+            if (self.mt_failure) |f| return .{ .err = f };
+            if (self.mt_failed.load(.acquire)) return error.OutOfMemory;
+            if (schedHasLive(self)) continue;
+            return .ok;
+        }
+    }
+
+    if (try runLoop(self)) |failure| return .{ .err = failure };
+    if (self.mt_failure) |f| return .{ .err = f };
+    if (self.mt_failed.load(.acquire)) return error.OutOfMemory;
     return .ok;
 }
 
-/// one idle step of the main loop, shared by runReport and nested blocking
-/// waits: wake due sleepers, then block briefly on io/sleep/channel
-/// activity. false when nothing is left to wait for.
+/// run every ready fiber a quantum, then idle till something is runnable
+/// , ends when the scheduler is idle or a fiber fails
+fn runLoop(self: *VM) !?VM.EvalFailure {
+    while (true) {
+        if (!shutdown_exempt and (self.mt_failed.load(.acquire) or self.sched.shutdown.load(.acquire))) return null;
+        if (try runReadyFibers(self)) |failure| return failure;
+        // wait errors become eval failures here so the main loop keeps a
+        // narrow error set for its compile-time callers
+        const live = waitForActivity(self) catch |e| return self.evalFailure(e);
+        if (!live) return null;
+    }
+}
+
+fn schedHasLive(self: *VM) bool {
+    return !self.sched.isIdle(self.run_depth - 1);
+}
+
+fn spawnWorkers(self: *VM) !void {
+    const n = self.sched.thread_count - 1;
+    try self.sched.workers.ensureTotalCapacity(self.runtime.alloc, self.sched.workers.items.len + n);
+    errdefer {
+        self.sched.requestShutdown();
+        joinWorkers(self);
+    }
+    for (0..n) |_| {
+        const t = try std.Thread.spawn(.{}, workerMain, .{self});
+        self.sched.workers.appendAssumeCapacity(t);
+    }
+}
+
+fn joinWorkers(self: *VM) void {
+    for (self.sched.workers.items) |t| t.join();
+    self.sched.workers.items.len = 0;
+}
+
+/// steal whole fibers till shutdown; first failure stops the pool
+/// , parks on the wakeup pipe when idle so the main thread can wake it
+fn workerMain(vm: *VM) void {
+    var spins: usize = 0;
+    while (true) {
+        if (vm.sched.takeRunnable()) |fid| {
+            spins = 0;
+            while (!gilTryLock(vm)) {
+                if (vm.sched.shutdown.load(.acquire)) {
+                    requeueAndExit(vm, fid);
+                    return;
+                }
+                std.Thread.yield() catch std.atomic.spinLoopHint();
+            }
+            if (vm.sched.shutdown.load(.acquire)) {
+                gilUnlock(vm);
+                requeueAndExit(vm, fid);
+                return;
+            }
+            defer gilUnlock(vm);
+            defer vm.sched.quantumDone();
+            vm.sched.setCurrent(fid);
+            if (vm.currentFiber().state == .dead) continue;
+            vm.sched.setFiberState(fid, .running);
+            vm.currentFiber().running = true;
+            if (execFiber(vm) catch |e| {
+                if (e == error.Parked) continue;
+                vm.mt_failure = vm.evalFailure(e);
+                vm.mt_failed.store(true, .release);
+                vm.sched.requestShutdown();
+                return;
+            }) |failure| {
+                vm.mt_failure = failure;
+                vm.mt_failed.store(true, .release);
+                vm.sched.requestShutdown();
+                return;
+            }
+            if (vm.currentFiber().state == .ready) {
+                vm.sched.enqueueRunnable(fid) catch {
+                    vm.mt_failed.store(true, .release);
+                    vm.sched.requestShutdown();
+                    return;
+                };
+            }
+        } else if (vm.sched.shutdown.load(.acquire)) {
+            return;
+        } else if (spins < 100) {
+            spins += 1;
+            std.atomic.spinLoopHint();
+        } else if (revo.can_async and vm.sched.wakeup_r >= 0) {
+            // park on the wakeup pipe; timed so a byte stolen by the main
+            // , loop's own drain still ends in exit, just 20ms later
+            var pfd = [_]std.posix.pollfd{.{
+                .fd = vm.sched.wakeup_r,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            _ = std.posix.poll(&pfd, 20) catch {};
+            revo.std_net.drainWakeup(vm);
+        } else {
+            std.Thread.yield() catch std.atomic.spinLoopHint();
+        }
+    }
+}
+
+/// give a checked-out fiber back to the runq and mark its quantum done
+/// , for when a worker sees shutdown mid-handoff
+fn requeueAndExit(vm: *VM, fid: VM.FiberID) void {
+    vm.sched.enqueueRunnable(fid) catch {
+        vm.mt_failed.store(true, .release);
+    };
+    vm.sched.quantumDone();
+}
+
+///
+/// one idle step of the main loop, shared by runReport and nested blocking waits:
+/// wake due sleepers
+/// , then block briefly on io/sleep/channel activity.
+/// false when nothing is left to wait for.
+///
+/// holds the GIL except across the blocking syscalls, so workers keep
+/// dispatching while we wait; completions still run GIL-held.
+///
 fn waitForActivity(self: *VM) VM.EvalError!bool {
+    gilLock(self);
+    defer gilUnlock(self);
     try self.sched.wakeDueSleepers(self.schedNowMonotonicNs());
 
-    const has_sleepers = self.sched.sleepers.items.len > 0;
-    const has_io_waiters = self.sched.io_waiters.items.len > 0;
-    const has_waiting = self.sched.waiting_cnt > 0;
-    const has_runnable = self.sched.ring_head != self.sched.ring_tail;
-
-    if (!has_sleepers and !has_waiting and !has_runnable) {
+    // idle means nothing outstanding beyond our own ancestral quanta
+    if (self.sched.isIdle(self.run_depth - 1)) {
         @branchHint(.unlikely);
         return false;
     }
+    const has_sleepers = self.sched.sleepers.items.len > 0;
+    const has_io_waiters = self.sched.io_waiters.items.len > 0;
+    const has_waiting = self.sched.waiting_cnt > 0;
 
-    if (has_io_waiters or (revo.has_async_backend and has_waiting)) {
+    if (has_io_waiters or (revo.can_async and has_waiting)) {
         @branchHint(.likely);
-        const timeout_ms: i32 = if (self.sched.nextSleepDelayNs(
-            self.schedNowMonotonicNs(),
-        )) |delay_ns|
-            @as(i32, @intCast(@min(
-                delay_ns / std.time.ns_per_ms,
-                @as(u64, std.math.maxInt(i32)),
-            )))
-        else if (!has_io_waiters)
-            1 // no sleepers and no io then don't block forever on the control pipe
-        else
-            -1;
+        const timeout_ms = pollTimeoutMs(self, has_io_waiters);
 
-        if (revo.has_async_backend) {
-            _ = revo.async_backend_impl.pollAll(
-                &self.runtime.async_backend,
-                self,
-                timeout_ms,
-            ) catch return error.Panic;
-        } else if (comptime !revo.is_freestanding) {
+        if (comptime !revo.is_freestanding) {
             _ = revo.std_net.pollIoWaiters(self, timeout_ms) catch
                 return error.Panic;
         }
@@ -75,34 +211,68 @@ fn waitForActivity(self: *VM) VM.EvalError!bool {
         @branchHint(.unlikely);
         const now_ns = self.schedNowMonotonicNs();
         if (self.sched.nextSleepDelayNs(now_ns)) |diff_ns| {
-            if (diff_ns > 0) std.Io.sleep(
-                self.runtime.io,
-                std.Io.Duration.fromNanoseconds(@intCast(diff_ns)),
-                .awake,
-            ) catch {};
+            if (diff_ns > 0) {
+                const depth = gilDropForBlocking(self);
+                if (revo.can_async and self.sched.wakeup_r >= 0) {
+                    // poll the wakeup pipe instead of sleeping blind
+                    // ; a newly parked shorter sleeper wakes us early
+                    var pfd = [_]std.posix.pollfd{.{
+                        .fd = self.sched.wakeup_r,
+                        .events = std.posix.POLL.IN,
+                        .revents = 0,
+                    }};
+                    const timeout_ms: i32 = @intCast(@min(
+                        diff_ns / std.time.ns_per_ms,
+                        std.math.maxInt(i32),
+                    ));
+                    _ = std.posix.poll(&pfd, timeout_ms) catch {};
+                    revo.std_net.drainWakeup(self);
+                } else {
+                    std.Io.sleep(
+                        self.runtime.io,
+                        std.Io.Duration.fromNanoseconds(@intCast(diff_ns)),
+                        .awake,
+                    ) catch {};
+                }
+                gilTakeAfterBlocking(self, depth);
+            }
         }
         try self.sched.wakeDueSleepers(self.schedNowMonotonicNs());
     } else if (has_waiting) {
         // channel waiters without io backend, so yield to avoid busy-wait
+        const depth = gilDropForBlocking(self);
         std.Io.sleep(
             self.runtime.io,
             std.Io.Duration.fromNanoseconds(std.time.ns_per_ms),
             .awake,
         ) catch {};
+        gilTakeAfterBlocking(self, depth);
     }
     return true;
+}
+
+/// poll timeout for the io-wait branch: next timer delay when armed
+/// , else infinite only when an io waiter can wake us
+/// , with no io waiters or no wakeup pipe on multithread, poll briefly
+/// , so newly queued work gets seen fast
+fn pollTimeoutMs(self: *VM, has_io_waiters: bool) i32 {
+    if (self.sched.nextSleepDelayNs(self.schedNowMonotonicNs())) |delay_ns|
+        return @intCast(@min(delay_ns / std.time.ns_per_ms, std.math.maxInt(i32)));
+    if (!has_io_waiters) return 1;
+    if (self.sched.thread_count > 1 and self.sched.wakeup_w < 0) return 1;
+    return -1;
 }
 
 /// drive other fibers inline until target_id finishes
 /// . a join nested inside a host call cannot suspend the host call stack
 ///   , so instead of parking it pumps the scheduler and blocks
 /// . reports the first fiber failure seen.
-fn pumpUntilDone(self: *VM, target_id: VM.FiberID) !?VM.EvalFailure {
+pub fn pumpUntilDone(self: *VM, target_id: VM.FiberID) !?VM.EvalFailure {
     // runReadyFibers parks current_fiber on whatever ran last
     // , so restore ours on every exit
     // : the suspended dispatch below resumes on it
-    const outer = self.sched.current_fiber;
-    defer self.sched.current_fiber = outer;
+    const outer = self.sched.currentID();
+    defer self.sched.setCurrent(outer);
 
     while (self.sched.fibers.items[target_id].state != .dead) {
         if (try runReadyFibers(self)) |failure| return failure;
@@ -115,26 +285,90 @@ fn pumpUntilDone(self: *VM, target_id: VM.FiberID) !?VM.EvalFailure {
     return null;
 }
 
+/// who holds the gil and how deep; same thread relocks for free
+threadlocal var gil_owner: ?*VM = null;
+threadlocal var gil_depth: usize = 0;
+/// nested runs never observe worker shutdown, the inner run goes near-solo
+threadlocal var shutdown_exempt: bool = false;
+
+fn gilLock(self: *VM) void {
+    if (gil_owner == self) {
+        gil_depth += 1;
+        return;
+    }
+
+    self.gil.lock();
+    gil_owner = self;
+    gil_depth = 1;
+}
+
+fn gilUnlock(self: *VM) void {
+    std.debug.assert(gil_owner == self);
+    gil_depth -= 1;
+
+    if (gil_depth == 0) {
+        gil_owner = null;
+        self.gil.unlock();
+    }
+}
+
+fn gilTryLock(self: *VM) bool {
+    if (gil_owner == self) {
+        gil_depth += 1;
+        return true;
+    }
+    if (!self.gil.tryLock()) return false;
+    gil_owner = self;
+    gil_depth = 1;
+    return true;
+}
+
+// release the GIL around a blocking syscall
+// ; no vm touches or nested calls until gilTakeAfterBlocking, returns opaque depth
+pub fn gilDropForBlocking(vm: *VM) usize {
+    std.debug.assert(gil_owner == vm);
+    const d = gil_depth;
+    gil_owner = null;
+    gil_depth = 0;
+    if (d > 0) vm.gil.unlock();
+    return d;
+}
+
+pub fn gilTakeAfterBlocking(vm: *VM, d: usize) void {
+    if (d == 0) return;
+    vm.gil.lock();
+    std.debug.assert(gil_owner == null);
+    gil_owner = vm;
+    gil_depth = d;
+}
+
+/// one quantum per ready fiber; Parked stays parked, failures stop the loop
 inline fn runReadyFibers(self: *VM) !?@TypeOf(self.*).EvalFailure {
-    while (self.sched.dequeueRunnable()) |fid| {
+    while (self.sched.takeRunnable()) |fid| {
         @branchHint(.unlikely);
-        self.sched.current_fiber = fid;
-        if (self.currentFiber().state == .dead) continue;
+        {
+            gilLock(self);
+            defer gilUnlock(self);
+            defer self.sched.quantumDone();
+            // only the gil holder touches current_fiber
+            self.sched.setCurrent(fid);
+            if (self.currentFiber().state == .dead) continue;
+            self.sched.setFiberState(fid, .running);
+            self.currentFiber().running = true;
 
-        self.sched.setFiberState(fid, .running);
-        self.currentFiber().running = true;
+            // a fiber that parks mid-native (also when the native is reached
+            // through a metamethod host call) suspends instead of failing
+            //
+            // its .waiting and the io waiter re-queues it on completion
+            if (execFiber(self) catch |e| {
+                if (e == error.Parked) continue;
+                return self.evalFailure(e);
+            }) |failure| return failure;
 
-        // a fiber that parks mid-native (also when the native is reached
-        // through a metamethod host call) suspends instead of failing: it is
-        // .waiting and the io waiter re-queues it on completion
-        if (execFiber(self) catch |e| {
-            if (e == error.Parked) continue;
-            return self.evalFailure(e);
-        }) |failure| return failure;
-
-        if (self.currentFiber().state == .ready) {
-            @branchHint(.unlikely);
-            try self.sched.enqueueRunnable(fid);
+            if (self.currentFiber().state == .ready) {
+                @branchHint(.unlikely);
+                try self.sched.enqueueRunnable(fid);
+            }
         }
     }
     return null;
@@ -175,6 +409,25 @@ inline fn execFiberDispatch(
 ) !?VM.EvalFailure {
     @setEvalBranchQuota(2000);
     var fiber = self.currentFiber();
+    // fresh host-spawned fiber: run the host call directly, then finish
+    // like a returned root frame. a woken fiber lands here marked done
+    // with its completion already in regs[0]; it must not re-run.
+    if (fiber.pending_host) |ph| {
+        switch (ph) {
+            .done => {},
+            .run => |info| {
+                fiber.pending_host = .done;
+                self.callRegister(.{ .op = .call, .a = 0, .b = info.argc, .c = 0 }) catch |e| {
+                    if (e == error.Parked) return e;
+                    return self.evalFailure(e);
+                };
+            },
+        }
+        fiber.pending_host = null;
+        const result = fiber.registers[0];
+        try self.sched.finishFiber(fiber.id, result);
+        return null;
+    }
     std.debug.assert(fiber.pc < fiber.program.len);
     var instr = fiber.program[fiber.pc];
     fiber.pc += 1;
@@ -656,7 +909,7 @@ inline fn execFiberDispatch(
             regs = fiber.registers[0..fiber.registers_len];
 
             if (if (comptime use_depth) fiber.frames.items.len <= target_depth else !fiber.running) {
-                if (switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
+                if (try switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
                     continue :dispatch instr.op;
                 }
                 break :dispatch;
@@ -675,7 +928,7 @@ inline fn execFiberDispatch(
             regs = fiber.registers[0..fiber.registers_len];
 
             if (if (comptime use_depth) fiber.frames.items.len <= target_depth else !fiber.running) {
-                if (switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
+                if (try switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
                     continue :dispatch instr.op;
                 }
                 break :dispatch;
@@ -686,7 +939,7 @@ inline fn execFiberDispatch(
         .ret => {
             self.returnRegister(instr) catch |e| return self.evalFailure(e);
             if (fiber.frames.items.len == 0) {
-                if (switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
+                if (try switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
                     continue :dispatch instr.op;
                 }
                 break :dispatch;
@@ -699,7 +952,10 @@ inline fn execFiberDispatch(
             continue :dispatch instr.op;
         },
         .spawn => {
-            self.spawnRegister(instr, base) catch |e| return self.evalFailure(e);
+            self.spawnRegister(instr, base) catch |e| {
+                if (e == error.Parked) return e;
+                return self.evalFailure(e);
+            };
             // spawnRegister may have reallocated fibers
             fiber = self.currentFiber();
             regs = fiber.registers[0..fiber.registers_len];
@@ -708,46 +964,8 @@ inline fn execFiberDispatch(
             fetchNext(fiber, &instr);
             continue :dispatch instr.op;
         },
-        .join => {
-            const handle = regRead(regs, base, instr.a);
-            const target_num = handle.asNum() orelse
-                return self.typeError("number in join", handle);
-            const target_id: usize = if (revo.memory.numToI64(target_num)) |tid|
-                if (tid < 0) return self.fail(error.TypeError, "invalid fiber id in join", .{}) else @intCast(tid)
-            else
-                return self.fail(error.TypeError, "invalid fiber id in join", .{});
-            if (target_id >= self.sched.fibers.items.len)
-                return self.fail(error.TypeError, "fiber id out of range", .{});
-            const target = &self.sched.fibers.items[target_id];
-            if (target.state == .dead) {
-                regWrite(regs, base, instr.a, target.result);
-            } else if (comptime use_depth) {
-                // nested join (inside a host call): the host call stack
-                // cannot suspend, so drive other fibers inline until the
-                // target finishes instead of parking
-                if (try pumpUntilDone(self, target_id)) |failure| return failure;
-                // pumped fibers may have spawned: re-fetch everything
-                fiber = self.currentFiber();
-                base = fiber.top_base;
-                regs = fiber.registers[0..fiber.registers_len];
-                const done = &self.sched.fibers.items[target_id];
-                regWrite(regs, base, instr.a, done.result);
-            } else {
-                try target.waiters.append(alloc, self.sched.current_fiber);
-                self.sched.parkCurrentWithResult(.{ .join = target_id }, base + instr.a);
-            }
-
-            if (if (comptime use_depth) fiber.frames.items.len <= target_depth else !fiber.running) {
-                if (switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
-                    continue :dispatch instr.op;
-                }
-                break :dispatch;
-            }
-            fetchNext(fiber, &instr);
-            continue :dispatch instr.op;
-        },
         .yield => {
-            self.sched.setFiberState(self.sched.current_fiber, .ready);
+            self.sched.setFiberState(self.sched.currentID(), .ready);
             fiber.running = false;
             if (comptime use_depth) break :dispatch;
             if (self.sched.ring_head == self.sched.ring_tail) {
@@ -757,8 +975,8 @@ inline fn execFiberDispatch(
                 fetchNext(fiber, &instr);
                 continue :dispatch instr.op;
             }
-            try self.sched.enqueueRunnable(self.sched.current_fiber);
-            if (switchOrStop(self, false, &fiber, &regs, &base, &instr)) {
+            try self.sched.enqueueRunnable(self.sched.currentID());
+            if (try switchOrStop(self, false, &fiber, &regs, &base, &instr)) {
                 continue :dispatch instr.op;
             }
             break :dispatch;
@@ -768,8 +986,8 @@ inline fn execFiberDispatch(
             fiber.registers_len = 0;
             try self.push(result);
             fiber.running = false;
-            self.sched.setFiberState(self.sched.current_fiber, .dead);
-            if (switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
+            self.sched.setFiberState(self.sched.currentID(), .dead);
+            if (try switchOrStop(self, use_depth, &fiber, &regs, &base, &instr)) {
                 continue :dispatch instr.op;
             }
             break :dispatch;
@@ -919,6 +1137,8 @@ inline fn fetchNext(fiber: *VM.Fiber, instr: *Instruction) void {
     fiber.pc += 1;
 }
 
+/// keep dispatching inplace on another ready fiber instead of unwinding
+/// , depth runs never switch, they unwind to the host caller
 inline fn switchOrStop(
     self: *VM,
     comptime use_depth: bool,
@@ -926,10 +1146,20 @@ inline fn switchOrStop(
     regs: *[]Data,
     base: *usize,
     instr: *Instruction,
-) bool {
+) !bool {
     if (comptime use_depth) return false;
     if (self.sched.switchNext()) {
         fiber.* = self.currentFiber();
+        if (fiber.*.pending_host != null) {
+            // fresh host fiber: hand back to the runq so the run loop
+            // takes it through the entry prologue instead of dispatching
+            // an empty program here. restore exact pre-switch state first,
+            // switchNext already flipped it to running.
+            fiber.*.running = false;
+            self.sched.setFiberState(self.sched.currentID(), .ready);
+            try self.sched.enqueueRunnable(self.sched.currentID());
+            return false;
+        }
         base.* = fiber.*.top_base;
         regs.* = fiber.*.registers[0..fiber.*.registers_len];
         fetchNext(fiber.*, instr);

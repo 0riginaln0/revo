@@ -3,6 +3,9 @@
 #* compile a regex pattern into a reusable handle *#
 pub declare re.compile = fn(pattern: string) -> table
 
+#* compile a regex pattern into a reusable handle *#
+pub declare re.__call = fn(pattern: string) -> table
+
 #* test if regex matches anywhere in haystack; pass a string for one-shot compile *#
 pub declare re.is_match = fn(regex: table | string, haystack: string) -> bool
 

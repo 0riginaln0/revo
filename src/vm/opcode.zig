@@ -70,7 +70,6 @@ pub const Opcode = enum(u8) {
     call_field, // "call_field from R[a] argc=b -> R[c]"
     ret, // "return R[a]"
     spawn, // "spawn R[a] argc=b -> R[c]"
-    join, // "join handle in R[a]"
     yield, // "yield fiber"
     /// init an range iter for really fast forloops
     ///

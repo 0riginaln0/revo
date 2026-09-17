@@ -65,6 +65,7 @@ const Config = struct {
     bench_iters: u32 = 1,
     echo_last: ?revo.Data.RenderMode = null,
     force_splice: bool = false,
+    threads: usize = 1,
     argv: []const [:0]const u8 = &.{},
 };
 
@@ -108,7 +109,7 @@ fn handleSource(
         .compile => try compileToBytecode(init, gpa, arena, name, source, config),
         .docs, .docs_html => unreachable,
         .disassemble => {
-            var vm = try initVM(init, gpa, config.argv);
+            var vm = try initVM(init, gpa, config.argv, config.threads);
             defer vm.deinit();
             const artifact = try compileSource(init, &vm, gpa, name, source, config.test_mode);
             defer gpa.free(artifact.instructions);
@@ -130,13 +131,13 @@ fn runMain(init: std.process.Init) !void {
     if (args.len < 2) {
         const source = try readStdin(init, arena);
         if (source) |s| {
-            var vm = try initVM(init, init.gpa, &.{args[0]});
+            var vm = try initVM(init, init.gpa, &.{args[0]}, 1);
             defer vm.deinit();
             try revo.std_lib.populateArgv(&vm);
             try runSource(init, init.gpa, "<stdin>", s, .{});
             return;
         }
-        var vm = try initVM(init, init.gpa, &.{args[0]});
+        var vm = try initVM(init, init.gpa, &.{args[0]}, 1);
         defer vm.deinit();
         try revo.std_lib.populateArgv(&vm);
         try repl.run(&vm, init.gpa, init);
@@ -147,7 +148,7 @@ fn runMain(init: std.process.Init) !void {
 
     // early-return modes
     if (config.mode == .repl) {
-        var vm = try initVM(init, init.gpa, config.argv);
+        var vm = try initVM(init, init.gpa, config.argv, config.threads);
         defer vm.deinit();
         try revo.std_lib.populateArgv(&vm);
         return try repl.run(&vm, init.gpa, init);
@@ -175,7 +176,7 @@ fn runMain(init: std.process.Init) !void {
                     .run => try runBytecode(init, init.gpa, path, source, config),
                     .bench => try benchBytecode(init, init.gpa, path, source, config),
                     .disassemble => {
-                        var vm = try initVM(init, init.gpa, config.argv);
+                        var vm = try initVM(init, init.gpa, config.argv, config.threads);
                         defer vm.deinit();
                         var deserialized = revo.bytecode.deserialize(&vm, source, init.gpa) catch |err| {
                             printError(init, "deserializing bytecode - {}", .{err});
@@ -216,7 +217,7 @@ fn runMain(init: std.process.Init) !void {
         if (!config.interactive and config.script_path == null) return;
     }
 
-    var vm = try initVM(init, init.gpa, config.argv);
+    var vm = try initVM(init, init.gpa, config.argv, config.threads);
     defer vm.deinit();
     try revo.std_lib.populateArgv(&vm);
     try repl.run(&vm, init.gpa, init);
@@ -259,8 +260,8 @@ fn runFromStdin(init: std.process.Init, gpa: Allocator, arena: Allocator, config
     }
 }
 
-fn initVM(init: std.process.Init, gpa: Allocator, argv: []const [:0]const u8) !VM {
-    return VM.init(.{ .alloc = gpa, .io = init.io, .argv = argv, .diag_alloc = gpa }) catch |err| {
+fn initVM(init: std.process.Init, gpa: Allocator, argv: []const [:0]const u8, threads: usize) !VM {
+    return VM.init(.{ .alloc = gpa, .io = init.io, .argv = argv, .diag_alloc = gpa, .threads = threads }) catch |err| {
         printError(init, "initializing vm - {}", .{err});
         return error.VmInitError;
     };
@@ -356,6 +357,7 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
         .{ .name = "test", .kind = .boolean, .description = "run with test blocks" },
         .{ .name = "html", .kind = .boolean, .description = "render as html instead of markdown (doc)" },
         .{ .name = "splice", .kind = .boolean, .description = "splice output into markdown piped on stdin (doc)" },
+        .{ .name = "threads", .kind = .string, .description = "worker threads (default 1, single-threaded without async)" },
         .{ .name = "help", .short = 'h', .kind = .boolean, .description = "show this help message" },
         // terminal positional:
         //   stops flag-parsing, goes to passthru argv
@@ -389,7 +391,7 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
     var res = ap.Result{ .args = &arg_list, .commands = commands, .leftover = &leftover };
 
     ap.parse(allocator, args[1..], &res) catch |err| {
-        if (arg_list[8].enabled) { // help always wins
+        if (ap.cliArg(&arg_list, "help").enabled) { // help always wins
             const text = try usageText(allocator, &arg_list, commands);
             defer allocator.free(text);
             std.debug.print("{s}\n", .{text});
@@ -411,7 +413,7 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
         }
     };
 
-    if (arg_list[8].enabled) { // help
+    if (ap.cliArg(&arg_list, "help").enabled) { // help
         const text = try usageText(allocator, &arg_list, commands);
         defer allocator.free(text);
         std.debug.print("{s}\n", .{text});
@@ -438,20 +440,30 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
     }
 
     // map flags
-    config.interactive = arg_list[1].enabled; // -i
-    config.test_mode = arg_list[5].enabled; // --test
-    config.force_splice = arg_list[7].enabled; // --splice
-    if (arg_list[2].enabled) config.echo_last = .display; // -d
-    if (arg_list[3].enabled) config.echo_last = .debug; // -D
-    if (arg_list[4].enabled) config.echo_last = .pretty; // -P
-    if (arg_list[6].enabled and config.mode == .docs) config.mode = .docs_html; // --html
+    config.interactive = ap.cliArg(&arg_list, "interactive").enabled; // -i
+    config.test_mode = ap.cliArg(&arg_list, "test").enabled; // --test
+    config.force_splice = ap.cliArg(&arg_list, "splice").enabled; // --splice
+    if (ap.cliArg(&arg_list, "display").enabled) config.echo_last = .display; // -d
+    if (ap.cliArg(&arg_list, "debug").enabled) config.echo_last = .debug; // -D
+    if (ap.cliArg(&arg_list, "pretty").enabled) config.echo_last = .pretty; // -P
+    if (ap.cliArg(&arg_list, "html").enabled and config.mode == .docs) config.mode = .docs_html; // --html
 
     // -e always gets the script slot
-    if (arg_list[0].value) |code| { // -e
+    if (ap.cliArg(&arg_list, "e").value) |code| { // -e
         config.inline_code = code;
         try leftover.insert(allocator, 0, args[0]);
     } else {
-        config.script_path = arg_list[9].value; // script positional
+        config.script_path = ap.cliArg(&arg_list, "script").value; // script positional
+    }
+
+    if (ap.cliArg(&arg_list, "threads").value) |v| { // --threads
+        config.threads = std.fmt.parseUnsigned(usize, v, 10) catch {
+            printError(init, "--threads requires a positive integer, got '{s}'", .{v});
+            return error.InvalidArgs;
+        };
+        if (config.threads == 0) config.threads = 1;
+        if (config.threads > 1 and !revo.can_async)
+            std.debug.print("warning: --threads={d} not supported on this platform, running single-threaded\n", .{config.threads});
     }
 
     // compile mode: steal the second positional as output path
@@ -468,7 +480,7 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
 }
 
 fn runInlineCode(init: std.process.Init, gpa: Allocator, code: []const u8, config: Config) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     const artifact = try compileSource(init, &vm, gpa, "<inline>", code, config.test_mode);
@@ -486,7 +498,7 @@ fn runSource(
     source: []const u8,
     config: Config,
 ) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     const artifact = try compileSource(init, &vm, gpa, path, source, config.test_mode);
@@ -506,7 +518,7 @@ fn runBytecode(
     bytecode_data: []const u8,
     config: Config,
 ) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     var deserialized = revo.bytecode.deserialize(&vm, bytecode_data, gpa) catch |err| {
@@ -573,7 +585,7 @@ fn benchArtifact(
 }
 
 fn benchSource(init: std.process.Init, gpa: Allocator, path: []const u8, source: []const u8, config: Config) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     const artifact = try compileSource(init, &vm, gpa, path, source, config.test_mode);
@@ -595,7 +607,7 @@ fn benchBytecode(
     bytecode_data: []const u8,
     config: Config,
 ) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     var deserialized = revo.bytecode.deserialize(&vm, bytecode_data, gpa) catch |err| {
@@ -629,7 +641,7 @@ fn compileToBytecode(
     source: []const u8,
     config: Config,
 ) !void {
-    var vm = try initVM(init, gpa, config.argv);
+    var vm = try initVM(init, gpa, config.argv, config.threads);
     defer vm.deinit();
 
     const artifact = try compileSource(init, &vm, gpa, path, source, config.test_mode);

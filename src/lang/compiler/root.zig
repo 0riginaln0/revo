@@ -577,11 +577,6 @@ pub const Compiler = struct {
                 d = base + 1;
                 try self.recordStackOp(op, argc + 2, 1, result_reg, op_arg);
             },
-            .join => {
-                std.debug.assert(d > 0);
-                result_reg = try toRegister(d - 1);
-                try self.recordStackOp(op, 1, 1, result_reg, 0);
-            },
             .yield => {
                 result_reg = 0;
                 try self.recordStackOp(op, 0, 0, result_reg, 0);
@@ -697,10 +692,6 @@ pub const Compiler = struct {
                     try self.compile(u.expr, true);
                     try self.emit(.not, 0);
                 },
-                .join => {
-                    try self.compile(u.expr, true);
-                    try self.emit(.join, 0);
-                },
                 .yield => {
                     try self.emit(.yield, 0);
                     try self.pushNil();
@@ -744,8 +735,11 @@ pub const Compiler = struct {
                         );
                     },
                     else => {
-                        try self.compile(u.expr, true);
-                        try self.emit(.spawn, 0);
+                        return self.fail(
+                            .UnsupportedSyntax,
+                            u.expr,
+                            "spawn takes a function call, e.g. spawn f(x)",
+                        );
                     },
                 },
             },

@@ -50,7 +50,6 @@ pub const UnOp = enum {
     negate,
     not,
     spawn,
-    join,
     yield,
 };
 

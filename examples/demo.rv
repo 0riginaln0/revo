@@ -288,9 +288,18 @@ end
 fn fibers() do
   print("\nfibers")
 
-  # spawn runs a function in a new fiber: runs concurrently
-  const f1 = spawn fn() do let s = 0; for i in 0..3 do s = s + i + 1 end; s end
-  const f2 = spawn fn() "async result"
+  # spawn runs a function call in a new fiber: runs concurrently
+  fn worker() do
+    let s = 0
+    for i in 0..3 do
+      s = s + i + 1
+    end
+    s
+  end
+
+  const f1 = spawn worker()
+  # for the go programmers:
+  const f2 = spawn (fn() "async result")()
 
   # join blocks until the fiber completes and returns its result
   print(join(f1))
@@ -315,42 +324,46 @@ fn nonblocking() do
 
   # simulate async operations
   #   they look blocking but yield to other fibers
-  const work1 = spawn fn() do
+  fn work1fn() do
     let r = 0
     for i in 0..1000 do
       r = r + i
     end
     r
   end
+  let work1 = spawn work1fn()
 
-  const work2 = spawn fn() do
+  fn work2fn() do
     let r = 0
     for i in 0..1000 do
       r = r + i * 2
     end
     r
   end
+  let work2 = spawn work2fn()
 
   # both run concurrently;
   #   join waits for both to complete
-  const r1 = join(work1)
-  const r2 = join(work2)
+  let r1 = join(work1)
+  let r2 = join(work2)
   print("concurrent results:", r1, r2)
 
   # channels coordinate multiple fibers: producer/consumer pattern
-  const jobs = chan(3)
+  let jobs = chan(3)
 
-  const producer = spawn fn() do
+  fn producerfn() do
     send(jobs, "task1")
     send(jobs, "task2")
     send(jobs, "task3")
   end
+  let producer = spawn producerfn()
 
-  const consumer = spawn fn() do
+  fn consumerfn() do
     recv(jobs)
     recv(jobs)
     recv(jobs)
   end
+  let consumer = spawn consumerfn()
 
   join(producer)
   join(consumer)

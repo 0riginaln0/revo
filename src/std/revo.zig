@@ -43,6 +43,10 @@ pub const Impl = struct {
         else
             .data(try vm.ownDataString("revo v" ++ v));
     }
+
+    pub fn threads(vm: *VM) !HostResult {
+        return .data(Data.new.num(vm.sched.thread_count));
+    }
 };
 
 pub const impls: []const api.Impl = root.impls(Impl).val ++ &[_]api.Impl{

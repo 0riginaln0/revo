@@ -22,14 +22,21 @@ test "vm join returns dead fiber result" {
     defer vm.deinit();
 
     const child = try VM.Fiber.init(vm.runtime.alloc, 1, &.{}, 16);
-    try vm.sched.fibers.append(vm.runtime.alloc, child);
+    _ = try vm.sched.appendFiber(child);
     vm.sched.fibers.items[1].state = .dead;
     vm.sched.fibers.items[1].result = Data.new.num(42);
 
-    const handle = try vm.addConstant(Data.new.num(1));
+    const handle_table = try vm.tableOfSlice(&[_]Data{
+        Data.new.atom(revo.core_atoms.atomId(.fiber)),
+        Data.new.num(1),
+    });
+    const handle = try vm.addConstant(handle_table);
+    const join_atom = try vm.internAtom("join");
+
     const program = [_]revo.Instruction{
-        .{ .op = .load_const, .a = 0, .bx = @intCast(handle) },
-        .{ .op = .join, .a = 0 },
+        .{ .op = .load_const, .a = 1, .bx = @intCast(handle) },
+        .{ .op = .load_global, .a = 0, .bx = @intCast(join_atom) },
+        .{ .op = .call, .a = 0, .b = 1, .c = 0 },
         .{ .op = .halt, .a = 0 },
     };
     vm.mainFiber().program = &program;
@@ -50,7 +57,7 @@ test "vm spawn passes n args to child and join returns result" {
     defer vm.deinit();
 
     const proto_id = try vm.functions.createPrototype(.{
-        .addr = 6,
+        .addr = 8,
         .arity = 2,
         .total_arity = 2,
         .register_count = 4,
@@ -63,13 +70,16 @@ test "vm spawn passes n args to child and join returns result" {
     const c_fn = try vm.addConstant(Data.new.function(fn_id));
     const c_two = try vm.addConstant(Data.new.num(2));
     const c_three = try vm.addConstant(Data.new.num(3));
+    const join_atom = try vm.internAtom("join");
 
     const program = [_]revo.Instruction{
         .{ .op = .load_const, .a = 0, .bx = @intCast(c_fn) },
         .{ .op = .load_const, .a = 1, .bx = @intCast(c_two) },
         .{ .op = .load_const, .a = 2, .bx = @intCast(c_three) },
         .{ .op = .spawn, .a = 0, .b = 2, .c = 0 },
-        .{ .op = .join, .a = 0 },
+        .{ .op = .load_global, .a = 1, .bx = @intCast(join_atom) },
+        .{ .op = .move, .a = 2, .b = 0 },
+        .{ .op = .call, .a = 1, .b = 1, .c = 0 },
         .{ .op = .halt, .a = 0 },
         .{ .op = .load_local, .a = 2, .b = 0 },
         .{ .op = .load_local, .a = 3, .b = 1 },
@@ -92,12 +102,12 @@ test "vm channel handoff wakes blocked receiver" {
     const ch = try vm.sched.channelCreate(&vm.tables, 0);
 
     const recv = try VM.Fiber.init(vm.runtime.alloc, 1, &.{}, 16);
-    try vm.sched.fibers.append(vm.runtime.alloc, recv);
-    vm.sched.current_fiber = 1;
+    _ = try vm.sched.appendFiber(recv);
+    vm.sched.setCurrent(1);
     _ = try vm.sched.channelRecv(ch);
     try testing.expectEqual(@as(VM.Fiber.State, .waiting), vm.currentFiber().state);
 
-    vm.sched.current_fiber = 0;
+    vm.sched.setCurrent(0);
     try vm.sched.channelSend(ch, Data.new.num(99));
 
     try testing.expectEqual(@as(VM.Fiber.State, .ready), vm.sched.fibers.items[1].state);
@@ -109,11 +119,11 @@ test "scheduler generic park wake resumes parked fiber" {
     defer vm.deinit();
 
     const child = try VM.Fiber.init(vm.runtime.alloc, 1, &.{}, 16);
-    try vm.sched.fibers.append(vm.runtime.alloc, child);
+    _ = try vm.sched.appendFiber(child);
     vm.sched.fibers.items[1].registers_len = 1;
     vm.sched.fibers.items[1].registers[0] = revo.Data.new.core(.missing);
 
-    vm.sched.current_fiber = 1;
+    vm.sched.setCurrent(1);
     try vm.sched.parkCurrentForIo(
         7,
         .read,

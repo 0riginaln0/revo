@@ -109,8 +109,7 @@ end
 
 ### the scheduler
 
-the coolest thing here is that async ops operate on generic tokens. that means, you can plug in
-any backend, as long as it returns the right results
+the coolest thing here is that async ops operate on generic tokens
 
 the scehduler, `src/vm/scheduler.zig`,
 
@@ -155,33 +154,20 @@ fn onRecvReady(vm: *VM, waiter: *Scheduler.WaitEntry, events: i16) !Scheduler.Io
 }
 ```
 
-### the async backend
+### the io driver
 
-optional. lets you offload blocking syscalls to worker threads so the main thread never blocks
+all socket io is readiness-driven, we dont do worker threads anymore
 
-the interface is in `src/runtime/async_backend.zig`:
+`pollIoWaiters()` in `src/std/net.zig` snapshots the waiter list under lock
+(each waiter carries a generation stamp),
+`poll()`s the snapshot with no locks held,
+then revalidates every ready fd against the live list before dispatching.
 
-```zig
-pub const AsyncBackend = struct {
-    submit: ?*const anyopaque,
-    cancel: ?*const anyopaque,
-    poll: ?*const anyopaque,
-    shutdown: ?*const anyopaque,
-    data: ?*anyopaque,
-};
+ready entries are claimed (removed) before their callback runs,
+so later appends, removals, or array growth can't invalidate them;
+still-pending entries go back with a fresh generation.
 
-pub const AsyncJob = struct {
-    fiber_id: usize,
-    kind: AsyncJobKind,
-    handle: std.posix.fd_t,
-    message_id: usize,
-    offset: usize,
-    buffer: ?[]u8,
-    max_bytes: usize,
-};
-```
-
-the default backend (`src/runtime/async_backend_posix.zig`) spins up worker threads. job goes to a thread, thread does the syscall, writes completion to a pipe, main thread polls it and wakes up the fiber
+completions and callbacks run with the vm gil held
 
 ### socket:send(data)
 
@@ -192,8 +178,7 @@ const result = socket:send("hello")?
 
 - `send_fn` called
 - `SendWaitToken` allocated with message ID and offset
-- if backend exists, job queued to backend
-- if not, fiber parks with `onSendReady` callback
+- fast nonblocking send first; on `AGAIN` the fiber parks with `onSendReady`
 - socket becomes writable, `onSendReady` fires
 - sends bytes, updates offset if needed
 - when all sent, wakes fiber with `(:ok, bytes_sent)`
@@ -221,179 +206,43 @@ const client = listener:accept()?
 ```
 
 - `accept_fn` checks socket is a server
-- if backend, job queued
-- if not, `onAcceptReady` runs via polling
+- nonblocking `accept` once; on `AGAIN` the fiber parks with `onAcceptReady`
 - connection arrives, `onAcceptReady` calls `std.c.accept()`
 - wraps socket in `SocketEntry`
 - wakes fiber with `(:ok, new_socket_table)`
 
-## writing a custom backend
-
-you need:
-
-- backend state struct
-- four functions (submit, poll, cancel, shutdown)
-- register in VM
-
-### state
-
-```zig
-// src/runtime/async_backend_custom.zig
-const std = @import("std");
-const revo = @import("../root.zig");
-const async_backend = @import("./async_backend.zig");
-
-pub const CustomBackendState = struct {
-    job_queue: std.ArrayList(*async_backend.AsyncJob),
-    completions: std.ArrayList(CompletionRecord),
-};
-
-const CompletionRecord = struct {
-    job_ptr: *async_backend.AsyncJob,
-    status: i32,
-    bytes: usize,
-};
-```
-
-### submit
-
-queue a job. you own it after this
-
-```zig
-pub fn submit(backend: *async_backend.AsyncBackend, vm_ptr: *anyopaque, job: *async_backend.AsyncJob) anyerror!async_backend.AsyncTicket {
-    const state = @as(*CustomBackendState, @ptrCast(@alignCast(backend.data)));
-    const vm = @as(*revo.VM, @ptrCast(@alignCast(vm_ptr)));
-    
-    try state.job_queue.append(vm.runtime.alloc, job);
-    return state.job_queue.items.len - 1;
-}
-```
-
-### poll
-
-check for completions. wake fibers
-
-```zig
-pub fn poll(backend: *async_backend.AsyncBackend, vm_ptr: *anyopaque) anyerror!bool {
-    const state = @as(*CustomBackendState, @ptrCast(@alignCast(backend.data)));
-    const vm = @as(*revo.VM, @ptrCast(@alignCast(vm_ptr)));
-    
-    var woke_any = false;
-    
-    while (state.completions.popOrNull()) |completion| {
-        if (completion.job_ptr.fiber_id >= vm.sched.fibers.items.len) {
-            vm.runtime.alloc.destroy(completion.job_ptr);
-            continue;
-        }
-        
-        const result_data = if (completion.status != 0)
-            try vm.dataAtom(std.posix.errno(@as(u32, @bitCast(completion.status))))
-        else
-            revo.Data.new.num(@floatFromInt(completion.bytes));
-        
-        try vm.sched.wakeFiber(
-            completion.job_ptr.fiber_id,
-            try vm.resultTable(.ok, result_data),
-        );
-        
-        vm.runtime.alloc.destroy(completion.job_ptr);
-        woke_any = true;
-    }
-    
-    return woke_any;
-}
-```
-
-### cancel
-
-remove a job from the queue before it runs
-
-```zig
-pub fn cancel(backend: *async_backend.AsyncBackend, ticket: async_backend.AsyncTicket) void {
-    const state = @as(*CustomBackendState, @ptrCast(@alignCast(backend.data)));
-    
-    if (ticket < state.job_queue.items.len) {
-        _ = state.job_queue.swapRemove(ticket);
-    }
-}
-```
-
-### shutdown
-
-clean up. optional, but do it anyway
-
-```zig
-pub fn shutdown(backend: *async_backend.AsyncBackend, alloc: std.mem.Allocator) void {
-    const state = @as(*CustomBackendState, @ptrCast(@alignCast(backend.data)));
-    
-    state.job_queue.deinit(alloc);
-    state.completions.deinit(alloc);
-    alloc.destroy(state);
-}
-```
-
-### register
-
-in VM init:
-
-```zig
-const backend_state = try vm.runtime.alloc.create(async_backend_custom.CustomBackendState);
-backend_state.* = .{
-    .job_queue = std.ArrayList(*async_backend.AsyncJob).init(vm.runtime.alloc),
-    .completions = std.ArrayList(async_backend_custom.CompletionRecord).init(vm.runtime.alloc),
-};
-
-try async_backend_custom.init(backend_state);
-
-vm.runtime.async_backend = async_backend.AsyncBackend{
-    .submit = &async_backend_custom.submit,
-    .cancel = &async_backend_custom.cancel,
-    .poll = &async_backend_custom.poll,
-    .shutdown = &async_backend_custom.shutdown,
-    .data = backend_state,
-};
-```
-
 ## extending to other i/o
 
-to add file async or timers:
+to wait on a new fd source, park with a `WaitEntry` and handle it in a readiness callback:
 
-- extend `AsyncJobKind` in `src/runtime/async_backend.zig`
-- extend `AsyncJob` with new fields
-- handle new job types in your backend
-- extend socket layer to submit for new ops
+- `vm.sched.parkCurrentForIo(wait_id, intent, token, on_ready, on_deinit)`
+  appends the waiter (stamped with a fresh generation) and parks the fiber
 
-see `src/std/net.zig`:
+- `pollIoWaiters` claims ready entries before dispatch;
+  return `.{ .completed = true }` to drop yours,
+  or `.{}` to be re-queued with a fresh generation
 
-```zig
-if (vm.runtime.async_backend) |backend| {
-    const job = try vm.runtime.alloc.create(revo.async_backend.AsyncJob);
-    job.* = .{
-        .fiber_id = vm.sched.current_fiber,
-        .kind = revo.async_backend.AsyncJobKind.socket_accept,
-        .handle = server.socket.handle,
-        .message_id = 0,
-        .offset = 0,
-        .buffer = null,
-        .max_bytes = 0,
-    };
-    _ = try backend.submit(backend, @ptrCast(vm), job);
-}
-```
+- tokens are yours: allocate on park, free in `on_deinit` or on completion
+
+  the driver calls `on_deinit` exactly once per claimed entry that leaves
+  the list with a nonzero token, so zero it after freeing it yourself
+
+- match new completions by `(wait_id, fiber_id, intent, generation)`;
+  anything else is stale (closed, recycled fd) and must be skipped
+
+see `onRecvReady` above and `src/std/net.zig`
 
 ## performance
 
-poll runs with zero timeout per scheduler cycle. if you need more throughput, replace the one-thread-per-job default with a thread pool
+poll runs with zero timeout per scheduler cycle
 
 recv buffers in `stream.pending` to handle partial reads. watch your allocation overhead. fibers allocate stack, so memory bounds your fiber count, not file descriptors
 
 ## gotchas
 
-- allocate tokens yourself if you submit jobs directly
-  when you submit a job directly to the backend without going thru the socket layer, the job is yours to manage, so allocate the token & free it when done
 - don't store buffer pointers
-  once you pass a buffer to the backend, it owns it. don't free it yourself later
+  once you hand a buffer to a pending entry or token, it owns it. don't free it yourself later
 - check fiber IDs before waking
   a fiber might have died, so validate the id
 - completions aren't ordered
-  backend completions may arrive out-of-order. don't assume fifo
+  readiness may fire out-of-order. don't assume fifo

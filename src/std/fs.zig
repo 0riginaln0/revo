@@ -114,15 +114,23 @@ pub const Impl = struct {
         const this = Data.new.table(@intFromEnum(self));
         const handle = parseFileHandle(this, vm) catch |err| return progErr(err);
 
-        const st = try Dir.cwd().statFile(vm.runtime.io, handle.path, .{});
+        const path = try vm.runtime.alloc.dupe(u8, handle.path);
+        defer vm.runtime.alloc.free(path);
+
+        const depth = revo.vm.exec.gilDropForBlocking(vm);
+        errdefer revo.vm.exec.gilTakeAfterBlocking(vm, depth);
+
+        const st = try Dir.cwd().statFile(vm.runtime.io, path, .{});
         if (st.size > max_read_size) return error.FileTooLarge;
 
         const data = try Dir.cwd().readFileAlloc(
             vm.runtime.io,
-            handle.path,
+            path,
             vm.runtime.alloc,
             .limited(max_read_size),
         );
+
+        revo.vm.exec.gilTakeAfterBlocking(vm, depth);
 
         return .Ok(vm, try vm.adoptDataString(data));
     }
@@ -130,12 +138,19 @@ pub const Impl = struct {
     pub fn @"file.write"(vm: *VM, self: Ts.table, data: Ts.string, append: Ts.Optional(.bool, false), permissions: Ts.Optional(.number, file_default)) !HostResult {
         const this = Data.new.table(@intFromEnum(self));
         const handle = parseFileHandle(this, vm) catch |err| return progErr(err);
-        const text = vm.stringValue(@intFromEnum(data));
         const perms = numPermissions(permissions.value) catch return .errType(2, "integer permissions", "number");
 
+        const path = try vm.runtime.alloc.dupe(u8, handle.path);
+        defer vm.runtime.alloc.free(path);
+        const text = try vm.runtime.alloc.dupe(u8, vm.stringValue(@intFromEnum(data)));
+        defer vm.runtime.alloc.free(text);
+
+        const depth = revo.vm.exec.gilDropForBlocking(vm);
+        errdefer revo.vm.exec.gilTakeAfterBlocking(vm, depth);
+
         if (append.value) {
-            const file = Dir.cwd().openFile(vm.runtime.io, handle.path, .{ .mode = .read_write }) catch |err| switch (err) {
-                error.FileNotFound => try Dir.cwd().createFile(vm.runtime.io, handle.path, .{
+            const file = Dir.cwd().openFile(vm.runtime.io, path, .{ .mode = .read_write }) catch |err| switch (err) {
+                error.FileNotFound => try Dir.cwd().createFile(vm.runtime.io, path, .{
                     .truncate = false,
                     .permissions = perms,
                 }),
@@ -147,11 +162,13 @@ pub const Impl = struct {
             try file.writePositionalAll(vm.runtime.io, text, st.size);
         } else {
             try Dir.cwd().writeFile(vm.runtime.io, .{
-                .sub_path = handle.path,
+                .sub_path = path,
                 .data = text,
                 .flags = .{ .permissions = perms },
             });
         }
+
+        revo.vm.exec.gilTakeAfterBlocking(vm, depth);
 
         return .Ok(vm, Data.new.num(text.len));
     }

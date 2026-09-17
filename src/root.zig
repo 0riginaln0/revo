@@ -1,16 +1,11 @@
 pub const is_freestanding = @import("build_options").is_freestanding;
 
-// wasi runs single-threaded, posix backend needs thread spawn
-// nobody has windows to develop for it
-pub const has_async_backend = switch (builtin.target.os.tag) {
+// threads + nbio is only available on posix with libc
+// wasi is single-threaded, and windows has no backend yet
+pub const can_async = switch (builtin.target.os.tag) {
     .windows, .wasi, .freestanding => false,
     else => builtin.link_libc,
 };
-
-pub const async_backend_impl = if (has_async_backend)
-    @import("./vm/runtime/async_backend_posix.zig")
-else
-    @import("./vm/runtime/async_backend_none.zig");
 
 pub const Runtime = struct {
     alloc: std.mem.Allocator,
@@ -18,7 +13,7 @@ pub const Runtime = struct {
     argv: []const [:0]const u8 = &.{},
     stdin: ?std.Io.File = null,
     vm: ?*VM = null,
-    async_backend: async_backend_impl.BackendState = .{},
+    threads: usize = 1,
 
     /// allocator for diagnostic reports (usually an arena)
     diag_alloc: std.mem.Allocator,
@@ -422,7 +417,6 @@ pub const EvalFailure = vm.EvalFailure;
 pub const EvalResult = vm.EvalResult;
 
 pub const argparse = @import("./argparse.zig");
-pub const async_backend = @import("./vm/runtime/async_backend.zig");
 pub const ext = @import("./ext.zig");
 pub const lang = @import("./lang/root.zig");
 pub const pretty = @import("./pretty.zig");

@@ -65,7 +65,7 @@ pub fn readRegs(inst: *const ir.IrInst, out: []Register) usize {
         .halt, .ret, .jump_if_false, .jump_if_true, .jump_err,
         .store_global, .store_global_const, .store_upval,
         .store_local, .bind_local, .negate, .not,
-        .join, .add_imm, .sub_imm, .mul_imm,
+        .add_imm, .sub_imm, .mul_imm,
         .band_imm, .lt_int_imm, .unwrap_result => {
             out[0] = r;
             return 1;
@@ -176,7 +176,7 @@ fn isSideEffect(op: Opcode) bool {
         // zig fmt: off
         .store_global, .store_global_const, .store_local, .bind_local,
         .store_upval, .table_set, .table_set_atom, .call, .call_field, .spawn,
-        .join, .yield, .ret, .halt,
+        .yield, .ret, .halt,
         .range_init, .unwrap_result
         // zig fmt: on
         => true,

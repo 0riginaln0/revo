@@ -530,7 +530,6 @@ fn parsePrefix(self: *Parser) anyerror!*Node {
         .kw_comp => self.parseComp(token),
         .kw_import => self.parseImport(token),
         .kw_spawn => self.parseUnary(.spawn, 60, token),
-        .kw_join => self.parseUnary(.join, 60, token),
         .kw_yield => blk: {
             break :blk self.allocExpr(
                 token.span(),
@@ -951,9 +950,9 @@ fn parseDecl(self: *Parser, start: Token) anyerror!*Node {
             );
         },
         .kw_declare => blk: {
-            // bodge: `type`, `import`, `join` are stdlib globals, usable as names
+            // bodge: `type` and `import` are stdlib globals, usable as names
             if (!self.check(.ident)) switch (self.peek().type) {
-                .kw_type, .kw_import, .kw_join => {},
+                .kw_type, .kw_import => {},
                 else => return error.UnexpectedToken,
             };
             const first = self.advance();
@@ -2158,8 +2157,8 @@ const expr_start_tokens = makeTokenSet(&.{
     .kw_const,     .kw_let,    .kw_macro,         .minus,    .kw_not,
     .pipe_forward, .lparen,    .kw_fn,            .kw_if,    .kw_unless,
     .kw_match,     .kw_do,     .kw_loop,          .kw_break, .kw_continue,
-    .kw_return,    .kw_import, .kw_spawn,         .kw_join,  .kw_yield,
-    .lsquiggly,    .kw_type,   .kw_pub,           .eof,
+    .kw_return,    .kw_import, .kw_spawn,         .kw_yield, .lsquiggly,
+    .kw_type,      .kw_pub,    .eof,
 });
 
 /// expr allows bare call after it (ident, field, call, fn_expr)

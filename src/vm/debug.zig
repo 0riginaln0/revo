@@ -323,7 +323,7 @@ fn operandText(vm: *revo.VM, inst: revo.Instruction, buf: []u8) []const u8 {
             return fmt(buf, "r{d}, r{d}, :{s}", .{ a, b, name });
         },
         .slice => return fmt(buf, "r{d}, r{d}, r{d}, r{d}, r{d}", .{ a, b, b + 1, b + 2, b + 3 }),
-        .halt, .join, .ret => return fmt(buf, "r{d}", .{a}),
+        .halt, .ret => return fmt(buf, "r{d}", .{a}),
         .jump => return fmt(buf, "-> L{d}", .{bx}),
         .jump_if_false, .jump_if_true, .jump_err => {
             return fmt(buf, "r{d} -> L{d}", .{ a, bx });

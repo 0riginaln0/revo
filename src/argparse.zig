@@ -248,6 +248,14 @@ pub fn parse(allocator: Allocator, args: []const [:0]const u8, res: *Result) !vo
     }
 }
 
+/// linear
+pub fn cliArg(args: []Arg, name: []const u8) *Arg {
+    for (args) |*a| {
+        if (std.mem.eql(u8, a.name, name)) return a;
+    }
+    unreachable;
+}
+
 pub fn usage(allocator: Allocator, args: []const Arg, commands: []const Command) ![]const u8 {
     var buf = try std.ArrayList(u8).initCapacity(allocator, 256);
     errdefer buf.deinit(allocator);
