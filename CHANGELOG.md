@@ -167,12 +167,9 @@ tuples and structs are gone now, most breaking change yet
 - optional fiber thread pool: `revo --threads=N`
 
     ```ruby
-    fn w() do
-      system{"sleep", "1"}
-    end
+    spawn system{"sleep", "1"}
+    spawn system{"sleep", "1"}
 
-    spawn w()
-    spawn w()
     # 2s with no --threads set
     # 1s with at least --threads=2
     ```

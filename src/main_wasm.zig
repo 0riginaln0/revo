@@ -4,6 +4,10 @@ const std = @import("std");
 const VM = revo.VM;
 const print = revo.vm.print;
 
+/// zig 0.16's default debug_io pulls in Io.Threaded.global_single_threaded,
+/// and that doesnt compile for wasm32-freestanding, so we need to reuse this
+pub const std_options_debug_io: std.Io = stub_io;
+
 var wasm_alloc_state: std.heap.WasmAllocator = .{};
 const wasm_alloc: std.mem.Allocator = .{
     .ptr = &wasm_alloc_state,
@@ -79,19 +83,53 @@ fn wasmIoOperate(_: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!
         .net_receive => .{ .net_receive = .{ error.NetworkDown, 0 } },
     };
 }
-fn wasmIoLockStderr(_: ?*anyopaque, mode: ?std.Io.Terminal.Mode) std.Io.Cancelable!std.Io.LockedStderr {
-    // eval captures errors into a buffer and never reaches this stub
-    // returning Canceled prevents infinite recursion if a panic fires
-    _ = mode;
-    return error.Canceled;
+fn wasmIoRecancel(_: ?*anyopaque) void {}
+
+fn wasmIoSwapCancelProtection(_: ?*anyopaque, _: std.Io.CancelProtection) std.Io.CancelProtection {
+    return .blocked;
 }
-fn wasmIoUnlockStderr(_: ?*anyopaque) void {}
+
+fn wasmIoCheckCancel(_: ?*anyopaque) std.Io.Cancelable!void {}
+
+var stderr_buf: [1024]u8 = undefined;
+var stderr_writer: std.Io.File.Writer = undefined;
+
+fn wasmIoLockStderr(_: ?*anyopaque, _: ?std.Io.Terminal.Mode) std.Io.Cancelable!std.Io.LockedStderr {
+    stderr_writer = .{
+        .io = stub_io,
+        .file = revo.stderr(),
+        .interface = std.Io.File.Writer.initInterface(&stderr_buf),
+        .mode = .streaming,
+    };
+    return .{ .file_writer = &stderr_writer, .terminal_mode = .no_color };
+}
+
+fn wasmIoTryLockStderr(_: ?*anyopaque, _: ?std.Io.Terminal.Mode) std.Io.Cancelable!?std.Io.LockedStderr {
+    stderr_writer = .{
+        .io = stub_io,
+        .file = revo.stderr(),
+        .interface = std.Io.File.Writer.initInterface(&stderr_buf),
+        .mode = .streaming,
+    };
+    return .{ .file_writer = &stderr_writer, .terminal_mode = .no_color };
+}
+
+fn wasmIoUnlockStderr(_: ?*anyopaque) void {
+    if (stderr_writer.err == null) stderr_writer.interface.flush() catch {};
+    stderr_writer.err = null;
+    stderr_writer.interface.end = 0;
+    stderr_writer.interface.buffer = &.{};
+}
 
 const wasm_io_vtable: std.Io.VTable = blk: {
     var v = std.Io.failing.vtable.*;
     v.crashHandler = wasmIoCrashHandler;
+    v.recancel = wasmIoRecancel;
+    v.swapCancelProtection = wasmIoSwapCancelProtection;
+    v.checkCancel = wasmIoCheckCancel;
     v.operate = wasmIoOperate;
     v.lockStderr = wasmIoLockStderr;
+    v.tryLockStderr = wasmIoTryLockStderr;
     v.unlockStderr = wasmIoUnlockStderr;
     v.now = wasmIoNow;
     v.clockResolution = wasmIoClockResolution;

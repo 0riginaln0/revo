@@ -15,10 +15,16 @@ const ReleaseTarget = struct {
 
 const release_targets: []const ReleaseTarget = &.{
     .{ .triple = "aarch64-macos" }, // good
+    // golden target for linux (static musl cant load .so's)
+    .{ .triple = "x86_64-linux-gnu" }, // good
+    .{ .triple = "aarch64-linux-gnu" }, // probably good
+    // plus static musl ones for machines with no (or ancient) glibc
     .{ .triple = "x86_64-linux-musl" }, // good
     .{ .triple = "aarch64-linux-musl" }, // probably good
     .{ .triple = "x86_64-macos" }, // untested
     .{ .triple = "x86_64-windows" }, // missing dll loading, isocline and async
+    // we want at least one freestanding target in the matrix
+    //   at all times to confirm this can work on the rest of freestanding
     .{ .triple = "wasm32-freestanding" }, // good, see `wasm/`
     // .{ .triple = "wasm64-freestanding" }, // good, see `wasm/`. use wasm32 instead
     .{ .triple = "wasm32-wasi" }, // web build with js host imports
@@ -119,10 +125,10 @@ pub fn build(b: *Build) !void {
     const with_glibc = builtin.os.tag == .linux and
         (b.option(bool, "glibc", "build with LLVM and link with glibc") orelse false);
 
-    const with_dynamic = b.option(bool, "dynamic", "force dynamic libc linking if available (warns if unsupported)") orelse false;
-    if (with_dynamic and builtin.os.tag != .linux) {
-        logger.warn("-Ddynamic is only meaningful on linux (other platforms already use dynamic libc)", .{});
-    }
+    const with_dynamic = b.option(bool, "dynamic", "force dynamic libc linking if available (warns if unsupported)") orelse true;
+    // if (with_dynamic and builtin.os.tag != .linux) {
+    //     logger.warn("-Ddynamic is only meaningful on linux (other platforms already use dynamic libc)", .{});
+    // }
 
     const wasi_cli = b.option(bool, "wasi-cli", "build wasi target as cli (uses wasi syscalls instead of js imports)") orelse false;
 
@@ -451,8 +457,12 @@ pub fn build(b: *Build) !void {
             const release_optimize: std.builtin.OptimizeMode = if (release_is_wasm) .ReleaseSmall else .ReleaseSafe;
 
             const release_lsp_enabled = features.lsp and !release_is_fs;
+
             // isocline not available on windows, wasi, or freestanding
-            const release_isocline_enabled = features.isocline and !release_is_fs and !release_is_wasi and builtin.os.tag != .windows;
+            const release_isocline_enabled = features.isocline and
+                !release_is_fs and
+                !release_is_wasi and
+                release_target.result.os.tag != .windows;
 
             const rel_options = b.addOptions();
             rel_options.addOption(bool, "is_freestanding", release_is_fs);

@@ -103,7 +103,8 @@ pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
         // carry no impls and stay out of every surface instead of erroring
         if (ig.impls.len == 0) continue;
         const specs = parseGroup(pa, ig.src) catch |err| {
-            std.debug.print("iface group '{s}' failed to parse: {s}\n", .{ ig.name, @errorName(err) });
+            if (comptime !revo.is_freestanding)
+                std.debug.print("iface group '{s}' failed to parse: {s}\n", .{ ig.name, @errorName(err) });
             return err;
         };
         for (specs, 0..) |*s, i| {
@@ -116,11 +117,13 @@ pub fn loadAllSpecs(caller_alloc: std.mem.Allocator) ![]const []const FnSpec {
             };
 
             s.f = implFor(ig.impls, s, k) orelse {
-                var err_buf = std.Io.Writer.Allocating.init(pa);
-                defer err_buf.deinit();
-                renderSignature(&err_buf.writer, s.*) catch {};
+                if (comptime !revo.is_freestanding) {
+                    var err_buf = std.Io.Writer.Allocating.init(pa);
+                    defer err_buf.deinit();
+                    renderSignature(&err_buf.writer, s.*) catch {};
 
-                std.debug.print("missing {s}\n", .{err_buf.written()});
+                    std.debug.print("missing {s}\n", .{err_buf.written()});
+                }
                 @panic("missing an std def");
             };
         }
