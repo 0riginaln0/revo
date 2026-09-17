@@ -1,20 +1,18 @@
-//! the rust `revo.h` wrapper
+//! higher level interface for `revo-sys`
 //! you want to work with the `VM` struct most the time
-use std::ffi::{CStr, CString};
-use std::fmt::Display;
+
+#[feature("macros")]
+extern crate revo_macros;
+
+use std::ffi::{CStr, CString, c_void};
+use std::fmt::{Display, Write};
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
-/// bindgen wrappers. prefer to use root
-pub mod ffi {
-    #![allow(non_upper_case_globals)]
-    #![allow(non_camel_case_types)]
-    #![allow(non_snake_case)]
-
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
-
-use ffi::*;
+#[feature("macros")]
+pub use revo_macros::*;
+use revo_sys::*;
 
 fn last_error_ptr(ptr: *mut ErevoVM) -> String {
     if ptr.is_null() {
@@ -124,7 +122,7 @@ impl<'vm> Program<'vm> {
 /// sorry for the field, it's zero-sized, see assertion below
 #[derive(Debug)]
 pub struct VM {
-    ptr: *mut ErevoVM,
+    pub ptr: *mut ErevoVM,
     _not_thread_safe: PhantomData<Rc<()>>,
 }
 
@@ -142,6 +140,14 @@ impl VM {
         assert!(!ptr.is_null(), "erevo_vm_create returned null (oom maybe)");
         Self {
             ptr,
+            _not_thread_safe: PhantomData,
+        }
+    }
+
+    pub fn from_ptr(ptr: *mut c_void) -> Self {
+        assert!(!ptr.is_null(), "ur ptr is null (oom maybe)");
+        Self {
+            ptr: ptr as *mut ErevoVM,
             _not_thread_safe: PhantomData,
         }
     }
@@ -215,15 +221,45 @@ impl VM {
     }
 }
 
-impl Drop for VM {
-    fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe { erevo_vm_destroy(self.ptr) }
-        }
+// TODO: Fix this
+// impl Drop for VM {
+//     fn drop(&mut self) {
+//         if !self.ptr.is_null() {
+//             unsafe { erevo_vm_destroy(self.ptr) }
+//         }
+//     }
+// }
+
+// i find it fucked up how i have to do all of this to make them distinct
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Atom(String);
+
+impl From<String> for Atom {
+    fn from(value: String) -> Self {
+        Self(value)
     }
 }
 
-// i find it fucked up how i have to do all of this to make them distinct
+impl Deref for Atom {
+    type Target = String;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Atom {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl std::fmt::Display for Atom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TableId(u64);
@@ -240,7 +276,7 @@ pub struct ForeignId(u64);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Data {
     Num(f64),
-    Atom(String),
+    Atom(Atom),
     String(String),
     Table(TableId),
     Function(FunctionId),
@@ -292,12 +328,12 @@ impl Data {
     }
 
     /// we dont want boxes leaking into the public api
-    fn from_raw(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<Data, &'static str> {
+    pub fn from_raw(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<Data, &'static str> {
         match revo_type(val) {
             t if t == RevoType_revo_number as u64 => Ok(Data::Num(f64::from_bits(val))),
             t if t == RevoType_revo_atom as u64 => {
                 // atoms and strings share the same string pool
-                Ok(Data::Atom(get_revo_str(vm_ptr, val)?))
+                Ok(Data::Atom(Atom::from(get_revo_str(vm_ptr, val)?)))
             }
             t if t == RevoType_revo_string as u64 => Ok(Data::String(get_revo_str(vm_ptr, val)?)),
             t if t == RevoType_revo_table as u64 => {

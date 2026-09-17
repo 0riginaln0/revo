@@ -1,5 +1,5 @@
 fn main() {
-    use revo_sys::{Data, Program, Table, VM};
+    use revo::{Data, Program, Table, VM};
 
     let mut vm = VM::new();
 

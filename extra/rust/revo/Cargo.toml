@@ -1,0 +1,17 @@
+[package]
+name = "revo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+revo-sys = { path = "../revo-sys" }
+revo-macros = { path = "../revo-macros" }
+
+[features]
+default = ["macros"]
+macros = ["revo-macros"]
+
+[[example]]
+name = "extension"
+path = "examples/extension.rs"
+crate-type = ["dylib"]

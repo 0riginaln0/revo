@@ -16,11 +16,11 @@
 
 use std::ffi::*;
 
-use revo_sys::ffi::*;
+use revo_sys::{RevoBinding, RevoData};
 
 extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoData, out: *mut RevoData) {
     unsafe {
-        *out = 0;
+        *out = revo_sys::NIL;
     }
 }
 
