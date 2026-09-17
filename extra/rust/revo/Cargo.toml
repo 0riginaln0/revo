@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 revo-sys = { path = "../revo-sys" }
-revo-macros = { path = "../revo-macros" }
+revo-macros = { path = "../revo-macros", optional = true }
 
 [features]
 default = ["macros"]

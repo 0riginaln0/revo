@@ -1,16 +1,16 @@
 //! higher level interface for `revo-sys`
 //! you want to work with the `VM` struct most the time
 
-#[feature("macros")]
+#[cfg(feature = "macros")]
 extern crate revo_macros;
 
 use std::ffi::{CStr, CString, c_void};
-use std::fmt::{Display, Write};
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
-#[feature("macros")]
+#[cfg(feature = "macros")]
 pub use revo_macros::*;
 use revo_sys::*;
 
