@@ -2,22 +2,6 @@ use proc_macro::TokenStream;
 use quote::{ToTokens, quote};
 use syn::{FnArg, ItemMod, LitStr, Visibility, parse_macro_input};
 
-fn type_name(ty: &syn::Type) -> Option<String> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.arguments.is_none()
-    {
-        Some(seg.ident.to_string())
-    } else {
-        None
-    }
-}
-
-const SUPPORTED_TYPES: [&str; 18] = [
-    "usize", "u8", "u16", "u32", "u64", "u128", "isize", "i8", "i16", "i32", "i64", "i128", "f32",
-    "f64", "bool", "String", "Table", "Data",
-];
-
 #[proc_macro_attribute]
 pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
     fn err(tokens: impl ToTokens, message: impl AsRef<str>) -> TokenStream {
@@ -68,107 +52,25 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 // is as expected, and build the data automatically.
                 let mut all_args: Vec<proc_macro2::TokenStream> = vec![];
 
-                // Get all variables
+                // Get all variables and convert from revo data into rust values
                 for (i, arg) in item_fn.sig.inputs.iter().skip(1).enumerate() {
                     let syn::FnArg::Typed(arg_pat) = arg else {
                         return err(arg, "expected argument");
                     };
 
-                    let Some(name) = type_name(&arg_pat.ty) else {
-                        return err(&arg_pat.ty, "expected type argument");
-                    };
-
-                    let d = quote!(let d = ::revo::Data::from_raw(vm.ptr, args[#i ]).unwrap(););
-                    let pat = arg_pat.pat.clone();
                     let ty = arg_pat.ty.clone();
-                    // TODO: Instead of this, make a trait that can create an arbitrary type from data
-                    // then users can also just impl their own input types easily
-                    all_args.push(match name.as_str() {
-                        "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8"
-                        | "i16" | "i32" | "i64" | "i128" | "f32" | "f64" => quote!(
-                            let #pat = { #d
-                                let ::revo::Data::Num(n) = d else { panic!("expected num"); };
-                                n as #ty
-                            };
-                        ),
-                        "bool" => quote!(
-                            let #pat = { #d
-                                let ::revo::Data::Atom(n) = d else { panic!("expected :true or :false"); };
-                                match n.as_str() {
-                                    "true" => true,
-                                    "false" => false,
-                                    _ => panic!("expected :true or :false")
-                                }
-                            };
-                        ),
-                        "String" => quote!(
-                            let #pat = { #d
-                                let ::revo::Data::String(s) = d else { panic!("expected string"); };
-                                s
-                            };
-                        ),
-                        "Atom" => quote!(
-                            let #pat = { #d
-                                let ::revo::Data::Atom(a) = d else { panic!("expected string"); };
-                                a
-                            };
-                        ),
-                        "Table" => quote!(
-                            let #pat = { #d
-                                ::revo::Table::from_data(&#vm_pat, &d).unwrap()
-                            };
-                        ),
-                        "Data" => quote!(
-                            let #pat = { #d };
-                        ),
-                        _other => err(
-                            pat,
-                            format!(
-                                "unsupported argument type `{}`, expected: {}",
-                                name,
-                                SUPPORTED_TYPES.join(", ")
-                            ),
-                        )
-                        .into(),
-                    });
+                    let pat = arg_pat.pat.clone();
+                    all_args.push(quote!(
+                        let #pat = #ty::from_data_unchecked(::revo::Data::from_raw(vm.ptr, args[#i]).unwrap(), &#vm_pat);
+                    ));
                 }
 
-                // Set up return / out
+                // Set up return / out, convert the rust value back into revo data
                 let ret = match &item_fn.sig.output {
                     syn::ReturnType::Default => quote!(::revo_sys::NIL),
-                    syn::ReturnType::Type(_, typ) => {
+                    syn::ReturnType::Type(_, _) => {
                         // Assume access to `return_value` of a rust type
-                        let name = type_name(typ).unwrap();
-                        match name.as_str() {
-                            "usize" | "u8" | "u16" | "u32" | "u64" | "u128" | "isize" | "i8"
-                            | "i16" | "i32" | "i64" | "i128" | "f32" | "f64" => {
-                                quote!((return_value as f64).to_bits())
-                            }
-                            "bool" => {
-                                quote!(if return_value ::revo_sys::FALSE else ::revo_sys::TRUE)
-                            }
-                            "String" => {
-                                quote!(Data::String(return_value).to_raw(&vm).unwrap())
-                            }
-                            "Atom" => {
-                                quote!(Data::Atom(return_value).to_raw(&vm).unwrap())
-                            }
-                            "Table" => {
-                                quote!(Data::Table(return_value).to_raw(&vm).unwrap())
-                            }
-                            "Data" => {
-                                quote!(return_value.to_raw().unwrap())
-                            }
-                            _other => err(
-                                item_fn.sig.output.clone(),
-                                format!(
-                                    "unsupported argument type `{}`, expected: {}",
-                                    name,
-                                    SUPPORTED_TYPES.join(", ")
-                                ),
-                            )
-                            .into(),
-                        }
+                        quote!(return_value.to_data().to_raw(&#vm_pat).unwrap())
                     }
                 };
 
@@ -176,7 +78,7 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let fn_block = item_fn.block.clone();
                 let param_count = item_fn.sig.inputs.len() - 1; // don't include `vm`
 
-                // get alternate name specified by attribute
+                // Get optional alternate name specified by attribute
                 let maybe_path = item_fn
                     .attrs
                     .iter()
@@ -204,7 +106,6 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 );
                 fns.push(expanded);
-                // TODO: Allow caller to set arbitrary fn name
                 binding_sigs.push((
                     maybe_path.unwrap_or_else(|| fn_name.to_string().clone()),
                     fn_name.clone(),

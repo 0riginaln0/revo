@@ -389,23 +389,6 @@ impl<'vm> Table<'vm> {
         })
     }
 
-    /// wrap a `Data::Table` from eval back into a handle
-    pub fn from_data(vm: &'vm VM, data: &Data) -> Result<Self, String> {
-        match data {
-            Data::Table(id) => Ok(Self {
-                raw: boxed(RevoType_revo_table, id.0),
-                vm_ptr: vm.ptr,
-                _marker: PhantomData,
-            }),
-            other => Err(format!("not a table: {other:?}")),
-        }
-    }
-
-    /// copy back out to an owned value for globals, args, ...
-    pub fn to_data(&self) -> Data {
-        Data::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
-    }
-
     fn c_ptr(&self) -> *mut std::ffi::c_void {
         c_void_ptr(self.vm_ptr)
     }
@@ -529,4 +512,127 @@ fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<String, &'static 
 
     let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
     Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[derive(Debug)]
+pub enum Error {
+    ExpectedTable,
+    ExpectedDataType,
+    ExpectedBool,
+}
+
+//
+// Data conversion types
+//
+
+pub trait ToData {
+    fn to_data(self) -> Data;
+}
+pub trait TryFromData {
+    type Output;
+    fn try_from_data(data: Data, vm: &VM) -> Result<Self::Output, Error>;
+    fn from_data(data: Data, vm: &VM) -> Option<Self::Output> {
+        Self::try_from_data(data, vm).ok()
+    }
+    fn from_data_unchecked(data: Data, vm: &VM) -> Self::Output {
+        Self::try_from_data(data, vm).unwrap()
+    }
+}
+
+macro_rules! impl_num_data {
+    ($($ty:ident),*) => {
+        $(
+            impl ToData for $ty {
+                fn to_data(self) -> Data {
+                    Data::Num(self as f64)
+                }
+            }
+
+            impl TryFromData for $ty {
+                type Output = Self;
+                fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+                    match data {
+                        Data::Num(n) => Ok(n as Self::Output),
+                        _ => Err(Error::ExpectedDataType),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_num_data!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+);
+
+impl ToData for bool {
+    fn to_data(self) -> Data {
+        match self {
+            true => ::revo_sys::TRUE.to_data(),
+            false => ::revo_sys::FALSE.to_data(),
+        }
+    }
+}
+impl TryFromData for bool {
+    type Output = Self;
+    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+        match data {
+            Data::Atom(a) => match a.as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(Error::ExpectedBool),
+            },
+            _ => Err(Error::ExpectedDataType),
+        }
+    }
+}
+
+impl ToData for String {
+    fn to_data(self) -> Data {
+        Data::String(self)
+    }
+}
+impl TryFromData for String {
+    type Output = Self;
+    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+        match data {
+            Data::String(s) => Ok(s),
+            _ => Err(Error::ExpectedDataType),
+        }
+    }
+}
+
+impl ToData for Atom {
+    fn to_data(self) -> Data {
+        Data::Atom(self)
+    }
+}
+impl TryFromData for Atom {
+    type Output = Self;
+    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+        match data {
+            Data::Atom(a) => Ok(a),
+            _ => Err(Error::ExpectedDataType),
+        }
+    }
+}
+
+impl<'a> ToData for Table<'a> {
+    fn to_data(self) -> Data {
+        Data::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
+    }
+}
+impl<'a> TryFromData for Table<'a> {
+    type Output = Self;
+    // wrap a `Data::Table` from eval back into a handle
+    fn try_from_data(data: Data, vm: &VM) -> Result<Self::Output, Error> {
+        match data {
+            Data::Table(id) => Ok(Self {
+                raw: boxed(RevoType_revo_table, id.0),
+                vm_ptr: vm.ptr,
+                _marker: PhantomData,
+            }),
+            _other => Err(Error::ExpectedTable),
+        }
+    }
 }
