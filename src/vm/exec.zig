@@ -431,6 +431,7 @@ inline fn execFiberDispatch(
     std.debug.assert(fiber.pc < fiber.program.len);
     var instr = fiber.program[fiber.pc];
     fiber.pc += 1;
+    self.bumpPerf(instr.op);
     var base = fiber.top_base;
     var regs = fiber.registers[0..fiber.registers_len];
 
@@ -439,20 +440,20 @@ inline fn execFiberDispatch(
             const val = regRead(regs, base, instr.b);
             regWrite(regs, base, instr.a, val);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_const => {
             std.debug.assert(instr.bx < self.constants.items.len);
             regWrite(regs, base, instr.a, self.constants.items[instr.bx]);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_nil => {
             regWrite(regs, base, instr.a, revo.Data.new.core(.nil));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_small_int => {
@@ -463,7 +464,7 @@ inline fn execFiberDispatch(
                 Data.new.num(@as(i64, @intCast(instr.bx))),
             );
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .add => {
@@ -473,7 +474,7 @@ inline fn execFiberDispatch(
             if (lhs.asNum()) |ln| if (rhs.asNum()) |rn| {
                 regWrite(regs, base, instr.a, Data.new.num(ln + rn));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
 
@@ -489,7 +490,7 @@ inline fn execFiberDispatch(
             base = fiber.top_base;
             regs = fiber.registers[0..fiber.registers_len];
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .sub => {
@@ -498,7 +499,7 @@ inline fn execFiberDispatch(
             if (lhs.asNum()) |ln| if (rhs.asNum()) |rn| {
                 regWrite(regs, base, instr.a, Data.new.num(ln - rn));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
             return self.fail(
@@ -513,13 +514,13 @@ inline fn execFiberDispatch(
             if (lhs.asNum()) |ln| if (rhs.asNum()) |rn| {
                 regWrite(regs, base, instr.a, Data.new.num(ln * rn));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
 
             if (try execStringRepeat(self, regs, base, instr, lhs, rhs, alloc)) |failure| return failure;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .div => {
@@ -529,7 +530,7 @@ inline fn execFiberDispatch(
                 if (rn == 0) return self.evalFailure(error.DivisionByZero);
                 regWrite(regs, base, instr.a, Data.new.num(ln / rn));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
             return self.fail(
@@ -554,13 +555,13 @@ inline fn execFiberDispatch(
                         ri <= std.math.maxInt(i32))
                     {
                         regWrite(regs, base, instr.a, Data.new.num(@as(f64, @floatFromInt(@mod(li, ri)))));
-                        fetchNext(fiber, &instr);
+                        fetchNext(self, fiber, &instr);
                         continue :dispatch instr.op;
                     }
                 };
                 regWrite(regs, base, instr.a, Data.new.num(@mod(ln, rn)));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
             return self.fail(
@@ -581,7 +582,7 @@ inline fn execFiberDispatch(
                     };
                     regWrite(regs, base, instr.a, Data.new.num(@as(f64, @floatFromInt(result))));
 
-                    fetchNext(fiber, &instr);
+                    fetchNext(self, fiber, &instr);
                     continue :dispatch instr.op;
                 };
             };
@@ -613,7 +614,7 @@ inline fn execFiberDispatch(
                     };
                     regWrite(regs, base, instr.a, Data.new.num(@as(f64, @floatFromInt(shifted))));
 
-                    fetchNext(fiber, &instr);
+                    fetchNext(self, fiber, &instr);
                     continue :dispatch instr.op;
                 };
             };
@@ -636,7 +637,7 @@ inline fn execFiberDispatch(
                     regWrite(regs, base, instr.a, Data.new.num(@floor(ln / rn)));
                 }
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             };
             return self.fail(
@@ -650,7 +651,7 @@ inline fn execFiberDispatch(
             if (v.asNum()) |n| {
                 regWrite(regs, base, instr.a, Data.new.num(-n));
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             }
             return self.fail(error.IncompatibleTypes, "cannot negate {s}", .{revo.std_lib.typeof(v, self)});
@@ -658,13 +659,13 @@ inline fn execFiberDispatch(
         .pow => {
             if (try execPow(self, regs, base, instr)) |failure| return failure;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         inline .eq, .neq, .lt, .gt, .lte, .gte => |op| {
             try compare_impl.evalCachedFast(regs, base, self, instr, op);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         inline .eq_int, .neq_int, .lt_int, .gt_int, .lte_int, .gte_int => |op| {
@@ -686,7 +687,7 @@ inline fn execFiberDispatch(
             };
             regWrite(regs, base, instr.a, Data.new.boolean(result));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .@"and" => {
@@ -695,7 +696,7 @@ inline fn execFiberDispatch(
                     !revo.isFalse(regRead(regs, base, instr.c)),
             ));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .@"or" => {
@@ -704,20 +705,20 @@ inline fn execFiberDispatch(
                     !revo.isFalse(regRead(regs, base, instr.c)),
             ));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .not => {
             regWrite(regs, base, instr.a, Data.new.boolean(revo.isFalse(regRead(regs, base, instr.b))));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .table_new => {
             self.noteGCPressure(@sizeOf(revo.table.Table) + 64);
             regWrite(regs, base, instr.a, Data.new.table(try self.tables.create()));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .table_set => {
@@ -731,7 +732,7 @@ inline fn execFiberDispatch(
             // put runs __newindex user code, which may have spawned
             fiber = self.currentFiber();
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .table_get => {
@@ -758,13 +759,13 @@ inline fn execFiberDispatch(
                 regWrite(regs, base, instr.a, resolved.value);
             } else regWrite(regs, base, instr.a, revo.Data.new.core(.undef));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .slice => {
             if (try execSlice(self, regs, base, instr)) |failure| return failure;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .table_set_atom => {
@@ -779,7 +780,7 @@ inline fn execFiberDispatch(
             // put may run __newindex user code, which may have spawned
             fiber = self.currentFiber();
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .table_get_atom => {
@@ -809,13 +810,13 @@ inline fn execFiberDispatch(
                 regWrite(regs, base, instr.a, revo.Data.new.core(.undef));
             }
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .jump => {
             fiber.pc = instr.bx;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .jump_if_false => {
@@ -823,7 +824,7 @@ inline fn execFiberDispatch(
 
             if (revo.isFalse(regRead(regs, base, instr.a))) fiber.pc = instr.bx;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .jump_if_true => {
@@ -831,7 +832,7 @@ inline fn execFiberDispatch(
 
             if (!revo.isFalse(regRead(regs, base, instr.a))) fiber.pc = instr.bx;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_global => {
@@ -839,7 +840,7 @@ inline fn execFiberDispatch(
                 return self.fail(error.UndefinedVariable, "undefined variable `{s}`", .{self.stringValue(instr.bx)});
             regWrite(regs, base, instr.a, value);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_stdlib_global => {
@@ -852,7 +853,7 @@ inline fn execFiberDispatch(
 
             regWrite(regs, base, instr.a, value);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         inline .store_global, .store_global_const => |op| {
@@ -862,7 +863,7 @@ inline fn execFiberDispatch(
             try self.globals.put(instr.bx, val);
             if (op == .store_global_const) try self.const_globals.put(instr.bx, {});
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_local, .bind_local, .store_local => {
@@ -874,27 +875,27 @@ inline fn execFiberDispatch(
                 regs[dst] = regs[src];
             }
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .closure => {
             if (try execClosure(self, regs, base, instr, alloc)) |failure| return failure;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .load_upval => {
             const closure2 = (try self.currentClosureIn(fiber)) orelse return self.evalFailure(error.InvalidLocal);
             regWrite(regs, base, instr.a, try self.loadUpvalueData(closure2.upvalues[instr.bx]));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .store_upval => {
             const closure2 = (try self.currentClosureIn(fiber)) orelse return self.evalFailure(error.InvalidLocal);
             try self.storeUpvalueDataIn(fiber, closure2.upvalues[instr.bx], regRead(regs, base, instr.a));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .call => {
@@ -914,7 +915,7 @@ inline fn execFiberDispatch(
                 }
                 break :dispatch;
             }
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .call_field => {
@@ -933,7 +934,7 @@ inline fn execFiberDispatch(
                 }
                 break :dispatch;
             }
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .ret => {
@@ -948,7 +949,7 @@ inline fn execFiberDispatch(
             regs = fiber.registers[0..fiber.registers_len];
 
             if (if (comptime use_depth) fiber.frames.items.len <= target_depth else !fiber.running) break :dispatch;
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .spawn => {
@@ -961,7 +962,7 @@ inline fn execFiberDispatch(
             regs = fiber.registers[0..fiber.registers_len];
             base = fiber.top_base;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .yield => {
@@ -972,7 +973,7 @@ inline fn execFiberDispatch(
                 // nothing else runnable
                 // keep running in place instead of a round trip through runq
                 fiber.running = true;
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             }
             try self.sched.enqueueRunnable(self.sched.currentID());
@@ -1000,7 +1001,7 @@ inline fn execFiberDispatch(
             regWrite(regs, base, instr.a + 1, step);
             regWrite(regs, base, instr.a + 2, limit);
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .range_loop => {
@@ -1024,7 +1025,7 @@ inline fn execFiberDispatch(
                 fiber.pc = instr.bx;
             }
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .unwrap_result => {
@@ -1033,7 +1034,7 @@ inline fn execFiberDispatch(
 
             const parts = self.resultParts(val);
             if (parts == null) {
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             }
             const tag = parts.?.tag;
@@ -1051,11 +1052,11 @@ inline fn execFiberDispatch(
                     base = fiber.top_base;
                     regs = fiber.registers[0..fiber.registers_len];
 
-                    fetchNext(fiber, &instr);
+                    fetchNext(self, fiber, &instr);
                     continue :dispatch instr.op;
                 }
 
-                fetchNext(fiber, &instr);
+                fetchNext(self, fiber, &instr);
                 continue :dispatch instr.op;
             }
 
@@ -1065,7 +1066,7 @@ inline fn execFiberDispatch(
                 }
             }
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .jump_err => {
@@ -1078,7 +1079,7 @@ inline fn execFiberDispatch(
                 false;
             if (!absent and !is_err) fiber.pc = instr.bx;
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         inline .add_imm, .sub_imm, .mul_imm => |op| {
@@ -1094,7 +1095,7 @@ inline fn execFiberDispatch(
             };
             regWrite(regs, base, instr.a, Data.new.num(result));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .band_imm => {
@@ -1105,7 +1106,7 @@ inline fn execFiberDispatch(
             const ri: i64 = @intCast(instr.bx);
             regWrite(regs, base, instr.a, Data.new.num(@as(f64, @floatFromInt(li & ri))));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
         .lt_int_imm => {
@@ -1114,7 +1115,7 @@ inline fn execFiberDispatch(
             const rhs: i64 = @intCast(instr.bx);
             regWrite(regs, base, instr.a, Data.new.boolean(lhs < @as(f64, @floatFromInt(rhs))));
 
-            fetchNext(fiber, &instr);
+            fetchNext(self, fiber, &instr);
             continue :dispatch instr.op;
         },
     }
@@ -1130,11 +1131,14 @@ noinline fn execFiberDispatchAligned(
     return execFiberDispatch(self, alloc, use_depth, target_depth);
 }
 
-/// fetch next instruction into `instr`, advance fiber pc
-inline fn fetchNext(fiber: *VM.Fiber, instr: *Instruction) void {
+/// fetch next instruction into `instr`, advance fiber pc.
+/// TODO: profiling shows passing self here has no perf hit. is that true?
+///       never looked at disasm. if its not true, put bumpperf calls at callsite instead (its flag-gated inside anyways)
+inline fn fetchNext(self: *VM, fiber: *VM.Fiber, instr: *Instruction) void {
     std.debug.assert(fiber.pc < fiber.program.len);
     instr.* = fiber.program[fiber.pc];
     fiber.pc += 1;
+    self.bumpPerf(instr.op);
 }
 
 /// keep dispatching inplace on another ready fiber instead of unwinding
@@ -1162,7 +1166,7 @@ inline fn switchOrStop(
         }
         base.* = fiber.*.top_base;
         regs.* = fiber.*.registers[0..fiber.*.registers_len];
-        fetchNext(fiber.*, instr);
+        fetchNext(self, fiber.*, instr);
         return true;
     }
     return false;
@@ -1254,6 +1258,9 @@ noinline fn execConcat(
             }
             const result = try self.adoptDataStringNoDedup(buf);
             regWrite(regs, base, prev_a, result);
+            // skipped concats never dispatch, count them here
+            // (the current one was already counted at fetch)
+            self.bumpPerfN(.concat, new_count);
             fiber.pc += new_count;
             break :blk true;
         };
@@ -1454,6 +1461,7 @@ noinline fn execClosure(
 ) VM.EvalError!?VM.EvalFailure {
     const fiber = self.currentFiber();
     const proto = try self.functions.getPrototype(instr.bx);
+    if (self.perfActive()) self.perf.closures_created += 1;
     self.noteGCPressure(@sizeOf(revo.functions.Closure) + @sizeOf(revo.functions.UpvalueID) * proto.upvalue_specs.len);
 
     if (proto.upvalue_specs.len <= 8) {

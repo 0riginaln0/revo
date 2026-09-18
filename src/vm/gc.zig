@@ -5,6 +5,7 @@ const VM = @import("VM.zig");
 pub inline fn noteGCPressure(self: *VM, bytes: usize) void {
     if (!self.gc_enabled) return;
     self.gc_bytes_allocated += bytes;
+    if (self.perfActive()) self.perf.gc_bytes += bytes;
 
     const trigger = @min(self.gc_nursery_threshold, self.gc_threshold);
     if (self.gc_bytes_allocated >= trigger)
@@ -20,6 +21,7 @@ pub fn maybeCollectGarbage(self: *VM) void {
     if (self.host_call_depth > 0) return;
     if (self.gc_in_finalizer) return;
 
+    if (self.perfActive()) self.perf.gc_runs += 1;
     self.gc_bytes_allocated = 0;
     self.strings.clearMarks();
 

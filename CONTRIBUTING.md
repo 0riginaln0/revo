@@ -55,6 +55,8 @@ zig build routine
 
 #### debugger/profiler
 
+build with `-Dperf` and use the `--perf` flag to get the vm performance counters after a program runs
+
 you wanna use lldb for zig. the debug build is unoptimized and keeps symbols
 
 ```sh

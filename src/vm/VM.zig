@@ -199,8 +199,10 @@ gc_enabled: bool = true,
 gc_pending: bool = false,
 gc_bytes_allocated: usize = 0,
 
-// optional opcode counters for benchmarking/profiling
-// allocated on init
+// perf counters for benchmarking/profiling (only with -Dperf:
+// every bump compiles away otherwise, see `perf.zig`)
+perf_enabled: bool = false,
+perf: vm_perf.PerfCounters = .{},
 gc_threshold: usize = 512 * 1024, // 512kb initial
 gc_pause_factor: usize = 4,
 // upper bound on the collection trigger; keeps the heap from growing
@@ -341,6 +343,42 @@ pub const noteGCPressure = vm_gc.noteGCPressure;
 pub const pushMarkTable = vm_gc.pushMarkTable;
 pub const pushMarkFunction = vm_gc.pushMarkFunction;
 pub const pushMarkUpvalue = vm_gc.pushMarkUpvalue;
+
+///
+/// perf counters (only for -Dperf)
+///
+pub inline fn perfActive(self: *VM) bool {
+    if (comptime !vm_perf.enabled) return false;
+    return self.perf_enabled;
+}
+
+pub fn enablePerf(self: *VM) void {
+    if (comptime !vm_perf.enabled) return;
+    self.perf_enabled = true;
+}
+
+pub fn disablePerf(self: *VM) void {
+    if (comptime !vm_perf.enabled) return;
+    self.perf_enabled = false;
+}
+
+pub fn resetPerf(self: *VM) void {
+    if (comptime !vm_perf.enabled) return;
+    self.perf.reset();
+}
+
+pub inline fn bumpPerf(self: *VM, op: opcode.Opcode) void {
+    if (comptime !vm_perf.enabled) return;
+    if (!self.perf_enabled) return;
+    self.perf.countOp(op);
+}
+
+/// batch bump for fused/skipped instructions (concat chaining)
+pub inline fn bumpPerfN(self: *VM, op: opcode.Opcode, n: usize) void {
+    if (comptime !vm_perf.enabled) return;
+    if (!self.perf_enabled) return;
+    self.perf.countOpN(op, n);
+}
 
 pub fn deinit(self: *VM) void {
     self.clearProgramDebugInfo();
@@ -1329,6 +1367,7 @@ fn callNonClosureFunction(
     const fiber = self.currentFiber();
     switch (func) {
         .c_function => |f| {
+            if (self.perfActive()) self.perf.c_calls += 1;
             self.host_call_depth += 1;
             defer self.host_call_depth -= 1;
             const args_start = callee_slot + 1;
@@ -1371,6 +1410,7 @@ fn callNonClosureFunction(
             );
         },
         .host => |f| {
+            if (self.perfActive()) self.perf.host_calls += 1;
             const args_start = callee_slot + 1;
             const args_end = args_start + argc;
             try self.ensureAbsoluteSlot(args_end);
@@ -1924,6 +1964,7 @@ fn copySpawnArgs(
 
 /// publish the `{:fiber, id}` handle into the parents result register
 fn publishSpawnHandle(self: *VM, base: usize, result_reg: opcode.Register, child_id: FiberID) !void {
+    if (self.perfActive()) self.perf.fibers_spawned += 1;
     try self.sched.enqueueRunnable(child_id);
     const result_slot = base + result_reg;
     const cur = self.currentFiber();
@@ -2048,6 +2089,7 @@ test {
     _ = @import("tests.zig");
     _ = @import("exec.zig");
     _ = @import("gc.zig");
+    _ = @import("perf.zig");
 }
 
 const builtin = @import("builtin");
@@ -2084,3 +2126,4 @@ pub const runImportedModule = module.runImportedModule;
 const Scheduler = @import("scheduler.zig");
 const vm_exec = @import("exec.zig");
 const vm_gc = @import("gc.zig");
+const vm_perf = @import("perf.zig");

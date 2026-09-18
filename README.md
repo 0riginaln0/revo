@@ -95,7 +95,7 @@ revo
 - [`neovim`](https://revo.lung.fyi/editors/#neovim)
 - [`helix`](https://revo.lung.fyi/editors/#helix)
 - `emacs`
-  there is a literate emacs plugin with setup instructions at [Emacs.org](https://github.com/if-not-nil/revo/blob/main/Emacs.org)
+  there is a literate emacs plugin with setup instructions at [Emacs.org](https://github.com/if-not-nil/revo/blob/main/extra/Emacs.org)
 
 ### made with revo
 

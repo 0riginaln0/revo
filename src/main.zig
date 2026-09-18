@@ -30,7 +30,12 @@ const EXAMPLES =
     \\  revo compile script.rv out.rvo    compile script with custom output path
     \\  revo -e "1 + 2"                   run inline code
     \\  revo -e "1 + 2" -i                run inline code and enter REPL
-    \\  revo bench script.rv              run with performance counters
+    \\  revo bench script.rv              run with timing stats
+++ (if (revo.vm.perf.enabled)
+    \\  revo --perf script.rv             run with VM perf counters (needs -Dperf)
+    \\  revo bench --perf script.rv       bench with VM perf counters (needs -Dperf)
+else
+    "") ++
     \\  revo dis script.rv                show bytecode disassembly
     \\  revo doc script.rv                print extracted docs as markdown
     \\  revo doc --html src/std/iface     render the stdlib reference as html
@@ -63,6 +68,7 @@ const Config = struct {
     interactive: bool = false,
     test_mode: bool = false,
     bench_iters: u32 = 1,
+    perf: bool = false,
     echo_last: ?revo.Data.RenderMode = null,
     force_splice: bool = false,
     threads: usize = 1,
@@ -322,10 +328,26 @@ fn runCompiledArtifact(
     artifact: Artifact,
     source: []const u8,
     echo_last: ?revo.Data.RenderMode,
+    collect_perf: bool,
 ) !void {
     try vm.setProgramDebugInfo(artifact.spans, source, name);
 
+    if (comptime revo.vm.perf.enabled) {
+        if (collect_perf) {
+            vm.resetPerf();
+            vm.enablePerf();
+        }
+    }
+
     const run_result = try revo.module.runCompiledModuleReport(vm, name, artifact.instructions);
+
+    if (comptime revo.vm.perf.enabled) {
+        if (collect_perf) {
+            vm.disablePerf();
+            revo.vm.perf.printReport(&vm.perf);
+        }
+    }
+
     switch (run_result) {
         .ok => if (echo_last) |mode| try printResult(vm, mode),
         .err => |failure| {
@@ -363,7 +385,10 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
         //   stops flag-parsing, goes to passthru argv
         //   output path (compile mode) is handled below by hand
         .{ .name = "script", .kind = .positional, .terminal = true, .passthrough = true },
-    };
+    } ++ if (comptime revo.vm.perf.enabled) [_]ap.Arg{
+        // only exists in -Dperf builds; otherwise parses as unknown
+        .{ .name = "perf", .kind = .boolean, .description = "collect and print VM perf counters (needs -Dperf)" },
+    } else [_]ap.Arg{};
 
     var commands_buf: [7]ap.Command = undefined;
     var n: usize = 0;
@@ -374,7 +399,7 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
         .{ .name = "dis", .prefix = false, .has_validate = false, .desc = "show bytecode disassembly instead of running" },
         .{ .name = "doc", .prefix = false, .has_validate = false, .desc = "extract doc comments from a file, dir, or the pwd workspace" },
         .{ .name = "version", .prefix = false, .has_validate = false, .desc = "show version and build info" },
-        .{ .name = "bench", .prefix = true, .has_validate = true, .desc = "run with performance counters ([n] iterations, 1 if not specified)" },
+        .{ .name = "bench", .prefix = true, .has_validate = true, .desc = "run N iterations with timing stats ([n] iterations, 1 if not specified)" },
     }) |cmd_def| {
         if (comptime lsp_enabled or cmd_def.name[0] != 'l' or cmd_def.name[1] != 's' or cmd_def.name[2] != 'p') {
             commands_buf[n] = .{
@@ -443,6 +468,9 @@ fn parseArgs(init: std.process.Init, args: []const [:0]const u8) !Config {
     config.interactive = ap.cliArg(&arg_list, "interactive").enabled; // -i
     config.test_mode = ap.cliArg(&arg_list, "test").enabled; // --test
     config.force_splice = ap.cliArg(&arg_list, "splice").enabled; // --splice
+    if (comptime revo.vm.perf.enabled) {
+        config.perf = ap.cliArg(&arg_list, "perf").enabled; // --perf
+    }
     if (ap.cliArg(&arg_list, "display").enabled) config.echo_last = .display; // -d
     if (ap.cliArg(&arg_list, "debug").enabled) config.echo_last = .debug; // -D
     if (ap.cliArg(&arg_list, "pretty").enabled) config.echo_last = .pretty; // -P
@@ -488,7 +516,7 @@ fn runInlineCode(init: std.process.Init, gpa: Allocator, code: []const u8, confi
     defer gpa.free(artifact.spans);
 
     try revo.std_lib.populateArgv(&vm);
-    try runCompiledArtifact(init, gpa, &vm, "<inline>", artifact, code, config.echo_last);
+    try runCompiledArtifact(init, gpa, &vm, "<inline>", artifact, code, config.echo_last, config.perf);
 }
 
 fn runSource(
@@ -508,7 +536,7 @@ fn runSource(
     try vm.setProgramDebugInfo(artifact.spans, source, path);
 
     try revo.std_lib.populateArgv(&vm);
-    try runCompiledArtifact(init, gpa, &vm, path, artifact, source, config.echo_last);
+    try runCompiledArtifact(init, gpa, &vm, path, artifact, source, config.echo_last, config.perf);
 }
 
 fn runBytecode(
@@ -540,6 +568,7 @@ fn runBytecode(
         .{ .spans = deserialized.spans, .instructions = deserialized.instructions },
         "",
         config.echo_last,
+        config.perf,
     );
 }
 
@@ -552,11 +581,19 @@ fn benchArtifact(
     source: []const u8,
     iters: u32,
     echo_last: ?revo.Data.RenderMode,
+    collect_perf: bool,
 ) !void {
     var times = try std.ArrayList(std.Io.Duration).initCapacity(gpa, iters);
     defer times.deinit(gpa);
 
     var last_result: ?revo.EvalResult = null;
+
+    if (comptime revo.vm.perf.enabled) {
+        if (collect_perf) {
+            vm.resetPerf();
+            vm.enablePerf();
+        }
+    }
 
     for (0..iters) |_| {
         const t_start = std.Io.Timestamp.now(init.io, .cpu_process);
@@ -571,6 +608,10 @@ fn benchArtifact(
         }
     }
 
+    if (comptime revo.vm.perf.enabled) {
+        if (collect_perf) vm.disablePerf();
+    }
+
     if (echo_last) |mode| {
         if (last_result) |result| switch (result) {
             .ok => try printResult(vm, mode),
@@ -582,6 +623,10 @@ fn benchArtifact(
     }
 
     revo.vm.debug.printBenchStats(times.items);
+
+    if (comptime revo.vm.perf.enabled) {
+        if (collect_perf) revo.vm.perf.printReport(&vm.perf);
+    }
 }
 
 fn benchSource(init: std.process.Init, gpa: Allocator, path: []const u8, source: []const u8, config: Config) !void {
@@ -597,7 +642,7 @@ fn benchSource(init: std.process.Init, gpa: Allocator, path: []const u8, source:
     };
 
     try revo.std_lib.populateArgv(&vm);
-    try benchArtifact(init, gpa, &vm, path, artifact, source, config.bench_iters, config.echo_last);
+    try benchArtifact(init, gpa, &vm, path, artifact, source, config.bench_iters, config.echo_last, config.perf);
 }
 
 fn benchBytecode(
@@ -630,6 +675,7 @@ fn benchBytecode(
         "",
         config.bench_iters,
         config.echo_last,
+        config.perf,
     );
 }
 

@@ -17,6 +17,7 @@ pub const module = @import("module.zig");
 pub const opcode = @import("opcode.zig");
 pub const Instruction = opcode.Instruction;
 pub const Opcode = opcode.Opcode;
+pub const perf = @import("perf.zig");
 pub const print = @import("print.zig");
 pub const ProgramCounter = @import("VM.zig").ProgramCounter;
 pub const core_atoms = @import("core.zig").core_atoms;
@@ -38,6 +39,7 @@ test {
     _ = @import("memory.zig");
     _ = @import("module.zig");
     _ = @import("opcode.zig");
+    _ = @import("perf.zig");
     _ = @import("table.zig");
     _ = @import("tests.zig");
 }

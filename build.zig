@@ -142,6 +142,8 @@ pub fn build(b: *Build) !void {
 
     const optimize = b.standardOptimizeOption(.{});
 
+    const perf = b.option(bool, "perf", "enable VM perf counters") orelse false;
+
     // botch: wasm64 has a codegen bug in Debug mode that causes "memory access out of
     // bounds" at runtime for some reason
     // force ReleaseSmall for ALL modules linked into the wasm binary, so the VM code gets the fix too
@@ -192,6 +194,7 @@ pub fn build(b: *Build) !void {
     debug_options.addOption([]const u8, "version", VERSION);
     debug_options.addOption([]const u8, "git_commit", dev_version);
     debug_options.addOption(bool, "lsp_enabled", features.lsp);
+    debug_options.addOption(bool, "perf", perf);
     const debug_options_mod = debug_options.createModule();
 
     // used for release builds
@@ -205,6 +208,7 @@ pub fn build(b: *Build) !void {
     release_options.addOption([]const u8, "version", VERSION);
     release_options.addOption([]const u8, "git_commit", dev_version);
     release_options.addOption(bool, "lsp_enabled", features.lsp);
+    release_options.addOption(bool, "perf", perf);
     const release_options_mod = release_options.createModule();
 
     //
@@ -500,6 +504,7 @@ pub fn build(b: *Build) !void {
             rel_options.addOption([]const u8, "version", VERSION);
             rel_options.addOption([]const u8, "git_commit", dev_version);
             rel_options.addOption(bool, "lsp_enabled", release_lsp_enabled);
+            rel_options.addOption(bool, "perf", perf);
             const rel_options_mod = rel_options.createModule();
 
             const rel_vm_mod = b.createModule(.{

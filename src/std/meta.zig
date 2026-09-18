@@ -32,6 +32,7 @@ pub fn set_meta(args: []const Data, vm: *VM) !HostResult {
 }
 
 fn check_field(name: []const u8, table: *revo.table.Table, vm: *VM) !bool {
+    if (table.getRawAtom(try vm.internAtom(name), vm)) |v| return !revo.isFalse(v);
     return !revo.isFalse((try table.get(try vm.ownDataString(name), vm)) orelse Data.new.nil());
 }
 

@@ -192,6 +192,9 @@ tuples and structs are gone now, most breaking change yet
   bare numbers no longer join. handles destructure with `match`.
   any callable goes, including host builtins and `__call` tables
 
+- vm performance counters
+    build with `-Dperf` and use the `--perf` flag to see
+
 ### Removed
 
 - loop-accumulator promotion pass

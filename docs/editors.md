@@ -169,7 +169,7 @@ you can verify everything loaded with `:health` while a revo file is open
 
 ## emacs
 
-a literate config/plugin with full setup instructions exists at the repo's root, named [Emacs.org](https://github.com/if-not-nil/revo/blob/main/ext/Emacs.org)
+a literate config/plugin with full setup instructions exists in the repo's `extra/` directory, named [Emacs.org](https://github.com/if-not-nil/revo/blob/main/extra/)
 
 it covers both `eglot` and `lsp-mode`, plus font-lock highlighting
 
