@@ -986,17 +986,23 @@ const SemanticChecker = struct {
 
                         var patterns = std.ArrayList([]const u8).initCapacity(self.alloc, tags.items.len) catch break :blk unified;
                         defer patterns.deinit(self.alloc);
+
                         for (tags.items) |tag| {
                             if (try types_mod.suggestArmPattern(self.alloc, subject_type, tag)) |pat| {
                                 try patterns.append(self.alloc, pat);
                             }
                         }
+
                         if (patterns.items.len == 0) {
-                            try patterns.append(self.alloc, "_");
+                            // tables suggest shape, so fix mirrors subject
+                            const fallback = (try types_mod.suggestTablePattern(self.alloc, subject_type)) orelse "_";
+
+                            try patterns.append(self.alloc, fallback);
                         }
 
                         var replacement = std.ArrayList(u8).initCapacity(self.alloc, 32) catch break :blk unified;
                         defer replacement.deinit(self.alloc);
+
                         const indent = self.source[line_start..indent_end];
 
                         for (patterns.items) |pat| {

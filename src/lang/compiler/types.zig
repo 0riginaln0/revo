@@ -1011,33 +1011,44 @@ pub fn evalTypeExpr(ctx: CheckCtx, te: *const ast.TypeExpr) !TypeInfo {
 
 ///
 /// guardless arm coverage for match exhaustiveness
+/// , one cover per matcher, guards never count since a guard can fail
 ///
-/// maps matchers to MatchCover descriptors
-/// guards excluded since a guard can always fail
-fn matcherCover(ctx: CheckCtx, m: ast.MatchMatcher) MatchCover {
-    return switch (m) {
-        .wildcard => .wildcard,
-        .expr => |e| switch (e.expr) {
-            .ident => .wildcard, // binder hits every value
-            .hash => |name| .{ .atom = name },
-            .nil => .{ .atom = ":nil" },
-            .number => .number,
-            .string, .multiline_string => .string,
-            .ascribed => |a| .{ .ascribed = evalTypeExpr(ctx, a.type_name) catch TypeInfo{ .tag = .any } },
-            .table_pattern => |items| blk: {
-                if (items.len == 0) break :blk .other;
+fn patternCover(ctx: CheckCtx, node: *const ast.Node) MatchCover {
+    return switch (node.expr) {
+        .ident => .wildcard,
+        .hash => |name| .{ .atom = name },
+        .nil => .{ .atom = ":nil" },
+        .number => .number,
+        .string, .multiline_string => .string,
 
-                const tag = if (items[0].expr == .hash) items[0].expr.hash else break :blk .other;
-                break :blk .{ .tag = tag };
-            },
-            else => .other,
+        .ascribed => |a| if (a.expr.expr == .ident)
+            .{ .ascribed = evalTypeExpr(ctx, a.type_name) catch TypeInfo{ .tag = .any } }
+        else
+            patternCover(ctx, a.expr),
+
+        .table_pattern => |items| blk: {
+            const elems = ctx.alloc.alloc(MatchCover, items.len) catch break :blk .other;
+
+            for (items, elems) |item, *dst| dst.* = patternCover(ctx, item);
+
+            break :blk .{ .table = elems };
         },
+
+        else => .other,
     };
 }
 
-/// covers for one arm, guards included; callers decide what guards mean
+fn matcherCover(ctx: CheckCtx, m: ast.MatchMatcher) MatchCover {
+    return switch (m) {
+        .wildcard => .wildcard,
+        .expr => |e| patternCover(ctx, e),
+    };
+}
+
+/// one cover per guardless matcher
+/// , callers decide what guards mean
 pub fn buildArmCovers(ctx: CheckCtx, arm: ast.MatchArm) ![]MatchCover {
-    var covers = std.ArrayList(MatchCover).initCapacity(ctx.alloc, arm.matchers.len * 2) catch return &.{};
+    var covers = std.ArrayList(MatchCover).initCapacity(ctx.alloc, arm.matchers.len) catch return &.{};
     errdefer covers.deinit(ctx.alloc);
 
     for (arm.matchers) |m| try covers.append(ctx.alloc, matcherCover(ctx, m));
@@ -1045,21 +1056,25 @@ pub fn buildArmCovers(ctx: CheckCtx, arm: ast.MatchArm) ![]MatchCover {
 }
 
 pub fn buildCovers(ctx: CheckCtx, arms: []const ast.MatchArm) ![]MatchCover {
-    var covers = std.ArrayList(MatchCover).initCapacity(ctx.alloc, arms.len * 2) catch return &.{};
+    var covers = std.ArrayList(MatchCover).initCapacity(ctx.alloc, arms.len) catch return &.{};
     errdefer covers.deinit(ctx.alloc);
 
     for (arms) |arm| {
         if (arm.guard != null) continue;
+
         const one = try buildArmCovers(ctx, arm);
         defer ctx.alloc.free(one);
+
         try covers.appendSlice(ctx.alloc, one);
     }
+
     return covers.toOwnedSlice(ctx.alloc);
 }
 
 pub fn matchCovers(ctx: CheckCtx, subject: TypeInfo, arms: []const ast.MatchArm) bool {
     const covers = buildCovers(ctx, arms) catch return false;
     defer ctx.alloc.free(covers);
+
     return matchCoversAll(subject, covers);
 }
 
@@ -1257,54 +1272,130 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
 // match cov prover
 //
 
-/// one guardless arm's contribution to exhaustiveness
-///
-/// callers map ast matchers to these
-/// guards excluded since a guard can always fail through
+/// one guardless arm shape
+/// , `x: T` stays only on binders, else use inner shape
 pub const MatchCover = union(enum) {
-    wildcard, // `_`, binder `v`,, etc. anything matching every value
-    atom: []const u8, // `:ok` literal
-    tag: []const u8, // `{:ok, ...}` table pat leading tag
-    ascribed: TypeInfo, // `x: T` covers subject iff subject coerces to T
-    number, // numeric literal, one value of an infinite domain
-    string, // string literal, one value of an infinite domain
-    other, // shapes proving nothing;; ignored
+    wildcard, // `_`, binders, everything
+    atom: []const u8, // `:ok`
+    ascribed: TypeInfo, // `x: T`, subject fits `T`
+    number, // literal, one of infinitely many
+    string, // literal, one of infinitely many
+    table: []const MatchCover, // `{p0, ...}`, array part only
+    other, // unknown shape, meets but never covers
 };
 
-/// true when covers hit every value of subject
-/// pure, no ast, no eval
+/// array length of a table type, null when unknown
+/// , counts "0", "1", ... with no gaps, skips named keys
+/// , gaps, extra numbers, and open shapes yield null
+/// , null covers nothing, but stays reachable for overlaps
+fn tableArrayLen(fields: ?[]const RecordField) ?usize {
+    const fs = fields orelse return null;
+
+    var len: usize = 0;
+    while (len <= fs.len) {
+        var buf: [16]u8 = undefined;
+        const want = std.fmt.bufPrint(&buf, "{d}", .{len}) catch return null;
+        if (findField(fs, want) == null) break;
+        len += 1;
+    }
+
+    for (fs) |f| {
+        const idx = std.fmt.parseInt(usize, f.name, 10) catch continue;
+        if (idx >= len) return null;
+    }
+
+    return len;
+}
+
+/// element type at idx, null when absent
+fn tableElemType(fields: []const RecordField, idx: usize) ?TypeInfo {
+    var buf: [16]u8 = undefined;
+    const want = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch return null;
+
+    if (findField(fields, want)) |f| return f.field_type;
+    return null;
+}
+
+/// one cover hits every value of subject
+/// , true is sure, false means nothing, may still hit
+/// , tables need one shape only
+fn coversOne(subject: TypeInfo, cover: MatchCover) bool {
+    switch (cover) {
+        .wildcard => return true,
+        .ascribed => |ti| return canCoerce(subject, ti),
+
+        .atom => |name| {
+            if (subject.tag == .never) return true;
+            if (subject.tag != .atom) return false;
+
+            return std.mem.eql(u8, ast.atomName(subject.tag.atom), ast.atomName(name));
+        },
+
+        .number, .string, .other => return subject.tag == .never,
+
+        .table => |elems| {
+            if (subject.tag == .never) return true;
+            if (subject.tag == .table) return tableHits(elems, subject.tag.table.fields);
+            if (subject.tag != .@"union") return false;
+
+            for (subject.tag.@"union") |v| if (!variantHits(elems, v)) return false;
+            return true;
+        },
+    }
+}
+
+/// table elems hit every element of fields
+/// , same length and every element hits
+fn tableHits(elems: []const MatchCover, fields: ?[]const RecordField) bool {
+    const want = tableArrayLen(fields) orelse return false;
+    if (want != elems.len) return false;
+
+    const fs = fields.?;
+    for (elems, 0..) |e, i| {
+        const et = tableElemType(fs, i) orelse return false;
+        if (!coversOne(et, e)) return false;
+    }
+
+    return true;
+}
+
+/// table elems hit one union variant
+/// , plain atoms never meet tables
+fn variantHits(elems: []const MatchCover, variant: UnionVariant) bool {
+    if (variant.types.len == 0) return false;
+
+    const inner = variant.types[0];
+    if (inner.tag != .table) return false;
+
+    return tableHits(elems, inner.tag.table.fields);
+}
+
+/// every value of subject meets some cover
+/// , pure, no ast, no eval
+/// , wildcard and fitting `x: T` return early
+/// , unions need all variants hit, tables need one shape hit
 pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
     if (subject.tag == .never) return true;
+
     for (covers) |c| switch (c) {
         .wildcard => return true,
-        .ascribed => |ti| {
-            if (canCoerce(subject, ti)) return true;
+        .ascribed => |ti| if (canCoerce(subject, ti)) {
+            return true;
         },
         else => {},
     };
+
     switch (subject.tag) {
         .@"union" => |us| {
-            for (us) |v| {
-                var hit = false;
-                for (covers) |c| switch (c) {
-                    .atom => |name| {
-                        if (unionVariantTagEql(v, name)) hit = true;
-                    },
-                    .tag => |name| {
-                        if (unionVariantTagEql(v, name)) hit = true;
-                    },
-                    .ascribed => |ti| {
-                        if (targetAcceptsVariant(v, ti)) hit = true;
-                    },
-                    else => {},
-                };
-                if (!hit) return false;
-            }
+            for (us) |v| if (!variantCovered(v, covers)) return false;
+
             return true;
         },
+
         .bool => {
             var saw_true = false;
             var saw_false = false;
+
             for (covers) |c| switch (c) {
                 .atom => |name| {
                     const bare = ast.atomName(name);
@@ -1313,27 +1404,41 @@ pub fn matchCoversAll(subject: TypeInfo, covers: []const MatchCover) bool {
                 },
                 else => {},
             };
+
             return saw_true and saw_false;
         },
-        .atom => |name| {
-            for (covers) |c| switch (c) {
-                .atom => |cover| {
-                    if (std.mem.eql(u8, ast.atomName(cover), ast.atomName(name))) return true;
-                },
-                else => {},
-            };
+
+        .table, .atom => {
+            for (covers) |c| if (coversOne(subject, c)) return true;
+
             return false;
         },
+
         else => return false,
     }
 }
 
-/// true when some subject value could meet the pattern
-///   ; unknown shapes (.other) assume reachable, never proven dead
+/// one union variant meets some cover
+/// , plain atoms need atom, tables need shape hit, else fitting `x: T`
+fn variantCovered(variant: UnionVariant, covers: []const MatchCover) bool {
+    for (covers) |c| switch (c) {
+        .atom => |name| if (unionVariantTagEql(variant, name)) return true,
+        .ascribed => |ti| if (targetAcceptsVariant(variant, ti)) return true,
+        .table => |elems| if (variantHits(elems, variant)) return true,
+        else => {},
+    };
+
+    return false;
+}
+
+/// some value of subject could meet cover
+/// , unknown shapes stay reachable, never proven dead
+/// , elems recurse here, so one check covers all depths
 pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
     switch (cover) {
-        .wildcard => return true,
-        .other => return true,
+        .wildcard, .other => return true,
+        .table => |elems| return tableMeets(elems, subject),
+
         .ascribed => |ti| switch (subject.tag) {
             .@"union" => |us| {
                 for (us) |v| if (targetAcceptsVariant(v, ti)) return true;
@@ -1342,6 +1447,7 @@ pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
             .any, .type_var => return true,
             else => return canCoerce(subject, ti),
         },
+
         .atom => |name| switch (subject.tag) {
             .any, .type_var => return true,
             .@"union" => |us| {
@@ -1355,19 +1461,7 @@ pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
             .atom => |s| return std.mem.eql(u8, ast.atomName(s), ast.atomName(name)),
             else => return false,
         },
-        .tag => |name| switch (subject.tag) {
-            .any, .type_var => return true,
-            .@"union" => |us| {
-                for (us) |v| if (unionVariantTagEql(v, name)) return true;
-                return false;
-            },
-            .table => |tbl| {
-                const fields = tbl.fields orelse return true;
-                if (fields.len == 0 or fields[0].field_type.tag != .atom) return true;
-                return std.mem.eql(u8, ast.atomName(fields[0].field_type.tag.atom), ast.atomName(name));
-            },
-            else => return false,
-        },
+
         .number => switch (subject.tag) {
             .number, .any, .type_var => return true,
             .@"union" => |us| {
@@ -1376,6 +1470,7 @@ pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
             },
             else => return false,
         },
+
         .string => switch (subject.tag) {
             .string, .any, .type_var => return true,
             .@"union" => |us| {
@@ -1387,11 +1482,57 @@ pub fn matchOverlaps(subject: TypeInfo, cover: MatchCover) bool {
     }
 }
 
+/// table elems could meet subject
+/// , any stays reachable, never stays dead
+/// , unions need one variant met, other shapes never meet tables
+fn tableMeets(elems: []const MatchCover, subject: TypeInfo) bool {
+    switch (subject.tag) {
+        .any, .type_var => return true,
+        .never => return false,
+        .table => |tbl| return tableMeetsFields(elems, tbl.fields),
+
+        .@"union" => |us| {
+            for (us) |v| if (variantMeets(elems, v)) return true;
+            return false;
+        },
+
+        else => return false,
+    }
+}
+
+/// table elems could meet fields
+/// , unknown length stays reachable
+/// , known length needs same count and every element meets
+fn tableMeetsFields(elems: []const MatchCover, fields: ?[]const RecordField) bool {
+    const want = tableArrayLen(fields) orelse return true;
+    if (want != elems.len) return false;
+
+    const fs = fields.?;
+    for (elems, 0..) |e, i| {
+        const et = tableElemType(fs, i) orelse return true;
+        if (!matchOverlaps(et, e)) return false;
+    }
+
+    return true;
+}
+
+/// table elems could meet one variant
+/// , plain atoms never meet tables, other shapes stay reachable
+fn variantMeets(elems: []const MatchCover, variant: UnionVariant) bool {
+    if (variant.types.len == 0) return true;
+
+    const inner = variant.types[0];
+    if (inner.tag == .atom) return false;
+    if (inner.tag == .table) return tableMeetsFields(elems, inner.tag.table.fields);
+
+    return true;
+}
+
 /// union result with a :nil miss arm
 ///
-/// non-exhaustive match falls through to nil at runtime, so :nil is part of the type
-/// `any` absorbs it and `never` (all arms diverge) becomes just :nil
-/// oom degrades to result
+/// non-exhaustive match falls to nil at runtime, so :nil joins the type
+/// `any` stays `any`, `never` becomes just :nil
+/// low memory keeps result
 pub fn withNilMiss(alloc: std.mem.Allocator, result: TypeInfo) TypeInfo {
     if (result.tag == .any) return result;
     if (result.tag == .never) return .{ .tag = .{ .atom = ":nil" } };
@@ -1409,39 +1550,34 @@ pub fn withNilMiss(alloc: std.mem.Allocator, result: TypeInfo) TypeInfo {
     return .{ .tag = .{ .@"union" = owned } };
 }
 
-//
-// bare names of union/bool/atom variants no cover hits, for warning messages
-//   ; slices borrow subject storage, empty whn nothing nameable
+/// bare names of uncovered union variants, for warnings
+/// , borrows subject, empty when none nameable
 pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []const MatchCover, out: *std.ArrayList([]const u8)) !void {
     switch (subject.tag) {
         .@"union" => |us| {
             for (us) |v| {
-                var hit = false;
-                for (covers) |c| switch (c) {
-                    .atom => |name| {
-                        if (unionVariantTagEql(v, name)) hit = true;
-                    },
-                    .tag => |name| {
-                        if (unionVariantTagEql(v, name)) hit = true;
-                    },
-                    .ascribed => |ti| {
-                        if (targetAcceptsVariant(v, ti)) hit = true;
-                    },
-                    else => {},
-                };
-                if (hit or v.types.len == 0) continue;
+                if (v.types.len == 0) continue;
+                if (variantCovered(v, covers)) continue;
+
                 if (v.types[0].tag == .atom) {
                     try out.append(alloc, ast.atomName(v.types[0].tag.atom));
                 } else if (v.types[0].tag == .table) {
                     const fields = v.types[0].tag.table.fields orelse continue;
-                    if (fields.len == 0 or fields[0].field_type.tag != .atom) continue;
-                    try out.append(alloc, ast.atomName(fields[0].field_type.tag.atom));
+                    const alen = tableArrayLen(fields) orelse continue;
+                    if (alen == 0) continue;
+
+                    const et = tableElemType(fields, 0) orelse continue;
+                    if (et.tag != .atom) continue;
+
+                    try out.append(alloc, ast.atomName(et.tag.atom));
                 }
             }
         },
+
         .bool => {
             var saw_true = false;
             var saw_false = false;
+
             for (covers) |c| switch (c) {
                 .atom => |name| {
                     const bare = ast.atomName(name);
@@ -1450,9 +1586,11 @@ pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []cons
                 },
                 else => {},
             };
+
             if (!saw_true) try out.append(alloc, "true");
             if (!saw_false) try out.append(alloc, "false");
         },
+
         .atom => |name| {
             for (covers) |c| switch (c) {
                 .atom => |cover| {
@@ -1460,75 +1598,90 @@ pub fn uncoveredTags(alloc: std.mem.Allocator, subject: TypeInfo, covers: []cons
                 },
                 else => {},
             };
+
             try out.append(alloc, ast.atomName(name));
         },
+
         else => {},
     }
 }
 
-///
-/// source pattern covering one uncovered tag!!!
-///
-/// : `:tag` for bare atoms and bools
+/// source pattern covering one uncovered tag
+/// , `:tag` for plain atoms and bools
 /// , `{:tag, _, ...}` for tuple variants
-/// , null when the shape is not nameable (numbers, strings, dynamic tables) and `_` must cover it
-///
-/// no idea what to do for nums and strings
-///
-/// tags are bare names as returned by uncoveredTags
-/// caller owns the returned slice
-///
+/// , null when the shape is not nameable and `_` must cover it
+/// , tags are plain names as returned by uncoveredTags
+/// , caller owns the returned slice
 pub fn suggestArmPattern(alloc: std.mem.Allocator, subject: TypeInfo, tag: []const u8) !?[]const u8 {
     switch (subject.tag) {
         .@"union" => |us| {
             for (us) |v| {
                 if (!unionVariantTagEql(v, tag)) continue;
                 if (v.types.len == 0) return null;
+
                 if (v.types[0].tag == .atom) {
                     return try std.fmt.allocPrint(alloc, ":{s}", .{tag});
                 }
+
                 if (v.types[0].tag == .table) {
                     const fields = v.types[0].tag.table.fields orelse return null;
-                    if (fields.len == 0 or fields[0].field_type.tag != .atom) return null;
-                    //
-                    // positional payload only;
-                    // named fields need a record pattern we canr dérive
-                    // , so `_` covers them
-                    var n: usize = 0;
-                    var idx: usize = 1;
-                    for (fields[1..]) |f| {
-                        var buf: [16]u8 = undefined;
-                        const want = std.fmt.bufPrint(&buf, "{d}", .{idx}) catch break;
-                        if (!std.mem.eql(u8, f.name, want)) break;
-                        n += 1;
-                        idx += 1;
-                    }
+                    const alen = tableArrayLen(fields) orelse return null;
+                    if (alen == 0) return null;
 
-                    if (n != fields.len - 1) return null;
-                    if (n == 0) return try std.fmt.allocPrint(alloc, "{{:{s}}}", .{tag});
+                    // positional only, named shapes fall back to `_`
+                    if (fields.len != alen) return null;
+                    if (alen == 1) return try std.fmt.allocPrint(alloc, "{{:{s}}}", .{tag});
 
-                    var buf = try std.ArrayList(u8).initCapacity(alloc, 8 + n * 3);
+                    var buf = try std.ArrayList(u8).initCapacity(alloc, 8 + alen * 3);
                     errdefer buf.deinit(alloc);
 
                     try buf.appendSlice(alloc, "{:");
                     try buf.appendSlice(alloc, tag);
 
-                    for (0..n) |_| try buf.appendSlice(alloc, ", _");
+                    for (0..alen - 1) |_| try buf.appendSlice(alloc, ", _");
+
                     try buf.append(alloc, '}');
                     return try buf.toOwnedSlice(alloc);
                 }
+
                 return null;
             }
+
             return null;
         },
+
         .bool => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
         .atom => return try std.fmt.allocPrint(alloc, ":{s}", .{tag}),
+
         else => return null,
     }
 }
 
+/// source pattern covering a concrete table subject
+/// , `{_, _, ...}` with one `_` per array element, `{}` for empty
+/// , null when the shape is unknown and `_` must cover it
+/// , caller owns the returned slice
+pub fn suggestTablePattern(alloc: std.mem.Allocator, subject: TypeInfo) !?[]const u8 {
+    if (subject.tag != .table) return null;
+
+    const alen = tableArrayLen(subject.tag.table.fields) orelse return null;
+    if (alen == 0) return try alloc.dupe(u8, "{}");
+
+    var buf = try std.ArrayList(u8).initCapacity(alloc, 2 + alen * 3);
+    errdefer buf.deinit(alloc);
+    try buf.append(alloc, '{');
+
+    for (0..alen) |i| {
+        if (i > 0) try buf.appendSlice(alloc, ", ");
+        try buf.append(alloc, '_');
+    }
+
+    try buf.append(alloc, '}');
+    return try buf.toOwnedSlice(alloc);
+}
+
 test matchCoversAll {
-    // wildcard n never
+    // wildcard and never
     try std.testing.expect(matchCoversAll(.{ .tag = .never }, &.{}));
     try std.testing.expect(matchCoversAll(.{ .tag = .number }, &.{.wildcard}));
     try std.testing.expect(!matchCoversAll(.{ .tag = .number }, &.{}));
@@ -1553,7 +1706,7 @@ test matchCoversAll {
     try std.testing.expect(!matchCoversAll(subject, &.{.{ .atom = ":ok" }}));
     try std.testing.expect(matchCoversAll(subject, &.{.wildcard}));
     //
-    // bool n single atom
+    // bool and single atom
     try std.testing.expect(matchCoversAll(.{ .tag = .bool }, &.{
         .{ .atom = ":true" },
         .{ .atom = ":false" },
@@ -1568,7 +1721,7 @@ test matchCoversAll {
         &.{.{ .atom = ":err" }},
     ));
     //
-    // ascribed covers when subject coerces
+    // ascribed covers when subject fits
     try std.testing.expect(matchCoversAll(
         .{ .tag = .number },
         &.{.{ .ascribed = .{ .tag = .number } }},
@@ -1581,6 +1734,32 @@ test matchCoversAll {
         .{ .tag = .number },
         &.{.{ .ascribed = .{ .tag = .string } }},
     ));
+    //
+    // tables need one shape hit, same length and every element hits
+    const num_ti: TypeInfo = .{ .tag = .number };
+    const ok_ti: TypeInfo = .{ .tag = .{ .atom = ":ok" } };
+    const pair_fields = [_]RecordField{
+        .{ .name = "0", .field_type = num_ti },
+        .{ .name = "1", .field_type = ok_ti },
+    };
+    const pair: TypeInfo = .{ .tag = .{ .table = .{ .key = null, .value = &ANY_TI, .fields = &pair_fields } } };
+    const pair_elems = [_]MatchCover{ .wildcard, .{ .atom = ":ok" } };
+    try std.testing.expect(matchCoversAll(pair, &.{.{ .table = &pair_elems }}));
+
+    // literal never covers its domain
+    const lit_elems = [_]MatchCover{ .number, .{ .atom = ":ok" } };
+    try std.testing.expect(!matchCoversAll(pair, &.{.{ .table = &lit_elems }}));
+
+    // length mismatch never covers
+    const short_elems = [_]MatchCover{.wildcard};
+    try std.testing.expect(!matchCoversAll(pair, &.{.{ .table = &short_elems }}));
+
+    // single binder covers a single table
+    const one_fields = [_]RecordField{
+        .{ .name = "0", .field_type = ok_ti },
+    };
+    const one: TypeInfo = .{ .tag = .{ .table = .{ .key = null, .value = &ANY_TI, .fields = &one_fields } } };
+    try std.testing.expect(matchCoversAll(one, &.{.{ .table = &short_elems }}));
 }
 
 test "types: TypeInfo equality" {
