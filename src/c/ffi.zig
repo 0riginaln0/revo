@@ -207,6 +207,26 @@ pub export fn revo_call(
     return true;
 }
 
+/// the name is borrowed, keep it static
+/// empty name when len is 0
+/// nil on null fn or allocation failure
+pub export fn revo_cfunc_new(vm_ptr: *anyopaque, fn_ptr: ?*anyopaque, name_ptr: u64, name_len: usize) callconv(.c) Data {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const fp = fn_ptr orelse return nil_val;
+
+    const name: []const u8 = if (name_len == 0) "" else blk: {
+        const ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
+        break :blk ptr[0..name_len];
+    };
+
+    const id = v.functions.create(.{ .c_function = .{
+        .name = name,
+        .fn_ptr = @ptrCast(@alignCast(fp)),
+    } }) catch return nil_val;
+
+    return Data.new.function(id);
+}
+
 /// return pointer to interned string data (null on failure, valid until next GC sweep)
 pub export fn revo_string_data(vm_ptr: *anyopaque, id: u64) callconv(.c) ?[*]const u8 {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));

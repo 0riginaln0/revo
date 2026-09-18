@@ -31,6 +31,17 @@ static int failed = 0;
     assert(cond);                                                            \
   } while (0)
 
+static int test_double_fn(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+  if (argc < 1)
+    return revo_c_err_arity(vm, argc, 1);
+
+  if (!revo_is_number(argv[0]))
+    return revo_c_err_type(vm, 0, "number", argv[0]);
+
+  *out = revo_num(revo_num_value(argv[0]) * 2);
+  return REVO_OK;
+}
+
 int main(int argc, char **argv) {
   puts("c api tests");
 
@@ -321,6 +332,29 @@ int main(int argc, char **argv) {
     call_ok = revo_call(vm, revo_num(42.0), 0, NULL, &call_result);
 
     assert(!call_ok);
+  }
+
+  T("revo_cfunc_new registers a callable c function") {
+    RevoData cfn =
+        revo_cfunc_new(vm, (void *)test_double_fn, (uint64_t)(uintptr_t)"double", 6);
+    assert(revo_is_function(cfn));
+
+    RevoData dargs[1] = {revo_num(21.0)};
+    call_ok = revo_call(vm, cfn, 1, dargs, &call_result);
+    assert(call_ok);
+    assert(revo_is_number(call_result));
+    assert(fabs(revo_num_value(call_result) - 42.0) < 1e-12);
+
+    // reachable from revo too
+    revo_setglobal_cstr(vm, "c_double", cfn);
+    ok = erevo_eval(vm, "test", "c_double(21)", &val);
+    check(ok);
+    assert(revo_is_number(val));
+    assert(fabs(revo_num_value(val) - 42.0) < 1e-12);
+
+    // empty name works, null fn gives nil
+    assert(revo_is_function(revo_cfunc_new(vm, (void *)test_double_fn, 0, 0)));
+    assert(revo_is_nil(revo_cfunc_new(vm, NULL, 0, 0)));
   }
 
   //
