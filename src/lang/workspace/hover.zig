@@ -17,7 +17,7 @@ const Range = W.Range;
 const Hover = W.Hover;
 const Symbol = W.Symbol;
 
-/// markdown hover: kind, type, definition source, location
+/// markdown hover, kind + type + where its from + where it lives
 pub fn hover(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -25,14 +25,12 @@ pub fn hover(
     pos: Position,
     opts: pipeline.BuildOptions,
 ) !?Hover {
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-    const snap = analysis.snapshot;
+    const snap = self.snapshot(id) orelse return null;
     const name = txt.wordAtPosition(snap.text, pos) orelse return null;
 
-    // baselib fallback; when name not bound in the ast
-    if (try self.definition(alloc, id, pos, opts) == null) {
-        if (revo.baselib.specs.find(name)) |spec| {
+    const def_opt = try self.definition(alloc, id, pos, opts);
+    if (def_opt == null) {
+        if (common.baselibSig(name)) |spec| {
             var buf = std.Io.Writer.Allocating.init(alloc);
             defer buf.deinit();
             try buf.writer.writeAll("```revo\n");
@@ -54,7 +52,7 @@ pub fn hover(
             };
         }
         //
-        // member of an imported module: `mod.member` - show its definition
+        // member off an imported module, `mod.member` shows its def
         if (txt.moduleMemberAt(snap.text, pos)) |mod_name| {
             const fid = self.resolveDepId(alloc, id, mod_name) orelse id;
             const mod_syms = self.symbolsFromDep(alloc, fid) catch null;
@@ -65,7 +63,7 @@ pub fn hover(
                     const sym_tn = if (s.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                     defer if (sym_tn.len > 0) alloc.free(sym_tn);
 
-                    const display = try renderDefinition(alloc, name, sym_tn, self, fid);
+                    const display = try renderDefinitionOpts(alloc, name, sym_tn, self, fid, opts);
                     defer alloc.free(display);
                     var buf = std.Io.Writer.Allocating.init(alloc);
                     defer buf.deinit();
@@ -86,36 +84,25 @@ pub fn hover(
         }
         return null;
     }
-    const def = try self.definition(alloc, id, pos, opts) orelse return null;
+    const def = def_opt orelse return null;
 
-    // look up type in the definition file (may differ from current file)
     var type_name: []const u8 = "";
     var record_display: []const u8 = "";
-    if (def.file_id == id) {
-        for (analysis.symbols) |sym| {
-            if (std.mem.eql(u8, sym.name, name) and
-                sym.range.start.line == def.range.start.line)
-            {
-                type_name = if (sym.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
-                record_display = try renderRecordDisplay(alloc, sym);
-                break;
-            }
-        }
-    } else {
-        var def_analysis = try self.inspectDetailed(alloc, def.file_id, opts);
-        defer def_analysis.deinit(alloc);
-        for (def_analysis.symbols) |sym| {
-            if (std.mem.eql(u8, sym.name, name)) {
-                type_name = if (sym.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
-                record_display = try renderRecordDisplay(alloc, sym);
-                break;
-            }
+    {
+        const entry = try self.ensureInspect(alloc, def.file_id, opts);
+
+        for (entry.symbols) |sym| {
+            if (!std.mem.eql(u8, sym.name, name)) continue;
+            if (def.file_id == id and sym.range.start.line != def.range.start.line) continue;
+            // cross-file takes the first name hit, same-file wants name+line
+            type_name = if (sym.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
+            record_display = try renderRecordDisplay(alloc, sym);
+            break;
         }
     }
     defer if (type_name.len > 0) alloc.free(type_name);
     defer if (record_display.len > 0) alloc.free(record_display);
 
-    // for import modules, show exported symbols with full signatures
     if (self.resolveDepId(alloc, id, name)) |dep_id| {
         const mod_syms = self.symbolsFromDep(alloc, dep_id) catch null;
         if (mod_syms) |ms| {
@@ -127,11 +114,11 @@ pub fn hover(
                 try buf.writer.print("module `{s}`\n\n```revo\n", .{name});
 
                 for (ms) |s| {
-                    if (try self.fnSig(alloc, dep_id, s.name) != null) {
+                    if (try self.fnSigOpts(alloc, dep_id, s.name, opts) != null) {
                         const sym_tn = if (s.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                         defer if (sym_tn.len > 0) alloc.free(sym_tn);
 
-                        const display = try renderDefinition(alloc, s.name, sym_tn, self, dep_id);
+                        const display = try renderDefinitionOpts(alloc, s.name, sym_tn, self, dep_id, opts);
                         defer alloc.free(display);
 
                         try buf.writer.writeAll(display);
@@ -156,16 +143,17 @@ pub fn hover(
     }
 
     var doc_text: []const u8 = "";
-    if (self.inspect_cache.getPtr(def.file_id)) |cache| {
-        if (cache.docs.get(name)) |d| doc_text = d;
+    {
+        const entry = try self.ensureInspect(alloc, def.file_id, opts);
+        if (entry.docs.get(name)) |d| doc_text = d;
     }
     const display = blk: {
-        if (try self.fnSig(alloc, def.file_id, name) != null)
-            break :blk try renderDefinition(alloc, name, type_name, self, def.file_id);
+        if (try self.fnSigOpts(alloc, def.file_id, name, opts) != null)
+            break :blk try renderDefinitionOpts(alloc, name, type_name, self, def.file_id, opts);
         if (record_display.len > 0) break :blk try alloc.dupe(u8, record_display);
         if (self.snapshot(def.file_id)) |ss|
             break :blk try renderBindingLine(alloc, ss.text, def.range, type_name);
-        break :blk try renderDefinition(alloc, name, type_name, self, def.file_id);
+        break :blk try renderDefinitionOpts(alloc, name, type_name, self, def.file_id, opts);
     };
     defer alloc.free(display);
     var buf = std.Io.Writer.Allocating.init(alloc);
@@ -176,7 +164,7 @@ pub fn hover(
     if (doc_text.len > 0) {
         try buf.writer.print("\n\n{s}", .{doc_text});
     }
-    // cross-file defs: their range is meaningless in this file
+    // cross-file ranges mean nothing over here, use the call-site word
     const range: Range = if (def.file_id == id)
         def.range
     else
@@ -187,15 +175,14 @@ pub fn hover(
     };
 }
 
-/// hover rendering for a name declared in file `id`, null if not declared there
+/// hover for a name you already hold, null when it binds nowhere here
 pub fn hoverByName(
     self: *Workspace,
     alloc: std.mem.Allocator,
     id: FileId,
     name: []const u8,
 ) !?[]const u8 {
-    _ = try self.inspectDetailed(alloc, id, .{});
-    const cache = self.inspect_cache.getPtr(id) orelse return null;
+    const cache = try self.ensureInspect(alloc, id, .{});
 
     const doc = cache.docs.get(name);
     const sig = cache.sig_map.get(name);
@@ -270,8 +257,8 @@ fn renderBindingLine(
     return alloc.dupe(u8, line);
 }
 
-/// format a definition line: fn name(p1: t1, ...) -> ret when fnSig
-/// is available, otherwise just name or type_name
+/// one def line, `fn name(p, ...) -> ret` when theres a sig
+///   else bare name or type_name
 pub fn renderDefinition(
     alloc: std.mem.Allocator,
     name: []const u8,
@@ -279,32 +266,21 @@ pub fn renderDefinition(
     ws: *Workspace,
     file_id: FileId,
 ) ![]const u8 {
-    if (try ws.fnSig(alloc, file_id, name)) |sig| {
-        var buf = std.Io.Writer.Allocating.init(alloc);
-        defer buf.deinit();
+    return renderDefinitionOpts(alloc, name, type_name, ws, file_id, .{});
+}
 
-        try buf.writer.print("fn {s}", .{name});
-        if (sig.type_params_text) |tps| try buf.writer.writeAll(tps);
-        try buf.writer.writeByte('(');
-
-        for (sig.params, 0..) |p, i| {
-            if (i > 0) try buf.writer.print(", ", .{});
-            try buf.writer.writeAll(p.name);
-            if (p.optional) try buf.writer.writeByte('?');
-            if (p.type_name) |ti| {
-                const pt = try type_syntax.formatTypeOpts(alloc, ti, .{});
-                defer alloc.free(pt);
-                try buf.writer.print(": {s}", .{pt});
-            }
-        }
-
-        try buf.writer.writeByte(')');
-        if (sig.return_type) |rt| {
-            const rt_str = try type_syntax.formatTypeOpts(alloc, rt, .{});
-            try buf.writer.print(" -> {s}", .{rt_str});
-        }
-
-        return buf.toOwnedSlice();
+/// same with your `opts`
+///   keeps sig lookup from thrashing cache with defaults
+pub fn renderDefinitionOpts(
+    alloc: std.mem.Allocator,
+    name: []const u8,
+    type_name: []const u8,
+    ws: *Workspace,
+    file_id: FileId,
+    opts: pipeline.BuildOptions,
+) ![]const u8 {
+    if (try ws.fnSigOpts(alloc, file_id, name, opts)) |sig| {
+        return common.formatSig(alloc, name, sig);
     }
     if (type_name.len > 0 and std.mem.startsWith(u8, type_name, "fn(")) {
         return std.fmt.allocPrint(alloc, "fn {s}{s}", .{ name, type_name[2..] });

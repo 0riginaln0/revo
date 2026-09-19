@@ -193,7 +193,7 @@ fn addFieldCompletions(
                     const name = vm.stringValue(entry.key.asAtom().?);
                     if (std.mem.startsWith(u8, name, prefix)) {
                         var doc: ?[]const u8 = null;
-                        if (revo.baselib.specs.findFn(name)) |spec| {
+                        if (common.baselibSig(name)) |spec| {
                             if (spec.doc.len > 0) doc = spec.doc;
                         }
 
@@ -229,7 +229,7 @@ fn addFieldCompletions(
             // manifest macros scoped to this module (`uri.asdf!`
             // completes as `asdf!` under `uri.`); globals complete bare
             // above, never qualified
-            for (self.baselibMacroNames(arena)) |name| {
+            for (self.baselibMacroNamesCached()) |name| {
                 if (!std.mem.startsWith(u8, name, target)) continue;
 
                 const rest = name[target.len..];
@@ -282,11 +282,10 @@ fn addGeneralCompletions(
     // , derived from the same sources the build merges
     //   (analysis parses without them by design, so names come from here
     //      instead of the inspect cache
-    //      ; a few dozen lines per request is
-    //      noise next to the semantic pass below)
+    //      ; a cached list per workspace, no reparse per keystroke)
     // . dotted names stay scoped
     //   : only bare macros complete bare
-    for (self.baselibMacroNames(arena)) |name| {
+    for (self.baselibMacroNamesCached()) |name| {
         if (std.mem.findScalar(u8, name, '.') != null) continue;
         if (!std.mem.startsWith(u8, name, prefix)) continue;
         items.append(arena, .{ .label = name, .kind = .function }) catch return;
@@ -296,10 +295,10 @@ fn addGeneralCompletions(
     //   global type aliases resolve bare but don't complete here yet
     //   ; no baselib group declares one, so there is nothing to cover
     //   . when the first lands, mirror the dot-path union below:
-    //      is_type + global head as .class
-    //        (values keep winning same-named collisions)
+    //     : is_type + global head as .class
+    //     , values keep winning same-named collisions
 
-    // globals from vm (baselib + user)
+    // globals off the vm, baselib + user
     var global_names = std.StringHashMapUnmanaged(void){};
     {
         var git = vm.user_globals.iterator();
@@ -320,7 +319,7 @@ fn addGeneralCompletions(
 
             if (entry.value_ptr.tag() == .function) {
                 // findFn skips type-only aliases, so kind is always function
-                if (revo.baselib.specs.findFn(name)) |spec| {
+                if (common.baselibSig(name)) |spec| {
                     doc_copy = if (spec.doc.len > 0) (arena.dupe(u8, spec.doc) catch null) else null;
                     const ft = spec.type.kind.function;
                     const names = try arena.alloc([]const u8, ft.params.len);
@@ -363,11 +362,9 @@ fn addGeneralCompletions(
         }
     }
 
-    // document-local symbols (from inspect cache)
     {
-        var analysis = self.inspectDetailed(arena, file_id, .{}) catch return;
-        defer analysis.deinit(arena);
-        for (analysis.symbols) |sym| {
+        const entry = self.ensureInspect(arena, file_id, .{}) catch return;
+        for (entry.symbols) |sym| {
             if (!std.mem.startsWith(u8, sym.name, prefix)) continue;
             const kind: CompletionKind = switch (sym.kind) {
                 .function, .macro => .function,

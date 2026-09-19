@@ -26,6 +26,10 @@ inspect_cache: std.AutoHashMap(FileId, InspectCacheEntry), // quick inspect cach
 symbol_index: std.StringHashMap([]IndexedSymbol),
 symbol_index_dirty: bool = true,
 next_file_id: FileId = 1,
+// baselib macro names, parsed once
+//   strs borrow embedded srcs, only list owned
+//   keeps completions off per-keystroke reparse
+macro_names_cache: ?[][]const u8 = null,
 
 //
 // types
@@ -217,6 +221,10 @@ pub fn deinit(self: *Workspace) void {
     self.reverse_deps.deinit();
     self.cache.deinit();
     self.inspect_cache.deinit();
+    if (self.macro_names_cache) |names| {
+        for (names) |n| self.alloc.free(n);
+        self.alloc.free(names);
+    }
     {
         var it = self.symbol_index.iterator();
         while (it.next()) |entry| {
@@ -284,6 +292,13 @@ pub const signatureHelp = signature.signatureHelp;
 // quick inspection via inspect cache (no full compile)
 pub const inspectDetailed = analyze_mod.inspectDetailed;
 
+/// borrowed inspect, no copies
+///   ensures cache then hands back `*InspectCacheEntry`
+///   borrows `self`, good til next change/close/put/invalidate
+///   copy only at edge (`copySymbols`, `copyError`, `copyDeps`)
+///   same guts as `inspectDetailed`, fewer recomputes
+pub const ensureInspect = analyze_mod.ensureInspect;
+
 pub const InlayHint = struct {
     position: Position,
     label: []const u8,
@@ -294,6 +309,11 @@ pub const inlayHints = inlay.inlayHints;
 
 /// lookup a function signature from the inspect cache for file `id`
 pub const fnSig = analyze_mod.fnSig;
+
+/// opts-aware `fnSig`, same lookup
+///   prefer it when you already hold `opts`
+///   keeps cache from thrashing
+pub const fnSigOpts = analyze_mod.fnSigOpts;
 
 /// check inspect cache and return cached Analysis if valid
 pub const inspectCached = cache_mod.inspectCached;
@@ -371,6 +391,11 @@ pub const collectDependencyClosure = deps_mod.collectDependencyClosure;
 /// ; the parser caps heads at one dot.
 ///
 pub const baselibMacroNames = symbols_mod.baselibMacroNames;
+
+/// cached macros, parsed once
+///   same names as `baselibMacroNames`
+///   owned by `ws.alloc`, dont free
+pub const baselibMacroNamesCached = symbols_mod.baselibMacroNamesCached;
 
 pub const collectSymbolsFromParsed = symbols_mod.collectSymbolsFromParsed;
 

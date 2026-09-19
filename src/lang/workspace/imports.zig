@@ -90,27 +90,10 @@ pub fn importedModuleSymbols(
     return symbolsFromDep(self, alloc, dep_id);
 }
 
-/// copy symbols from a resolved dep file id (caller frees)
+/// syms off a dep file, caller frees
 pub fn symbolsFromDep(self: *Workspace, alloc: std.mem.Allocator, dep_id: FileId) ![]const Symbol {
-    var dep_analysis = try self.inspectDetailed(alloc, dep_id, .{});
-    defer dep_analysis.deinit(alloc);
-
-    const src = dep_analysis.symbols;
-    var out = try std.ArrayList(Symbol).initCapacity(alloc, src.len);
-
-    // params resolve for hover/definition but are not module members;
-    // without this they render their definition line as phantom members
-    for (src) |s| {
-        if (s.kind == .param) continue;
-        try out.append(alloc, .{
-            .name = try alloc.dupe(u8, s.name),
-            .kind = s.kind,
-            .range = s.range,
-            .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
-            .field_values = if (s.field_values) |fvs| try common.cloneFieldPreviews(alloc, fvs) else null,
-        });
-    }
-    return out.toOwnedSlice(alloc);
+    const entry = try self.ensureInspect(alloc, dep_id, .{});
+    return common.copyFilteredSymbols(alloc, entry.symbols, true);
 }
 
 /// TODO: botch. kill commit after e6f877ea when structural tables exist

@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const revo = @import("revo");
+const common = @import("common.zig");
 
 const ast = @import("../ast.zig");
 const Parser = @import("../Parser.zig");
@@ -16,7 +16,7 @@ const FileId = W.FileId;
 const Range = W.Range;
 const InlayHint = W.InlayHint;
 
-/// compute type inlay hints for a range in a file
+/// type + param hints for a range
 pub fn inlayHints(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -24,14 +24,13 @@ pub fn inlayHints(
     range: Range,
     opts: pipeline.BuildOptions,
 ) ![]InlayHint {
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-    const snap = analysis.snapshot;
+    const snap = self.snapshot(id) orelse return alloc.alloc(InlayHint, 0);
+    const entry = try self.ensureInspect(alloc, id, opts);
 
     var hints: std.ArrayList(InlayHint) = .empty;
     errdefer hints.deinit(alloc);
 
-    for (analysis.symbols) |sym| {
+    for (entry.symbols) |sym| {
         const ti = sym.type_name orelse continue;
         if (ti.tag == .any or ti.tag == .never) continue;
         if (sym.range.end.line < range.start.line or sym.range.start.line > range.end.line) continue;
@@ -113,7 +112,7 @@ const ParamHintVisitor = struct {
             }
         }
 
-        if (revo.baselib.specs.findFn(name)) |spec| {
+        if (common.baselibSig(name)) |spec| {
             var out = std.ArrayList([]const u8).empty;
             for (spec.type.kind.function.params) |p| out.append(self.alloc, p.name) catch return &.{};
             return out.toOwnedSlice(self.alloc) catch &.{};

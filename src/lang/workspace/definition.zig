@@ -14,7 +14,7 @@ const Position = W.Position;
 const Range = W.Range;
 const Location = W.Location;
 
-/// go-to-definition: find the binding that a word at `pos` refers to
+/// go-to-def, which binding does the word at `pos` mean
 pub fn definition(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -22,14 +22,12 @@ pub fn definition(
     pos: Position,
     opts: pipeline.BuildOptions,
 ) !?Location {
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-    const snap = analysis.snapshot;
+    const snap = self.snapshot(id) orelse return null;
     const name = txt.wordAtPosition(snap.text, pos) orelse return null;
     return bestLocation(self, alloc, name, id, pos, opts);
 }
 
-/// all references to a name in all dependencies
+/// every reference to a name, here plus all deps
 pub fn references(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -37,9 +35,7 @@ pub fn references(
     pos: Position,
     opts: pipeline.BuildOptions,
 ) ![]Location {
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-    const snap = analysis.snapshot;
+    const snap = self.snapshot(id) orelse return self.alloc.alloc(Location, 0);
     const name = txt.wordAtPosition(snap.text, pos) orelse return self.alloc.alloc(Location, 0);
     var out = try std.ArrayList(Location).initCapacity(alloc, 4);
     errdefer out.deinit(alloc);
@@ -87,7 +83,7 @@ pub fn bestLocation(
     return null;
 }
 
-/// search symbols in one file for the best definition match
+/// best def inside one file
 fn pickBestFromFile(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -97,10 +93,10 @@ fn pickBestFromFile(
     opts: pipeline.BuildOptions,
     best: *?Location,
 ) !void {
-    const snap_name = (self.snapshot(id) orelse return).name;
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-    for (analysis.symbols) |sym| {
+    const snap = self.snapshot(id) orelse return;
+    const snap_name = snap.name;
+    const entry = try self.ensureInspect(alloc, id, opts);
+    for (entry.symbols) |sym| {
         if (!std.mem.eql(u8, sym.name, name)) continue;
         if (txt.positionBefore(sym.range.start, pos)) {
             if (best.* == null or txt.positionBefore(best.*.?.range.start, sym.range.start)) {

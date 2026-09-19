@@ -189,20 +189,27 @@ pub fn diagnostics(
     return bundle.err;
 }
 
-/// same as diagnostics,
-/// but also lifts non-failing warnings from th full build
+/// same as diagnostics
+///   plus non-failing warnings off full build
 pub fn diagnosticsWithWarnings(
     self: *Workspace,
     alloc: std.mem.Allocator,
     id: FileId,
     opts: pipeline.BuildOptions,
 ) !DiagnosticsBundle {
-    var sem = try inspectDetailed(self, alloc, id, opts);
-    errdefer sem.deinit(alloc);
+    const sem_snap = self.snapshot(id) orelse return error.FileNotOpen;
+    const sem_entry = try ensureInspect(self, alloc, id, opts);
+
+    var sem_diag: ?pipeline.Error = if (sem_entry.diagnostics) |diag|
+        try common.copyError(alloc, diag, sem_snap.name, sem_snap.text)
+    else
+        null;
+    errdefer if (sem_diag) |d| pipeline.deinitError(alloc, d);
+
     var full = analyzeDetailed(self, alloc, id, opts) catch |err| switch (err) {
         error.VmUnavailable => {
-            if (sem.diagnostics) |diag| {
-                sem.diagnostics = null;
+            if (sem_diag) |diag| {
+                sem_diag = null;
                 return .{ .err = diag };
             }
             return .{};
@@ -211,14 +218,13 @@ pub fn diagnosticsWithWarnings(
     };
     errdefer full.deinit(alloc);
 
-    // if both have diagnostics, merge the reports
     if (full.diagnostics) |full_diag| {
-        if (sem.diagnostics) |sem_diag| {
-            const merged_report = try common.mergeReports(alloc, sem_diag, full_diag);
-            // keep the error variant from the full compile, but swap the report
-            // errorKind doesn't matter much for diagnostics display
+        if (sem_diag) |sem_d| {
+            const merged_report = try common.mergeReports(alloc, sem_d, full_diag);
+            // errorKind hardly matters for display
             full.diagnostics = null;
-            sem.diagnostics = null;
+            pipeline.deinitError(alloc, sem_d);
+            sem_diag = null;
             const warnings = full.warnings;
             full.warnings = null;
             return .{ .err = pipeline.Error{ .compile = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
@@ -229,8 +235,8 @@ pub fn diagnosticsWithWarnings(
         return .{ .err = full_diag, .warnings = warnings };
     }
 
-    if (sem.diagnostics) |diag| {
-        sem.diagnostics = null;
+    if (sem_diag) |diag| {
+        sem_diag = null;
         const warnings = full.warnings;
         full.warnings = null;
         return .{ .err = diag, .warnings = warnings };
@@ -241,7 +247,7 @@ pub fn diagnosticsWithWarnings(
     return .{ .warnings = warnings };
 }
 
-// quick inspection via inspect cache (no full compile)
+// quick inspect off the cache, no full compile
 pub fn inspectDetailed(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -249,7 +255,41 @@ pub fn inspectDetailed(
     opts: pipeline.BuildOptions,
 ) !Analysis {
     const snap = self.snapshot(id) orelse return error.FileNotOpen;
-    if (try self.inspectCached(alloc, snap, id, opts)) |cached| return cached;
+    const entry = try ensureInspect(self, alloc, id, opts);
+
+    const symbols = try common.copySymbols(alloc, entry.symbols);
+    errdefer common.freeSymbols(alloc, symbols);
+
+    const dependencies = try self.copyDeps(alloc, id);
+    errdefer alloc.free(dependencies);
+
+    const diags = if (entry.diagnostics) |diag|
+        try common.copyError(alloc, diag, snap.name, snap.text)
+    else
+        null;
+
+    return .{
+        .snapshot = snap,
+        .diagnostics = diags,
+        .cached = true,
+        .symbols = symbols,
+        .dependencies = dependencies,
+    };
+}
+
+/// borrowed inspect, no copies
+///   `scratch` is temporaries only
+///   back pointer borrows `self`, good til next cache mutation
+pub fn ensureInspect(
+    self: *Workspace,
+    scratch: std.mem.Allocator,
+    id: FileId,
+    opts: pipeline.BuildOptions,
+) !*W.InspectCacheEntry {
+    const snap = self.snapshot(id) orelse return error.FileNotOpen;
+    if (self.inspect_cache.getPtr(id)) |cached| {
+        if (cached.version == snap.version and common.sameOpts(cached.opts, opts)) return cached;
+    }
 
     var arena = std.heap.ArenaAllocator.init(self.alloc);
     defer arena.deinit();
@@ -271,7 +311,24 @@ pub fn inspectDetailed(
     });
 
     if (parsed == .err) {
-        return self.inspectParseError(alloc, snap, id, opts, parsed.err);
+        var report = try parsed.err.report.copy(self.alloc);
+        report.source_name = try self.alloc.dupe(u8, snap.name);
+        report.source = try self.alloc.dupe(u8, snap.text);
+
+        const parse_error: pipeline.Error = .{ .parse = .{ .kind = parsed.err.kind, .report = report } };
+        const cache_diag = try common.copyError(self.alloc, parse_error, snap.name, snap.text);
+        errdefer pipeline.deinitError(self.alloc, cache_diag);
+        // first copy is ours, cache keeps the second
+        pipeline.deinitError(self.alloc, parse_error);
+
+        const empty_syms = try self.alloc.alloc(Symbol, 0);
+        errdefer self.alloc.free(empty_syms);
+
+        const empty_deps = try self.alloc.alloc(FileId, 0);
+        errdefer self.alloc.free(empty_deps);
+
+        try self.putInspectCache(id, snap.version, opts, empty_syms, empty_deps, cache_diag, .empty, .init(self.alloc));
+        return self.inspect_cache.getPtr(id) orelse return error.FileNotOpen;
     }
 
     const root = parsed.ok.root;
@@ -280,24 +337,23 @@ pub fn inspectDetailed(
     const deps = try self.collectDepsFromParsed(snap, root);
     errdefer self.alloc.free(deps);
     try self.updateDeps(id, deps);
-    const known_globals = try common.getKnownGlobals(self, alloc);
-    defer alloc.free(known_globals);
+    const known_globals = try common.getKnownGlobals(self, scratch);
+    defer scratch.free(known_globals);
 
-    // name -> type, populated by sem checker
-    var type_map = std.StringHashMap(types.TypeInfo).init(alloc);
+    var type_map = std.StringHashMap(types.TypeInfo).init(scratch);
     defer {
         var it = type_map.iterator();
         while (it.next()) |entry| {
-            alloc.free(entry.key_ptr.*);
-            types.deinitType(entry.value_ptr, alloc);
+            scratch.free(entry.key_ptr.*);
+            types.deinitType(entry.value_ptr, scratch);
         }
         type_map.deinit();
     }
 
-    var type_annotations = std.AutoHashMap(*const ast.Node, types.TypeInfo).init(alloc);
+    var type_annotations = std.AutoHashMap(*const ast.Node, types.TypeInfo).init(scratch);
     defer {
         var it = type_annotations.iterator();
-        while (it.next()) |entry| types.deinitType(@constCast(entry.value_ptr), alloc);
+        while (it.next()) |entry| types.deinitType(@constCast(entry.value_ptr), scratch);
         type_annotations.deinit();
     }
 
@@ -336,7 +392,7 @@ pub fn inspectDetailed(
 
     var dropped_warn: ?diagnostic.Report = null;
     const semantic_error = try semantic.analyze(
-        alloc,
+        scratch,
         root,
         snap.name,
         snap.text,
@@ -348,7 +404,7 @@ pub fn inspectDetailed(
         &dropped_warn,
     );
 
-    if (dropped_warn) |*wr| wr.deinit(alloc);
+    if (dropped_warn) |*wr| wr.deinit(scratch);
 
     const cache_diag = if (semantic_error) |failure|
         try common.copyError(self.alloc, .{ .semantic = failure }, snap.name, snap.text)
@@ -362,12 +418,11 @@ pub fn inspectDetailed(
         }
     }
 
-    // collect fn signatures from ast
     var sig_map: std.StringHashMapUnmanaged(FnSig) = .empty;
     errdefer if (sig_map.size > 0) common.freeSigMap(self.alloc, &sig_map);
     self.collectSigsFromParsed(root, &sig_map);
 
-    // doc strings live in the request arena; re-own them for the cache
+    // docs live in request arena, re-own em for cache
     var cache_docs = std.StringHashMap([]const u8).init(self.alloc);
     errdefer {
         var cit = cache_docs.iterator();
@@ -385,7 +440,7 @@ pub fn inspectDetailed(
         );
     }
 
-    // annotate param and return types from type_map where not explicitly set
+    // fill holes from type_map where the sig left em blank
     var sig_it = sig_map.iterator();
     while (sig_it.next()) |sig_entry| {
         for (sig_entry.value_ptr.params) |*p| {
@@ -410,29 +465,42 @@ pub fn inspectDetailed(
     errdefer self.alloc.free(cache_deps);
     try self.putInspectCache(id, snap.version, opts, cache_symbols, cache_deps, cache_diag, sig_map, cache_docs);
 
-    if (semantic_error) |err| {
-        return .{
-            .snapshot = snap,
-            .diagnostics = .{ .semantic = err },
-            .cached = false,
-            .symbols = try common.copySymbols(alloc, symbols),
-            .dependencies = try self.copyDeps(alloc, id),
-        };
+    // docs buckets are self.alloc, entries got reparented to scratch
+    //   free entries with scratch, table with self.alloc
+    {
+        var dit = docs.iterator();
+        while (dit.next()) |e| {
+            scratch.free(e.key_ptr.*);
+            scratch.free(e.value_ptr.*);
+        }
+        docs.deinit();
     }
 
-    return .{
-        .snapshot = snap,
-        .cached = false,
-        .symbols = try common.copySymbols(alloc, symbols),
-        .dependencies = try self.copyDeps(alloc, id),
-    };
+    // semantic_error borrows scratch, cache keeps its own copy
+    if (semantic_error) |err| {
+        var owned = err;
+        owned.report.deinit(scratch);
+    }
+
+    return self.inspect_cache.getPtr(id) orelse return error.FileNotOpen;
 }
 
-/// lookup a function signature from the inspect cache for file `id`
-pub fn fnSig(self: *Workspace, alloc: std.mem.Allocator, id: FileId, name: []const u8) !?FnSig {
-    _ = try inspectDetailed(self, alloc, id, .{});
-    const cache = self.inspect_cache.getPtr(id) orelse return null;
-    return cache.sig_map.get(name);
+/// fn sig off the inspect cache
+pub fn fnSig(self: *Workspace, scratch: std.mem.Allocator, id: FileId, name: []const u8) !?FnSig {
+    return fnSigOpts(self, scratch, id, name, .{});
+}
+
+/// same lookup with your `opts`
+///   keeps hover/signature/completion from thrashing cache
+pub fn fnSigOpts(
+    self: *Workspace,
+    scratch: std.mem.Allocator,
+    id: FileId,
+    name: []const u8,
+    opts: pipeline.BuildOptions,
+) !?FnSig {
+    const entry = try ensureInspect(self, scratch, id, opts);
+    return entry.sig_map.get(name);
 }
 
 test "workspace caches repeated analysis" {

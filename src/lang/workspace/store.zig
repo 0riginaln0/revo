@@ -103,9 +103,12 @@ pub fn snapshot(self: *Workspace, id: FileId) ?Snapshot {
     };
 }
 
-/// check if cached version is outdated
+/// stale when cached version lags
+///   false when closed, nothing to be stale against
 pub fn isStale(self: *Workspace, id: FileId, version: u32) bool {
-    return !(self.snapshot(id).?.version == version);
+    const snap = self.snapshot(id) orelse return false;
+
+    return snap.version != version;
 }
 
 /// id -> mut *FileEntry

@@ -19,10 +19,7 @@ const Symbol = W.Symbol;
 const FnSig = W.FnSig;
 
 pub fn sameOpts(a: pipeline.BuildOptions, b: pipeline.BuildOptions) bool {
-    inline for (std.meta.fields(pipeline.BuildOptions)) |f| {
-        if (@field(a, f.name) != @field(b, f.name)) return false;
-    }
-    return true;
+    return std.meta.eql(a, b);
 }
 
 pub fn copyBytecode(alloc: std.mem.Allocator, bytecode: pipeline.Bytecode) !pipeline.Bytecode {
@@ -128,17 +125,45 @@ pub fn copyError(
 }
 
 pub fn copySymbols(alloc: std.mem.Allocator, symbols: []const Symbol) ![]Symbol {
-    const dupes = try alloc.dupe(Symbol, symbols);
-    for (dupes) |*s| {
-        s.name = try alloc.dupe(u8, s.name);
-        if (s.type_name) |ti| {
-            s.type_name = try types.clone(ti, alloc);
+    return copyFilteredSymbols(alloc, symbols, false);
+}
+
+/// one filtered copy for outlines + module members
+///   params resolve for hover/definition but stay out of those lists
+///   single home for `documentSymbols` + `symbolsFromDep`
+pub fn copyFilteredSymbols(
+    alloc: std.mem.Allocator,
+    symbols: []const Symbol,
+    comptime exclude_param: bool,
+) ![]Symbol {
+    var out = try std.ArrayList(Symbol).initCapacity(alloc, symbols.len);
+    errdefer {
+        for (out.items) |*s| {
+            alloc.free(s.name);
+            if (s.type_name) |*ti| types.deinitType(ti, alloc);
+            if (s.field_values) |fvs| {
+                for (fvs) |fv| {
+                    alloc.free(fv.name);
+                    alloc.free(fv.preview);
+                }
+                alloc.free(fvs);
+            }
         }
-        if (s.field_values) |fvs| {
-            s.field_values = try cloneFieldPreviews(alloc, fvs);
-        }
+        out.deinit(alloc);
     }
-    return dupes;
+
+    for (symbols) |s| {
+        if (exclude_param and s.kind == .param) continue;
+        try out.append(alloc, .{
+            .name = try alloc.dupe(u8, s.name),
+            .kind = s.kind,
+            .range = s.range,
+            .type_name = if (s.type_name) |ti| try types.clone(ti, alloc) else null,
+            .field_values = if (s.field_values) |fvs| try cloneFieldPreviews(alloc, fvs) else null,
+        });
+    }
+
+    return out.toOwnedSlice(alloc);
 }
 
 pub fn cloneFieldPreviews(alloc: std.mem.Allocator, fvs: []const type_syntax.FieldPreview) ![]type_syntax.FieldPreview {
@@ -197,6 +222,43 @@ pub fn formatTypeParams(alloc: std.mem.Allocator, type_params: []const []const u
     try buf.writer.writeByte('>');
     const owned: []const u8 = try buf.toOwnedSlice();
     return owned;
+}
+
+/// one `fn name(params) -> ret`, caller owns it
+///   byte-identical to old `hover.renderDefinition` branch
+pub fn formatSig(alloc: std.mem.Allocator, name: []const u8, sig: FnSig) ![]const u8 {
+    var buf = std.Io.Writer.Allocating.init(alloc);
+    errdefer buf.deinit();
+
+    try buf.writer.print("fn {s}", .{name});
+    if (sig.type_params_text) |tps| try buf.writer.writeAll(tps);
+    try buf.writer.writeByte('(');
+
+    for (sig.params, 0..) |p, i| {
+        if (i > 0) try buf.writer.print(", ", .{});
+        try buf.writer.writeAll(p.name);
+        if (p.optional) try buf.writer.writeByte('?');
+        if (p.type_name) |ti| {
+            const pt = try type_syntax.formatTypeOpts(alloc, ti, .{});
+            defer alloc.free(pt);
+            try buf.writer.print(": {s}", .{pt});
+        }
+    }
+
+    try buf.writer.writeByte(')');
+    if (sig.return_type) |rt| {
+        const rt_str = try type_syntax.formatTypeOpts(alloc, rt, .{});
+        defer alloc.free(rt_str);
+        try buf.writer.print(" -> {s}", .{rt_str});
+    }
+
+    return buf.toOwnedSlice();
+}
+
+/// one baselib lookup so providers share a call site
+///   replaces four `specs.findFn` spellings
+pub fn baselibSig(name: []const u8) ?*const revo.baselib.specs.FnSpec {
+    return revo.baselib.specs.findFn(name);
 }
 
 /// get known global names from the vm

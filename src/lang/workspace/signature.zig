@@ -2,8 +2,7 @@
 
 const std = @import("std");
 
-const revo = @import("revo");
-
+const common = @import("common.zig");
 const pipeline = @import("../pipeline.zig");
 const txt = @import("text.zig");
 const types = @import("../compiler/types.zig");
@@ -15,7 +14,7 @@ const Position = W.Position;
 const ParamInfo = W.ParamInfo;
 const SignatureHelp = W.SignatureHelp;
 
-/// signature help: call-site function signature with param info and doc
+/// sig help at a call site, params + doc + which arg youre on
 pub fn signatureHelp(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -26,9 +25,9 @@ pub fn signatureHelp(
     const snap = self.snapshot(id) orelse return null;
     const call_info = txt.findCallAtPosition(snap.text, pos) orelse return null;
 
-    // baselib fallback: name not bound in any AST
-    if (try self.bestLocation(alloc, call_info.name, id, pos, opts) == null) {
-        if (revo.baselib.specs.findFn(call_info.name)) |spec| {
+    const def_opt = try self.bestLocation(alloc, call_info.name, id, pos, opts);
+    if (def_opt == null) {
+        if (common.baselibSig(call_info.name)) |spec| {
             const ft = spec.type.kind.function;
             const name = try alloc.dupe(u8, spec.name);
             errdefer alloc.free(name);
@@ -37,7 +36,7 @@ pub fn signatureHelp(
             errdefer alloc.free(params);
 
             for (ft.params, 0..) |p, i| {
-                // evalTypeExpr can return shared comptime sentinels
+                // evalBare can hand back shared comptime sentinels, clone em
                 const pt: ?types.TypeInfo = if (p.type_name) |tn| pt: {
                     const t = try types.evalBare(alloc, tn);
                     break :pt try types.clone(t, alloc);
@@ -66,11 +65,9 @@ pub fn signatureHelp(
         }
         return null;
     }
-    const def = try self.bestLocation(alloc, call_info.name, id, pos, opts) orelse return null;
-    _ = try self.inspectDetailed(alloc, def.file_id, opts);
-
-    const cache = self.inspect_cache.getPtr(def.file_id) orelse return null;
-    const sig = cache.sig_map.get(call_info.name) orelse return null;
+    const def = def_opt orelse return null;
+    const entry = try self.ensureInspect(alloc, def.file_id, opts);
+    const sig = entry.sig_map.get(call_info.name) orelse return null;
 
     const name_copy = try alloc.dupe(u8, call_info.name);
     errdefer alloc.free(name_copy);
@@ -89,11 +86,9 @@ pub fn signatureHelp(
     const tps_copy = if (sig.type_params_text) |t| try alloc.dupe(u8, t) else null;
 
     errdefer if (tps_copy) |t| alloc.free(t);
-    // docs come from the semantic layer, not the sig
-    const doc_copy: ?[]const u8 = if (self.inspect_cache.getPtr(def.file_id)) |dc|
-        if (dc.docs.get(call_info.name)) |d| try alloc.dupe(u8, d) else null
-    else
-        null;
+    // docs ride on sem, not the sig, entry borrows em
+    const doc_copy: ?[]const u8 =
+        if (entry.docs.get(call_info.name)) |d| try alloc.dupe(u8, d) else null;
     errdefer if (doc_copy) |d| alloc.free(d);
 
     return SignatureHelp{

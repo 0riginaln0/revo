@@ -85,36 +85,16 @@ pub fn findSymbols(self: *Workspace, alloc: std.mem.Allocator, name: []const u8)
     return locations;
 }
 
-/// returns syms defined in a file
+/// outline syms for a file
 pub fn documentSymbols(
     self: *Workspace,
     alloc: std.mem.Allocator,
     id: FileId,
     opts: pipeline.BuildOptions,
 ) ![]Symbol {
-    var analysis = try self.inspectDetailed(alloc, id, opts);
-    defer analysis.deinit(alloc);
-
-    // params resolve for hover/definition but stay out of the outline
-    var out = try std.ArrayList(Symbol).initCapacity(alloc, analysis.symbols.len);
-    errdefer {
-        for (out.items) |*sym| {
-            alloc.free(sym.name);
-            if (sym.type_name) |*ti| types.deinitType(ti, alloc);
-        }
-        out.deinit(alloc);
-    }
-    for (analysis.symbols) |sym| {
-        if (sym.kind == .param) continue;
-        try out.append(alloc, .{
-            .name = try alloc.dupe(u8, sym.name),
-            .kind = sym.kind,
-            .range = sym.range,
-            .type_name = if (sym.type_name) |ti| try types.clone(ti, alloc) else null,
-            .field_values = if (sym.field_values) |fvs| try common.cloneFieldPreviews(alloc, fvs) else null,
-        });
-    }
-    return out.toOwnedSlice(alloc);
+    const entry = try self.ensureInspect(alloc, id, opts);
+    // params resolve for hover/def but dont outline
+    return common.copyFilteredSymbols(alloc, entry.symbols, true);
 }
 
 ///
@@ -146,6 +126,33 @@ pub fn baselibMacroNames(self: *Workspace, arena: std.mem.Allocator) [][]const u
         }
     }
     return out.items;
+}
+
+/// cached variant: parsed once, reused per keystroke
+///   names owned by `ws.alloc`;
+///   caller must not free
+///   same content as `baselibMacroNames`
+pub fn baselibMacroNamesCached(self: *Workspace) [][]const u8 {
+    if (self.macro_names_cache) |cached| return cached;
+    // parse with scratch arena, then re-own names in ws.alloc
+    var arena = std.heap.ArenaAllocator.init(self.alloc);
+    defer arena.deinit();
+
+    const fresh = self.baselibMacroNames(arena.allocator());
+    const owned = self.alloc.alloc([]const u8, fresh.len) catch return &.{};
+    var done: usize = 0;
+
+    for (fresh) |src| {
+        owned[done] = self.alloc.dupe(u8, src) catch {
+            for (owned[0..done]) |n| self.alloc.free(n);
+            self.alloc.free(owned);
+            return &.{};
+        };
+        done += 1;
+    }
+
+    self.macro_names_cache = owned;
+    return owned;
 }
 
 pub fn collectSymbolsFromParsed(self: *Workspace, root: *ast.Node, text: []const u8) ![]Symbol {
