@@ -1,20 +1,20 @@
 #!
-ideally the api would be
-# this via cffi.load returning a table with `set_meta(cffi.load("./libraylib.so"), {func = cffi.func})` done
-let rl = cffi.load("./libraylib.so")
-# this via wrapping it in a metatable with __call set
-let initwin = rl:func("InitWindow", {"i", "i", "s"}, "v")
-initwin{640, 480, "yay"}
+if you ever get an error that ends with "???", its a library bug
 !#
 
-#* load("libraylib.so") *#
-pub declare load = fn(lib: string) -> any
+#* load("libraylib.so") -> lib table with t:func() method *#
+pub declare load = fn(lib: string) -> table
 
-#* free(thing)*#
-pub declare free = fn(lib: any)
+#* dlclose a handle *#
+pub declare free = fn(lib: table)
 
-#* func(thing, "InitWindow" *#
-pub declare func = fn(lib: any, func: string) -> any
+#*
+```revo
+let iw = lib:func("InitWindow", {"i", "i", "s"}, "v") # -> callable table
 
-#* call(func, {640, 480, "hi!"}, {"i", "i", "s"}, "v") *#
-pub declare call = fn(func: any, args: table, sig: table, ret: string) -> any
+iw(a, b, c)    # spread args (no table alloc!)
+iw{args_table} # table args
+iw()           # no args
+```
+*#
+pub declare func = fn(lib: table, name: string, sig: table, ret: string) -> table

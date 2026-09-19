@@ -1,24 +1,37 @@
+#!/usr/bin/env revo
+also see ./readme.md, ./inline.rv
+
+perfectly wrappable in a module, see:
+const rl = import "./raylib"
+!#
+
+# this could all be a let rl = do...end block, if you want some scoping
 const cffi = import "./cffi.so"
+let lib = cffi.load("./libraylib.so")
+print(lib)
 
-let rl = set_meta(cffi.load("./libraylib.so"), {func = cffi.func})
+let rl = {
+  initwin = lib:func("InitWindow", {"i", "i", "s"}, "v"),
+  set_fps = lib:func("SetTargetFPS", {"i"}, "v"),
+  window_should_close = lib:func("WindowShouldClose", {}, "c"),
+  getcolor = lib:func("GetColor", {"u"}, "p"),
+  begin_draw = lib:func("BeginDrawing", {}, "v"),
+  clear_bg = lib:func("ClearBackground", {"p"}, "v"),
+  draw_fps = lib:func("DrawFPS", {"i", "i"}, "v"),
+  end_drawing = lib:func("EndDrawing", {}, "v")
+}
 
-print(rl)
+print(rl.initwin)
 
-let func = rl:func("InitWindow")
+rl.initwin(640, 480, "yay")
 
-print(func)
+rl.set_fps(60)
 
-cffi.call(func, {640, 480, "yay"}, {"i", "i", "s"}, "v")
+let col = rl.getcolor(0x101042FF)
 
-cffi.call(rl:func("SetTargetFPS"), {60}, {"i"}, "v")
-
-let winshcl = rl:func("WindowShouldClose")
-
-let col = cffi.call(rl:func("GetColor"), {0x101042FF}, {"u"}, "p")
-
-while cffi.call(winshcl, {}, {}, "c") == 0 do
-  cffi.call(rl:func("BeginDrawing"), {}, {}, "v")
-  cffi.call(rl:func("ClearBackground"), {col}, {"p"}, "v")
-  cffi.call(rl:func("DrawFPS"), {0, 0}, {"i", "i"}, "v")
-  cffi.call(rl:func("EndDrawing"), {}, {}, "v")
+while rl.window_should_close{} == 0 do
+  rl.begin_draw()
+  rl.clear_bg(col)
+  rl.draw_fps(0, 0)
+  rl.end_drawing()
 end

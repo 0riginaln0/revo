@@ -11,6 +11,9 @@ zig-pkg
 *.dylib
 *.a
 *.log
+compile_commands.json
+.cache
+
 .revo_history
 # meta.rvo output from examples
 *.rvo

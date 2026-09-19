@@ -1,0 +1,17 @@
+#!
+this is how you make a module just to safe-ify-ish your bindings
+!#
+
+const cffi = import "./cffi.so"
+let lib = cffi.load("./libraylib.so")
+print(lib)
+
+
+pub const initwin = lib:func("InitWindow", {"i", "i", "s"}, "v")
+pub const set_fps = lib:func("SetTargetFPS", {"i"}, "v")
+pub const window_should_close = lib:func("WindowShouldClose", {}, "c")
+pub const getcolor = lib:func("GetColor", {"u"}, "p")
+pub const begin_draw = lib:func("BeginDrawing", {}, "v")
+pub const clear_bg = lib:func("ClearBackground", {"p"}, "v")
+pub const draw_fps = lib:func("DrawFPS", {"i", "i"}, "v")
+pub const end_drawing = lib:func("EndDrawing", {}, "v")
