@@ -1,0 +1,24 @@
+const cffi = import "./cffi.so"
+
+let rl = set_meta(cffi.load("./libraylib.so"), {func = cffi.func})
+
+print(rl)
+
+let func = rl:func("InitWindow")
+
+print(func)
+
+cffi.call(func, {640, 480, "yay"}, {"i", "i", "s"}, "v")
+
+cffi.call(rl:func("SetTargetFPS"), {60}, {"i"}, "v")
+
+let winshcl = rl:func("WindowShouldClose")
+
+let col = cffi.call(rl:func("GetColor"), {0x101042FF}, {"u"}, "p")
+
+while cffi.call(winshcl, {}, {}, "c") == 0 do
+  cffi.call(rl:func("BeginDrawing"), {}, {}, "v")
+  cffi.call(rl:func("ClearBackground"), {col}, {"p"}, "v")
+  cffi.call(rl:func("DrawFPS"), {0, 0}, {"i", "i"}, "v")
+  cffi.call(rl:func("EndDrawing"), {}, {}, "v")
+end
