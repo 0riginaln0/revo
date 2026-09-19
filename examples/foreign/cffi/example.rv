@@ -11,14 +11,14 @@ let lib = cffi.load("./libraylib.so")
 print(lib)
 
 let rl = {
-  initwin = lib:func("InitWindow", {"i", "i", "s"}, "v"),
-  set_fps = lib:func("SetTargetFPS", {"i"}, "v"),
-  window_should_close = lib:func("WindowShouldClose", {}, "c"),
-  getcolor = lib:func("GetColor", {"u"}, "p"),
-  begin_draw = lib:func("BeginDrawing", {}, "v"),
-  clear_bg = lib:func("ClearBackground", {"p"}, "v"),
-  draw_fps = lib:func("DrawFPS", {"i", "i"}, "v"),
-  end_drawing = lib:func("EndDrawing", {}, "v")
+  initwin = lib:func("InitWindow", {:i, :i, :s}, :v),
+  set_fps = lib:func("SetTargetFPS", {:i}, :v),
+  window_should_close = lib:func("WindowShouldClose", {}, :c),
+  getcolor = lib:func("GetColor", {:u}, :p),
+  begin_draw = lib:func("BeginDrawing", {}, :v),
+  clear_bg = lib:func("ClearBackground", {:p}, :v),
+  draw_fps = lib:func("DrawFPS", {:i, :i}, :v),
+  end_drawing = lib:func("EndDrawing", {}, :v)
 }
 
 print(rl.initwin)

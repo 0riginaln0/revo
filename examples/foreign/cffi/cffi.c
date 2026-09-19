@@ -74,15 +74,16 @@ static ffi_type *cffi_type_for(char c) {
     *out_res = revo_num((double)ret_slot.field);                               \
     break;
 
-// 1 char type str into `out_c`
+// 1 char type atom into `out_c`
 // ret: error on bad t/len
 #define CFFI_CHAR_OF(vm, v, argno, out_c)                                      \
   do {                                                                         \
-    if (!revo_is_string(v))                                                    \
-      return revo_c_err_type(vm, argno, "string", v);                          \
-    if (revo_string_length(vm, revo_string_id(v)) != 1)                        \
-      return revo_c_err_other(vm, "type string too long");                     \
-    out_c = *(const char *)revo_string_data(vm, revo_string_id(v));            \
+    if (!revo_is_atom(v))                                                      \
+      return revo_c_err_type(vm, argno, "atom", v);                            \
+    uint64_t _cid = revo_atom_id(v);                                           \
+    if (revo_string_length(vm, _cid) != 1)                                     \
+      return revo_c_err_other(vm, "type must be one char");                    \
+    out_c = *(const char *)revo_string_data(vm, _cid);                         \
     if (!cffi_type_for(out_c))                                                 \
       return revo_c_err_other(vm, "unknown type");                             \
   } while (0)
@@ -154,15 +155,16 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
       rc = revo_c_err_other(vm, "could not get argument type");
       goto farewell;
     }
-    if (!revo_is_string(tdata)) {
-      rc = revo_c_err_other(vm, "type != string");
+    if (!revo_is_atom(tdata)) {
+      rc = revo_c_err_other(vm, "type != atom");
       goto farewell;
     }
-    if (revo_string_length(vm, revo_string_id(tdata)) != 1) {
-      rc = revo_c_err_other(vm, "type string too long");
+    uint64_t _tid = revo_atom_id(tdata);
+    if (revo_string_length(vm, _tid) != 1) {
+      rc = revo_c_err_other(vm, "type must be one char");
       goto farewell;
     }
-    char s = *(const char *)revo_string_data(vm, revo_string_id(tdata));
+    char s = *(const char *)revo_string_data(vm, _tid);
     RevoData aout = args[i];
 
     atypes[i] = cffi_type_for(s);
