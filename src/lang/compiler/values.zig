@@ -53,11 +53,10 @@ pub fn compileLocalBinding(
     } else {
         // hide the binding's own name from its initializer so `x() = x()` and
         // `let x = x + 1` read the outer binding, not the fresh uninitialized slot
-        const saved_mask = self.masking_local;
-        self.masking_local = name;
-        errdefer self.masking_local = saved_mask;
+        try self.masking_stack.append(self.alloc, name);
+        errdefer _ = self.masking_stack.pop();
         try self.compile(value, true);
-        self.masking_local = saved_mask;
+        _ = self.masking_stack.pop();
     }
 
     state.markLocalInitialized(self, slot);
@@ -120,6 +119,24 @@ pub fn declarePatternLocals(
             }
         },
         .ascribed => |a| try declarePatternLocals(self, a.expr, mutable),
+        else => {},
+    }
+}
+
+pub fn collectPatternNames(
+    pattern: *const Node,
+    out: *std.ArrayList([]const u8),
+    alloc: std.mem.Allocator,
+) !void {
+    switch (pattern.expr) {
+        .ident => |name| {
+            if (ast.isDiscardName(name)) return;
+            try out.append(alloc, name);
+        },
+        .table_pattern => |items| {
+            for (items) |item| try collectPatternNames(item, out, alloc);
+        },
+        .ascribed => |a| try collectPatternNames(a.expr, out, alloc),
         else => {},
     }
 }

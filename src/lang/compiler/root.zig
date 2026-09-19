@@ -130,9 +130,10 @@ pub const Compiler = struct {
     declared_globals: std.StringHashMap(void),
     current_proto: revo.PrototypeID = 0,
     fn_depth: usize = 0,
-    // name whose local is currently being initialized; the branch-local slot is
+    // names whose locals are currently being initialized; branch-local slots are
     // hidden from name resolution so initializers see the outer binding
-    masking_local: ?[]const u8 = null,
+    // (single `let x = ...` masks one name, `{a, b} = ...` masks many)
+    masking_stack: std.ArrayList([]const u8),
 
     pub fn init(
         vm: *VM,
@@ -157,6 +158,7 @@ pub const Compiler = struct {
             .type_aliases = std.StringHashMap(types.TypeInfo).init(arena),
             .declared_globals = std.StringHashMap(void).init(arena),
             .pending_prototypes = try std.ArrayList(revo.PrototypeID).initCapacity(arena, 4),
+            .masking_stack = try std.ArrayList([]const u8).initCapacity(arena, 4),
         };
     }
 
@@ -173,6 +175,7 @@ pub const Compiler = struct {
         self.loop_stack.deinit(self.alloc);
         self.test_suite_names.deinit(self.alloc);
         self.pending_prototypes.deinit(self.alloc);
+        self.masking_stack.deinit(self.alloc);
         self.ir_builder.deinit();
         self.value_stack.deinit(self.alloc);
     }
@@ -1603,8 +1606,19 @@ pub const Compiler = struct {
             );
         }
 
+        // hide fresh pattern slots while rhs compiles so
+        // `let {a, b} = {b, a}` reads the outer a/b, not the
+        // uninitialized shadows (same as single `let x = x + 1`)
+        const mask_start = self.masking_stack.items.len;
+        if (kind != .global and binding.target.expr == .table_pattern) {
+            try values.collectPatternNames(binding.target, &self.masking_stack, self.alloc);
+        }
+
+        errdefer self.masking_stack.items.len = mask_start;
         try self.compile(binding.value, true);
+        self.masking_stack.items.len = mask_start;
         const src_idx = self.active_registers - 1;
+
         if (kind == .global) {
             try values.bindPattern(self, binding.target, src_idx, kind);
         } else {
