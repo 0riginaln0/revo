@@ -454,7 +454,7 @@ fn baselib() do
 
   # table functions
   const t = {1, 2, 3, a = 10, b = 20}
-  print(t:len(), t:has?("a"))
+  print(t:len(), t:key?("a"))
   const t2 = t:copy()
   print(t2)
 end

@@ -1,12 +1,38 @@
 pub const Impl = struct {
-    pub fn rawget(vm: *VM, self: Args.table, key: Args.any) !HostResult {
+    pub fn rawget(vm: *VM, self: Args.table, k: Args.any) !HostResult {
         const t = try vm.tables.get(@intFromEnum(self));
-        return .data(t.getRaw(key, vm) orelse revo.Value.new.core(.undef));
+        return .data(t.getRaw(k, vm) orelse revo.Value.new.core(.undef));
     }
 
-    pub fn rawset(vm: *VM, self: Args.table, key: Args.any, val: Args.any) !HostResult {
+    pub fn at(vm: *VM, self: Args.table, index: Args.number) !HostResult {
         const t = try vm.tables.get(@intFromEnum(self));
-        try t.putRaw(key, val, vm);
+        const idx = root.host.numToInt(isize, index) orelse return .errType(1, "integer num", typeof(Value.new.num(index), vm));
+        if (idx < 0) return .data(revo.Value.new.core(.undef));
+        const f: f64 = @floatFromInt(idx);
+        return .data(try t.get(Value.new.num(f), vm) orelse revo.Value.new.core(.undef));
+    }
+
+    pub fn @"at?"(vm: *VM, self: Args.table, index: Args.number) !HostResult {
+        const t = try vm.tables.get(@intFromEnum(self));
+        const idx = root.host.numToInt(isize, index) orelse return ._bool(false);
+        if (idx < 0) return ._bool(false);
+        const f: f64 = @floatFromInt(idx);
+        return ._bool(try t.get(Value.new.num(f), vm) != null);
+    }
+
+    pub fn key(vm: *VM, self: Args.table, k: Args.any) !HostResult {
+        const t = try vm.tables.get(@intFromEnum(self));
+        return .data(try t.get(k, vm) orelse revo.Value.new.core(.undef));
+    }
+
+    pub fn @"key?"(vm: *VM, self: Args.table, k: Args.any) !HostResult {
+        const t = try vm.tables.get(@intFromEnum(self));
+        return ._bool(try t.get(k, vm) != null);
+    }
+
+    pub fn rawset(vm: *VM, self: Args.table, k: Args.any, val: Args.any) !HostResult {
+        const t = try vm.tables.get(@intFromEnum(self));
+        try t.putRaw(k, val, vm);
         return .data(Value.new.table(@intFromEnum(self)));
     }
 
@@ -76,13 +102,13 @@ pub const Impl = struct {
         return .data(removed);
     }
 
-    pub fn remove(vm: *VM, self: Args.table, key: Args.any) !HostResult {
+    pub fn remove(vm: *VM, self: Args.table, k: Args.any) !HostResult {
         const table = vm.tables.get(@intFromEnum(self)) catch return .errType(
             0,
             "table",
             typeof(Value.new.table(@intFromEnum(self)), vm),
         );
-        const removed = table.removeAndReturn(key, vm) orelse return .other("not found");
+        const removed = table.removeAndReturn(k, vm) orelse return .other("not found");
         return .data(removed);
     }
 
@@ -121,12 +147,6 @@ pub const Impl = struct {
         while (cur.nextValue()) |val| try values_list.append(vm.runtime.alloc, val);
 
         return .data(try vm.tableOfSlice(values_list.items));
-    }
-
-    pub fn @"has?"(vm: *VM, self: Args.table, key: Args.any) !HostResult {
-        const table = try vm.tables.get(@intFromEnum(self));
-        const exists = try table.get(key, vm);
-        return ._bool(exists != null);
     }
 
     pub fn copy(vm: *VM, self: Args.table) !HostResult {
@@ -184,20 +204,6 @@ pub const Impl = struct {
             Context.compare,
         );
         return .data(Value.new.table(@intFromEnum(self)));
-    }
-
-    pub fn first(vm: *VM, self: Args.table) !HostResult {
-        const tbl = try vm.tables.get(@intFromEnum(self));
-        if (tbl.array.items.len == 0)
-            return .data(revo.Value.new.core(.nil));
-        return .data(tbl.array.items[0]);
-    }
-
-    pub fn last(vm: *VM, self: Args.table) !HostResult {
-        const tbl = try vm.tables.get(@intFromEnum(self));
-        if (tbl.array.items.len == 0)
-            return .data(revo.Value.new.core(.nil));
-        return .data(tbl.array.items[tbl.array.items.len - 1]);
     }
 
     pub fn reverse(vm: *VM, self: Args.table) !HostResult {
@@ -271,14 +277,14 @@ pub const Impl = struct {
         return .data(try deepCopyInto(vm, @intFromEnum(self), &seen));
     }
 
-    pub fn update(vm: *VM, self: Args.table, key: Args.any, f: Args.function) !HostResult {
+    pub fn update(vm: *VM, self: Args.table, k: Args.any, f: Args.function) !HostResult {
         const tid = @intFromEnum(self);
         const table = try vm.tables.get(tid);
-        const old = try table.get(key, vm) orelse Value.new.nil();
+        const old = try table.get(k, vm) orelse Value.new.nil();
         const new = try vm.callFunctionParts(Value.new.function(@intFromEnum(f)), null, &[_]Value{old}, null);
         // re-fetch: the call above may have created tables
         const t = try vm.tables.get(tid);
-        try t.put(tid, vm, key, new);
+        try t.put(tid, vm, k, new);
         return .data(Value.new.table(tid));
     }
 
@@ -346,7 +352,6 @@ pub const Impl = struct {
 
 pub const impls: []const specs.Impl = root.host.impls(Impl).val ++ &[_]specs.Impl{
     .{ .name = "push", .f = root.host.defineVariadic(&.{.table}, push) },
-    .{ .name = "get", .f = root.host.defineVariadic(&.{ .table, .any }, getOrDefault) },
     .{ .name = "slice", .f = root.host.defineVariadic(&.{ .table, .number }, sliceRange) },
     .{ .name = "get_meta", .f = root.host.define(&.{.table}, @import("metatable.zig").get_meta) },
     .{ .name = "set_meta", .f = root.host.define(&.{ .table, .any }, @import("metatable.zig").set_meta) },
@@ -357,14 +362,6 @@ fn push(args: []const Value, vm: *VM) !HostResult {
     const table = vm.tables.get(table_id) catch return .errType(0, "table", typeof(args[0], vm));
     try table.array.appendSlice(vm.runtime.alloc, args[1..]);
     return .data(Value.new.table(table_id));
-}
-
-/// metatable-aware read with optional fallback (`:undef` when absent)
-fn getOrDefault(args: []const Value, vm: *VM) !HostResult {
-    const table = vm.tables.get(args[0].asTable().?) catch return .errType(0, "table", typeof(args[0], vm));
-    if (try table.get(args[1], vm)) |found| return .data(found);
-    if (args.len > 2) return .data(args[2]);
-    return .data(Value.new.core(.undef));
 }
 
 /// array slice `[start, end)`, end defaults to the array length
@@ -393,8 +390,16 @@ test "table library" {
 }
 
 test "table methods" {
-    try testing.topNumber("{1, 2, 3}:first()", 1);
-    try testing.topNumber("{1, 2, 3}:last()", 3);
+    try testing.topNumber("{1, 2, 3}:at(0)", 1);
+    try testing.topNumber("{1, 2, 3}:at(2)", 3);
+    try testing.topAtom("{}:at(0)", "undef");
+    try testing.topTrue("{1, 2, 3}:at?(1)");
+    try testing.topFalse("{1, 2, 3}:at?(9)");
+    try testing.topFalse("{1, 2, 3}:at?(-1)");
+    try testing.topNumber("{a = 1}:key(:a)", 1);
+    try testing.topTrue("{a = 1}:key?(:a)");
+    try testing.topFalse("{a = 1}:key?(:b)");
+    try testing.topAtom("{a = 1}:key(:b)", "undef");
     try testing.topTrue("{1, 2, 3}:contains?(2)");
     try testing.topFalse("{1, 2, 3}:contains?(5)");
     try testing.topNumber("{1, 2, 3}:index_of(2)", 1);
@@ -407,11 +412,18 @@ test "table methods" {
     try testing.topTrue("let a = {1, 2, 3}; a:remove(1); a == {1, 3}");
 }
 
-test "table get with default" {
-    try testing.topNumber("{a = 1}:get(:a)", 1);
-    try testing.topNumber("{a = 1}:get(:b, 42)", 42);
-    try testing.topAtom("{a = 1}:get(:b)", "undef");
-    try testing.topNumber("{10, 20}:get(1, 0)", 20);
+test "table key/at go through __index" {
+    try testing.topNumber("set_meta({x = 1}, {__index = {y = 2}}):key(:y)", 2);
+    try testing.topNumber("set_meta({x = 1}, {__index = {y = 2}}):key(:x)", 1);
+    try testing.topAtom("set_meta({x = 1}, {__index = {y = 2}}):key(:zz)", "undef");
+    try testing.topTrue("set_meta({x = 1}, {__index = {y = 2}}):key?(:y)");
+}
+
+test "table key with default" {
+    try testing.topNumber("{a = 1}:key(:a)", 1);
+    try testing.topNumber("{a = 1}:key(:b) orelse 42", 42);
+    try testing.topAtom("{a = 1}:key(:b)", "undef");
+    try testing.topNumber("{10, 20}:at(1) orelse 0", 20);
 }
 
 test "table empty?" {
@@ -422,7 +434,7 @@ test "table empty?" {
 
 test "table update" {
     try testing.topNumber("let t = {n = 1}; t:update(:n, fn(x) x + 1); t.n", 2);
-    try testing.topNumber("let t = {}; t:update(:n, fn(x) x orelse 10); t:get(:n)", 10);
+    try testing.topNumber("let t = {}; t:update(:n, fn(x) x orelse 10); t:key(:n)", 10);
 }
 
 test "table deep_copy" {

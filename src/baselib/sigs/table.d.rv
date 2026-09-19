@@ -1,5 +1,5 @@
 #!
-global table helpers, calllable as `{1, 2}:rawget(0)` and `table.rawget({1, 2}, 0)`
+global table helpers, calllable as `{1, 2}:at(0)` and `table.at({1, 2}, 0)`
 !#
 
 #*
@@ -7,6 +7,28 @@ gets value without metamethods
 returns :undef if key missing
 *#
 pub declare table.rawget = fn(self: table, key: any) -> any | :undef
+
+#*
+gets array element at 0-based index, metatable-aware
+returns :undef when out of range
+*#
+pub declare table.at<T> = fn(self: table<T>, index: num) -> T | :undef
+
+#*
+whether a 0-based index holds an array element, metatable-aware
+*#
+pub declare table.at? = fn(self: table, index: num) -> bool
+
+#*
+gets map value, metatable-aware
+returns :undef if key missing
+*#
+pub declare table.key<V> = fn(self: table<V>, key: any) -> V | :undef
+
+#*
+whether a key exists, metatable-aware
+*#
+pub declare table.key? = fn(self: table, key: any) -> bool
 
 #* sets value without metamethods *#
 pub declare table.rawset = fn(self: table, key: any, value: any) -> table
@@ -44,9 +66,6 @@ pub declare table.keys<K, V> = fn(self: table<K, V>) -> table<K>
 #* returns all values as table *#
 pub declare table.values<K, V> = fn(self: table<K, V>) -> table<V>
 
-#* checks if key exists in table *#
-pub declare table.has? = fn(self: table, key: any) -> bool
-
 #* creates shallow copy of table *#
 pub declare table.copy<T> = fn(self: table<T>) -> table<T>
 
@@ -61,12 +80,6 @@ pub declare table.sort<T> = fn(self: table<T>) -> table<T>
 
 #* sorts table array part using comparison function fn(a, b) -> bool (true if a < b) *#
 pub declare table.sort_by = fn(self: table, fn: function) -> table
-
-#* returns first element or nil *#
-pub declare table.first<T> = fn(self: table<T>) -> T | :nil
-
-#* returns last element or nil *#
-pub declare table.last<T> = fn(self: table<T>) -> T | :nil
 
 #* reverses table array part in place *#
 pub declare table.reverse<T> = fn(self: table<T>) -> table<T>
@@ -91,9 +104,6 @@ pub declare table.len = fn(self: table) -> num
 
 #* returns length of table array part only *#
 pub declare table.alen = fn(self: table) -> num
-
-#* metatable-aware read with optional fallback (`:undef` when absent) *#
-pub declare table.get = fn(self: table, key: any, fallback: any...) -> any
 
 #* reports whether the table holds no entries at all *#
 pub declare table.empty? = fn(self: table) -> bool

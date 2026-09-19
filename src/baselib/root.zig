@@ -928,13 +928,13 @@ test "debug_info() links its nested flags table without a stale pointer" {
 }
 
 test "array sort" {
-    try testing.topNumber("{3, 1, 2}:sort():first()", 1);
-    try testing.topNumber("{3, 1, 2}:sort():last()", 3);
-    try testing.topNumber("{1, 5, 3}:sort_by(fn(a, b) a > b):first()", 5);
+    try testing.topNumber("{3, 1, 2}:sort():at(0)", 1);
+    try testing.topNumber("{3, 1, 2}:sort():at(2)", 3);
+    try testing.topNumber("{1, 5, 3}:sort_by(fn(a, b) a > b):at(0)", 5);
 }
 
 test "array transform" {
-    try testing.topNumber("{1, 2, 3}:reverse():first()", 3);
+    try testing.topNumber("{1, 2, 3}:reverse():at(0)", 3);
     try testing.topNumber("iter.sum({1, 2, 3}:unique())", 6);
     try testing.topNumber("iter.sum({1, 2, 1, 3, 2}:unique())", 6);
 }
