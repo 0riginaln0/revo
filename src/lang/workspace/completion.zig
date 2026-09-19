@@ -11,7 +11,7 @@ const diagnostic = @import("../diagnostic.zig");
 const Lexer = @import("../Lexer.zig");
 const pipeline = @import("../pipeline.zig");
 const semantic = @import("../semantic.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 const types = @import("../compiler/types.zig");
 
 const W = @import("../Workspace.zig");
@@ -114,7 +114,7 @@ fn localFieldCompletions(
     var added = false;
     for (fields) |f| {
         if (!std.mem.startsWith(u8, f.name, prefix)) continue;
-        const detail = type_serde.formatTypeOpts(arena, f.field_type, .{}) catch return added;
+        const detail = type_syntax.formatTypeOpts(arena, f.field_type, .{}) catch return added;
         items.append(arena, .{
             .label = f.name,
             .kind = .field,
@@ -175,14 +175,14 @@ fn addFieldCompletions(
     dot_pos: usize,
 ) !void {
     const target_atom = vm.internAtom(target) catch return;
-    // stdlib modules registered as globals
+    // baselib modules registered as globals
     //   (string, table, math, etc.)
     //
     // : the module is its runtime table PLUS its declared surface
     // , so type-only aliases
     //      (never runtime values)
     //   complete here too
-    if (vm.globals.get(target_atom)) |val| {
+    if (vm.user_globals.get(target_atom)) |val| {
         if (val.tag() == .table) {
             const table = try vm.tables.get(val.asTable().?);
             var hash_it = table.hash.orderedIterator();
@@ -193,7 +193,7 @@ fn addFieldCompletions(
                     const name = vm.stringValue(entry.key.asAtom().?);
                     if (std.mem.startsWith(u8, name, prefix)) {
                         var doc: ?[]const u8 = null;
-                        if (revo.std_lib.api.findFn(name)) |spec| {
+                        if (revo.baselib.specs.findFn(name)) |spec| {
                             if (spec.doc.len > 0) doc = spec.doc;
                         }
 
@@ -210,9 +210,9 @@ fn addFieldCompletions(
             // : aliases and any fn missing at runtime
             // . `__` keys stay out
             // , they are not field accesses
-            for (revo.std_lib.api.full_specs) |group| {
+            for (revo.baselib.specs.full_specs) |group| {
                 for (group) |*spec| {
-                    if (spec.head.kind != .module) continue;
+                    if (spec.head.kind != .namespaced) continue;
                     if (!std.mem.eql(u8, spec.head.module.?, target)) continue;
                     if (std.mem.startsWith(u8, spec.name, "__")) continue;
                     if (!std.mem.startsWith(u8, spec.name, prefix)) continue;
@@ -229,7 +229,7 @@ fn addFieldCompletions(
             // manifest macros scoped to this module (`uri.asdf!`
             // completes as `asdf!` under `uri.`); globals complete bare
             // above, never qualified
-            for (self.stdlibMacroNames(arena)) |name| {
+            for (self.baselibMacroNames(arena)) |name| {
                 if (!std.mem.startsWith(u8, name, target)) continue;
 
                 const rest = name[target.len..];
@@ -246,8 +246,8 @@ fn addFieldCompletions(
             return;
         }
     }
-    // document locals with known table shapes; shadowing a stdlib
-    // name with a table still completes stdlib members above (runtime
+    // document locals with known table shapes; shadowing a baselib
+    // name with a table still completes baselib members above (runtime
     // dispatches on type, not name)
     if (localFieldCompletions(self, arena, items, file_id, text, dot_pos, target, prefix)) return;
     // user-imported modules (e.g. `import "one.rv"` creates a local binding)
@@ -286,7 +286,7 @@ fn addGeneralCompletions(
     //      noise next to the semantic pass below)
     // . dotted names stay scoped
     //   : only bare macros complete bare
-    for (self.stdlibMacroNames(arena)) |name| {
+    for (self.baselibMacroNames(arena)) |name| {
         if (std.mem.findScalar(u8, name, '.') != null) continue;
         if (!std.mem.startsWith(u8, name, prefix)) continue;
         items.append(arena, .{ .label = name, .kind = .function }) catch return;
@@ -294,15 +294,15 @@ fn addGeneralCompletions(
 
     // note:
     //   global type aliases resolve bare but don't complete here yet
-    //   ; no stdlib group declares one, so there is nothing to cover
+    //   ; no baselib group declares one, so there is nothing to cover
     //   . when the first lands, mirror the dot-path union below:
     //      is_type + global head as .class
     //        (values keep winning same-named collisions)
 
-    // globals from vm (stdlib + user)
+    // globals from vm (baselib + user)
     var global_names = std.StringHashMapUnmanaged(void){};
     {
-        var git = vm.globals.iterator();
+        var git = vm.user_globals.iterator();
         while (git.next()) |entry| {
             const name = vm.stringValue(entry.key_ptr.*);
             global_names.put(arena, name, {}) catch return;
@@ -320,7 +320,7 @@ fn addGeneralCompletions(
 
             if (entry.value_ptr.tag() == .function) {
                 // findFn skips type-only aliases, so kind is always function
-                if (revo.std_lib.api.findFn(name)) |spec| {
+                if (revo.baselib.specs.findFn(name)) |spec| {
                     doc_copy = if (spec.doc.len > 0) (arena.dupe(u8, spec.doc) catch null) else null;
                     const ft = spec.type.kind.function;
                     const names = try arena.alloc([]const u8, ft.params.len);
@@ -387,14 +387,14 @@ fn addGeneralCompletions(
                         const param_types = try arena.alloc([]const u8, sig.params.len);
                         for (sig.params, 0..) |p, i| {
                             names[i] = p.name;
-                            param_types[i] = if (p.type_name) |ti| try type_serde.formatTypeOpts(arena, ti, .{}) else "";
+                            param_types[i] = if (p.type_name) |ti| try type_syntax.formatTypeOpts(arena, ti, .{}) else "";
                         }
                         const cs = try callSignature(
                             arena,
                             sym.name,
                             names,
                             param_types,
-                            if (sig.return_type) |rt| try type_serde.formatTypeOpts(arena, rt, .{}) else null,
+                            if (sig.return_type) |rt| try type_syntax.formatTypeOpts(arena, rt, .{}) else null,
                         );
                         detail = cs.detail;
                         insert_text = cs.insert_text;
@@ -425,7 +425,7 @@ fn expectCompletion(items: []const Completion, label: []const u8, kind: Completi
     return error.TestUnexpectedResult;
 }
 
-test "stdlib dot completion unions runtime table w declared aliases" {
+test "baselib dot completion unions runtime table w declared aliases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();

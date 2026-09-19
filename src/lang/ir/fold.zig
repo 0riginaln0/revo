@@ -16,7 +16,7 @@ const std = @import("std");
 
 const revo = @import("revo");
 const Compiler = @import("../compiler/root.zig").Compiler;
-const Data = revo.Data;
+const Value = revo.Value;
 const Opcode = revo.opcode.Opcode;
 
 const ir = @import("root.zig");
@@ -43,16 +43,16 @@ fn tryFoldInst(self: *Compiler, inst: *ir.IrInst) !bool {
     }
 }
 
-fn extractConst(self: *Compiler, v: *const ir.IrInst) ?Data {
+fn extractConst(self: *Compiler, v: *const ir.IrInst) ?Value {
     switch (v.opcode) {
-        .load_small_int => return Data.new.num(@as(i64, @intCast(v.op_arg))),
+        .load_small_int => return Value.new.num(@as(i64, @intCast(v.op_arg))),
         .load_const => {
             if (v.op_arg < self.vm.constants.items.len) {
                 return self.vm.constants.items[v.op_arg];
             }
             return null;
         },
-        .load_nil => return Data.new.nil(),
+        .load_nil => return Value.new.nil(),
         .move => {
             // chase the copied value so moves don't block folding; operands
             // point at earlier instructions so the recursion always ends
@@ -65,14 +65,14 @@ fn extractConst(self: *Compiler, v: *const ir.IrInst) ?Data {
     }
 }
 
-fn rewriteToConst(self: *Compiler, inst: *ir.IrInst, val: Data) !void {
+fn rewriteToConst(self: *Compiler, inst: *ir.IrInst, val: Value) !void {
     // allocate the replacement first so a failure can't leave inst.operands
     // pointing at already-freed memory for a later dce/deinit double free
     const new_ops = try self.alloc.alloc(ir.IrValue, 0);
     self.alloc.free(inst.operands);
     inst.operands = new_ops;
 
-    if (val.asNum()) |n| {
+    if (val.asNumOpt()) |n| {
         if (n >= 0 and n <= 65535 and @trunc(n) == n) {
             inst.opcode = .load_small_int;
             inst.op_arg = @intFromFloat(n);
@@ -95,8 +95,8 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
 
     // numeric fold
     if (lv.isNumber() and rv.isNumber()) {
-        const ln = lv.asNum().?;
-        const rn = rv.asNum().?;
+        const ln = lv.asNumOpt().?;
+        const rn = rv.asNumOpt().?;
         const is_comp = switch (inst.opcode) {
             .eq, .neq, .lt, .gt, .lte, .gte, .eq_int, .neq_int, .lt_int, .gt_int, .lte_int, .gte_int => true,
             else => false,
@@ -140,7 +140,7 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
                     else => unreachable,
                 };
                 if (!std.math.isFinite(raw)) return false;
-                try rewriteToConst(self, inst, Data.new.num(raw));
+                try rewriteToConst(self, inst, Value.new.num(raw));
                 return true;
             }
             if (is_floor_div) {
@@ -152,7 +152,7 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
                 else
                     @floor(ln / rn);
                 if (!std.math.isFinite(raw)) return false;
-                try rewriteToConst(self, inst, Data.new.num(raw));
+                try rewriteToConst(self, inst, Value.new.num(raw));
                 return true;
             }
             if (is_pow) {
@@ -162,7 +162,7 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
                     break :blk @floatFromInt(revo.memory.ipow(li.?, ri.?));
                 } else std.math.pow(f64, ln, rn);
                 if (!std.math.isFinite(raw)) return false;
-                try rewriteToConst(self, inst, Data.new.num(raw));
+                try rewriteToConst(self, inst, Value.new.num(raw));
                 return true;
             }
             unreachable;
@@ -196,7 +196,7 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
 
         if (is_comp) {
             // comparisons produce :true/:false atoms
-            try rewriteToConst(self, inst, Data.new.boolean(raw != 0.0));
+            try rewriteToConst(self, inst, Value.new.boolean(raw != 0.0));
         } else {
             if (!std.math.isFinite(raw)) return false;
             if (is_int) {
@@ -204,9 +204,9 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
                 const min: f64 = @floatFromInt(std.math.minInt(i64));
                 const max: f64 = @floatFromInt(std.math.maxInt(i64));
                 if (raw < min or raw > max) return false;
-                try rewriteToConst(self, inst, Data.new.num(@as(i64, @intFromFloat(raw))));
+                try rewriteToConst(self, inst, Value.new.num(@as(i64, @intFromFloat(raw))));
             } else {
-                try rewriteToConst(self, inst, Data.new.num(raw));
+                try rewriteToConst(self, inst, Value.new.num(raw));
             }
         }
         return true;
@@ -218,7 +218,7 @@ fn tryFoldBinary(self: *Compiler, inst: *ir.IrInst) !bool {
         const rs = try self.vm.strings.get(rv.asString().?);
         const s = try std.mem.concat(self.alloc, u8, &.{ ls, rs });
         defer self.alloc.free(s);
-        try rewriteToConst(self, inst, try self.vm.ownDataString(s));
+        try rewriteToConst(self, inst, try self.vm.ownValueString(s));
         return true;
     }
 
@@ -280,13 +280,13 @@ fn makeMove(self: *Compiler, inst: *ir.IrInst, src: *ir.IrInst) !bool {
 }
 
 fn makeZero(self: *Compiler, inst: *ir.IrInst) !bool {
-    try rewriteToConst(self, inst, Data.new.num(0));
+    try rewriteToConst(self, inst, Value.new.num(0));
     return true;
 }
 
 fn constInt(self: *Compiler, v: *const ir.IrInst) ?i64 {
     const d = extractConst(self, v) orelse return null;
-    const n = d.asNum() orelse return null;
+    const n = d.asNumOpt() orelse return null;
     const iv = revo.memory.numToI64(n) orelse return null;
     if (@as(f64, @floatFromInt(iv)) != n) return null;
     return iv;
@@ -322,7 +322,7 @@ fn tryFoldUnary(self: *Compiler, inst: *ir.IrInst) !bool {
     const val = extractConst(self, operand.inst) orelse return false;
     if (!val.isNumber()) return false;
 
-    const n = val.asNum().?;
+    const n = val.asNumOpt().?;
     const is_not = inst.opcode == .not;
     const raw: f64 = switch (inst.opcode) {
         .negate => -n,
@@ -331,10 +331,10 @@ fn tryFoldUnary(self: *Compiler, inst: *ir.IrInst) !bool {
     };
 
     if (is_not) {
-        try rewriteToConst(self, inst, Data.new.boolean(n == 0.0));
+        try rewriteToConst(self, inst, Value.new.boolean(n == 0.0));
     } else {
         if (!std.math.isFinite(raw)) return false;
-        try rewriteToConst(self, inst, Data.new.num(raw));
+        try rewriteToConst(self, inst, Value.new.num(raw));
     }
     return true;
 }

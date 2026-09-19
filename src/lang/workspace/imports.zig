@@ -21,7 +21,7 @@ pub fn resolveOpenImport(
     self: *Workspace,
     source_name: []const u8,
     raw_path: []const u8,
-    mode: pipeline.RunMode,
+    mode: pipeline.ProjectMode,
     project_root: []const u8,
 ) ?FileId {
     if (resolveImportPath(self, source_name, raw_path)) |resolved| {
@@ -203,7 +203,7 @@ pub fn resolveOpenImportOrOpen(
     self: *Workspace,
     source_name: []const u8,
     raw_path: []const u8,
-    mode: pipeline.RunMode,
+    mode: pipeline.ProjectMode,
     project_root: []const u8,
 ) ?FileId {
     if (resolveImportPath(self, source_name, raw_path)) |resolved| {

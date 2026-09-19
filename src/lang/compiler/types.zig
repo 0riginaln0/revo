@@ -116,7 +116,7 @@ pub const FunctionSignature = struct {
 };
 
 /// resolved pieces for one FunctionSignature; every builder (compiler
-/// allocFnSig, semantic make/newSig, type_serde eval) walks its own AST
+/// allocFnSig, semantic make/newSig, type_syntax eval) walks its own AST
 /// because error handling differs, then funnels through here
 pub const SignatureParts = struct {
     param_names: []const []const u8,
@@ -574,7 +574,7 @@ pub fn inferBinaryOp(op: ast.BinOp, l: TypeInfo, r: TypeInfo) TypeInfo {
     };
 }
 
-pub fn inferUnaryOp(op: ast.UnOp, T: TypeInfo) TypeInfo {
+pub fn inferUnaryOp(op: ast.UnaryOp, T: TypeInfo) TypeInfo {
     return switch (op) {
         .negate => if (T.tag == .number) T else .{ .tag = .any },
         .not => .{ .tag = .bool },
@@ -757,7 +757,7 @@ pub fn inferExprType(ctx: CheckCtx, node: *const ast.Node) TypeInfo {
     return switch (node.expr) {
         .number => .{ .tag = .number },
         .string, .multiline_string => .{ .tag = .string },
-        .hash => |name| .{ .tag = .{ .atom = name } },
+        .atom => |name| .{ .tag = .{ .atom = name } },
         .nil => .{ .tag = .{ .atom = ":nil" } },
         .ident => |name| ctx.inferIdentType(name),
         .unary => |u| inferUnaryOp(u.op, inferExprType(ctx, u.expr)),
@@ -1016,7 +1016,7 @@ pub fn evalTypeExpr(ctx: CheckCtx, te: *const ast.TypeExpr) !TypeInfo {
 fn patternCover(ctx: CheckCtx, node: *const ast.Node) MatchCover {
     return switch (node.expr) {
         .ident => .wildcard,
-        .hash => |name| .{ .atom = name },
+        .atom => |name| .{ .atom = name },
         .nil => .{ .atom = ":nil" },
         .number => .number,
         .string, .multiline_string => .string,

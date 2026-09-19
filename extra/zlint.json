@@ -2,9 +2,9 @@
 	"ignore": [
 		"vendor",
 		"zig-out",
-		"src/c",
+		"src/capi",
 		"zig-pkg",
-		"src/std",
+		"src/baselib",
 		"src/main_wasm.zig",
 		"examples",
 		"notes"

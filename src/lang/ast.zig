@@ -46,7 +46,7 @@ pub const BinOp = enum {
     @"union",
 };
 
-pub const UnOp = enum {
+pub const UnaryOp = enum {
     negate,
     not,
     spawn,
@@ -147,7 +147,7 @@ pub fn atomName(name: []const u8) []const u8 {
 }
 
 /// render a TypeExpr to the writer
-/// mirrors type_serde.parseTypeExpr: every Kind parses and prints
+/// mirrors type_syntax.parseTypeExpr: every Kind parses and prints
 pub fn printTypeExpr(te: *const TypeExpr, writer: *std.Io.Writer) !void {
     switch (te.kind) {
         .named => |name| try writer.writeAll(name),
@@ -334,7 +334,7 @@ pub fn staticFieldName(entry: TableEntry) ?[]const u8 {
     if (entry.computed) return null;
     const key = entry.key orelse return null;
     return switch (key.expr) {
-        .ident, .hash => |name| name,
+        .ident, .atom => |name| name,
         else => null,
     };
 }
@@ -356,7 +356,7 @@ pub const TableEntry = struct {
 };
 
 pub const DeclKind = enum {
-    con,
+    @"const",
     let,
     global,
     test_decl,
@@ -423,10 +423,10 @@ pub const Expr = union(enum) {
     number: NumberLiteral, // {:number, 123} or {:number, 123.0}
     string: []const u8, // {:string, "asdf"}
     multiline_string: []const u8,
-    hash: []const u8,
+    atom: []const u8,
     nil,
     ident: []const u8,
-    unary: struct { op: UnOp, expr: *Node },
+    unary: struct { op: UnaryOp, expr: *Node },
     binary: struct { op: BinOp, left: *Node, right: *Node },
     and_expr: struct { left: *Node, right: *Node },
     or_expr: struct { left: *Node, right: *Node },
@@ -562,7 +562,7 @@ pub const Node = struct {
             },
             .string => |s| try writer.print("\"{s}\"", .{s}),
             .multiline_string => |s| try writer.print("\"\"\"{s}\"\"\"", .{s}),
-            .hash => |h| try writer.print(":{s}", .{h}),
+            .atom => |h| try writer.print(":{s}", .{h}),
             .nil => try writer.writeAll("nil"),
             .ident => |name| try writer.writeAll(name),
             .macro_expr => |m| try writer.print("(macro {s} `{s}` `{s}`)", .{ m.name, m.pattern, m.template }),

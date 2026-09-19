@@ -2,11 +2,11 @@ const std = @import("std");
 const testing = std.testing;
 
 const revo = @import("revo");
-const Data = revo.Data;
+const Value = revo.Value;
 
 const VM = @import("VM.zig").VM;
 const Scheduler = revo.vm.Scheduler;
-const vt_runtime = revo.lang.testing.runtime;
+const vt_runtime = revo.lang.test_helpers.runtime;
 
 fn triggerGc(vm: *VM) void {
     vm.gc_pending = true;
@@ -24,39 +24,39 @@ test "vm join returns dead fiber result" {
     const child = try VM.Fiber.init(vm.runtime.alloc, 1, &.{}, 16);
     _ = try vm.sched.appendFiber(child);
     vm.sched.fibers.items[1].state = .dead;
-    vm.sched.fibers.items[1].result = Data.new.num(42);
+    vm.sched.fibers.items[1].result = Value.new.num(42);
 
-    const handle_table = try vm.tableOfSlice(&[_]Data{
-        Data.new.atom(revo.core_atoms.atomId(.fiber)),
-        Data.new.num(1),
+    const handle_table = try vm.tableOfSlice(&[_]Value{
+        Value.new.atom(revo.CoreAtoms.atomId(.fiber)),
+        Value.new.num(1),
     });
     const handle = try vm.addConstant(handle_table);
     const join_atom = try vm.internAtom("join");
 
     const program = [_]revo.Instruction{
         .{ .op = .load_const, .a = 1, .bx = @intCast(handle) },
-        .{ .op = .load_global, .a = 0, .bx = @intCast(join_atom) },
+        .{ .op = .load_user_global, .a = 0, .bx = @intCast(join_atom) },
         .{ .op = .call, .a = 0, .b = 1, .c = 0 },
         .{ .op = .halt, .a = 0 },
     };
     vm.mainFiber().program = &program;
-    _ = try revo.vm.exec.runReport(&vm);
+    _ = try revo.vm.dispatch.runReport(&vm);
 
     const out = vm.mainResult();
-    try testing.expectEqual(@as(f64, 42), out.asNum().?);
+    try testing.expectEqual(@as(f64, 42), out.asNumOpt().?);
 }
 
 test "nanbox canonicalizes nan through helpers" {
-    const nan = Data.new.num(std.math.nan(f64));
-    try testing.expect(nan.asNum() != null);
-    try testing.expect(std.math.isNan(nan.asNum().?));
+    const nan = Value.new.num(std.math.nan(f64));
+    try testing.expect(nan.asNumOpt() != null);
+    try testing.expect(std.math.isNan(nan.asNumOpt().?));
 }
 
 test "vm spawn passes n args to child and join returns result" {
     var vm = try VM.init(vt_runtime());
     defer vm.deinit();
 
-    const proto_id = try vm.functions.createPrototype(.{
+    const template_id = try vm.callable.createTemplate(.{
         .addr = 8,
         .arity = 2,
         .total_arity = 2,
@@ -66,10 +66,10 @@ test "vm spawn passes n args to child and join returns result" {
         .const_locals = &.{},
         .const_local_bits = &.{},
     });
-    const fn_id = try vm.functions.createClosure(proto_id, &.{});
-    const c_fn = try vm.addConstant(Data.new.function(fn_id));
-    const c_two = try vm.addConstant(Data.new.num(2));
-    const c_three = try vm.addConstant(Data.new.num(3));
+    const fn_id = try vm.callable.createClosure(template_id, &.{});
+    const c_fn = try vm.addConstant(Value.new.function(fn_id));
+    const c_two = try vm.addConstant(Value.new.num(2));
+    const c_three = try vm.addConstant(Value.new.num(3));
     const join_atom = try vm.internAtom("join");
 
     const program = [_]revo.Instruction{
@@ -77,7 +77,7 @@ test "vm spawn passes n args to child and join returns result" {
         .{ .op = .load_const, .a = 1, .bx = @intCast(c_two) },
         .{ .op = .load_const, .a = 2, .bx = @intCast(c_three) },
         .{ .op = .spawn, .a = 0, .b = 2, .c = 0 },
-        .{ .op = .load_global, .a = 1, .bx = @intCast(join_atom) },
+        .{ .op = .load_user_global, .a = 1, .bx = @intCast(join_atom) },
         .{ .op = .move, .a = 2, .b = 0 },
         .{ .op = .call, .a = 1, .b = 1, .c = 0 },
         .{ .op = .halt, .a = 0 },
@@ -88,11 +88,11 @@ test "vm spawn passes n args to child and join returns result" {
     };
 
     vm.mainFiber().program = &program;
-    const result = try revo.vm.exec.runReport(&vm);
+    const result = try revo.vm.dispatch.runReport(&vm);
     try testing.expect(result == .ok);
 
     const out = vm.mainResult();
-    try testing.expectEqual(@as(f64, 5), out.asNum().?);
+    try testing.expectEqual(@as(f64, 5), out.asNumOpt().?);
 }
 
 test "vm channel handoff wakes blocked receiver" {
@@ -108,10 +108,10 @@ test "vm channel handoff wakes blocked receiver" {
     try testing.expectEqual(@as(VM.Fiber.State, .waiting), vm.currentFiber().state);
 
     vm.sched.setCurrent(0);
-    try vm.sched.channelSend(ch, Data.new.num(99));
+    try vm.sched.channelSend(ch, Value.new.num(99));
 
     try testing.expectEqual(@as(VM.Fiber.State, .ready), vm.sched.fibers.items[1].state);
-    try testing.expectEqual(@as(f64, 99), vm.sched.fibers.items[1].registers[0].asNum().?);
+    try testing.expectEqual(@as(f64, 99), vm.sched.fibers.items[1].registers[0].asNumOpt().?);
 }
 
 test "scheduler generic park wake resumes parked fiber" {
@@ -121,7 +121,7 @@ test "scheduler generic park wake resumes parked fiber" {
     const child = try VM.Fiber.init(vm.runtime.alloc, 1, &.{}, 16);
     _ = try vm.sched.appendFiber(child);
     vm.sched.fibers.items[1].registers_len = 1;
-    vm.sched.fibers.items[1].registers[0] = revo.Data.new.core(.missing);
+    vm.sched.fibers.items[1].registers[0] = revo.Value.new.core(.missing);
 
     vm.sched.setCurrent(1);
     try vm.sched.parkCurrentForIo(
@@ -142,10 +142,10 @@ test "scheduler generic park wake resumes parked fiber" {
     try testing.expectEqual(@as(usize, 1), vm.sched.io_waiters.items.len);
     try testing.expectEqual(@as(u64, 7), vm.sched.io_waiters.items[0].wait_id);
 
-    try vm.sched.wakeFiber(1, Data.new.num(13));
+    try vm.sched.wakeFiber(1, Value.new.num(13));
 
     try testing.expectEqual(@as(VM.Fiber.State, .ready), vm.sched.fibers.items[1].state);
-    try testing.expectEqual(@as(f64, 13), vm.sched.fibers.items[1].registers[1].asNum().?);
+    try testing.expectEqual(@as(f64, 13), vm.sched.fibers.items[1].registers[1].asNumOpt().?);
 }
 
 test "vm channel buffered send then recv" {
@@ -153,14 +153,14 @@ test "vm channel buffered send then recv" {
     defer vm.deinit();
 
     const ch = try vm.sched.channelCreate(&vm.tables, 1);
-    try vm.sched.channelSend(ch, Data.new.num(7));
+    try vm.sched.channelSend(ch, Value.new.num(7));
 
     const before = vm.currentFiber().registers_len;
     if (try vm.sched.channelRecv(ch)) |value| {
         try vm.push(value);
     }
     try testing.expectEqual(before + 1, vm.currentFiber().registers_len);
-    try testing.expectEqual(@as(f64, 7), vm.currentFiber().registers[vm.currentFiber().registers_len - 1].asNum().?);
+    try testing.expectEqual(@as(f64, 7), vm.currentFiber().registers[vm.currentFiber().registers_len - 1].asNumOpt().?);
 }
 
 // a fiber whose registers are freed (repl reload swaps in a fresh fiber and
@@ -171,16 +171,16 @@ test "vm closes open upvalues before the owning fiber is deinit'd" {
     var vm = try VM.init(vt_runtime());
     defer vm.deinit();
 
-    // what module.runCompiledModuleReport does between runs: swap in a fresh
+    // what module.runBytecodeReport does between runs: swap in a fresh
     // fiber, run it (it captures an open upvalue), then close and deinit it
     const next = try VM.Fiber.init(vm.runtime.alloc, 0, &.{}, 16);
     const prev = vm.swapFiber(next);
 
     vm.mainFiber().registers_len = 4;
-    vm.mainFiber().registers[3] = Data.new.num(42);
+    vm.mainFiber().registers[3] = Value.new.num(42);
     const uv_id = try vm.captureUpvalue(3);
     {
-        const uv = try vm.functions.getUpvalue(uv_id);
+        const uv = try vm.callable.getUpvalue(uv_id);
         try testing.expectEqual(@as(?usize, 3), uv.open_index);
         try testing.expectEqual(@as(?usize, 0), uv.owner_fiber_id);
     }
@@ -189,9 +189,9 @@ test "vm closes open upvalues before the owning fiber is deinit'd" {
     try vm.closeUpvalueList(&finished, 0);
     VM.Fiber.deinit(&finished, vm.runtime.alloc);
 
-    const uv = try vm.functions.getUpvalue(uv_id);
+    const uv = try vm.callable.getUpvalue(uv_id);
     try testing.expectEqual(@as(?usize, null), uv.open_index);
-    try testing.expectEqual(@as(f64, 42), uv.closed.asNum().?);
+    try testing.expectEqual(@as(f64, 42), uv.closed.asNumOpt().?);
 }
 
 test "vm gc keeps rooted tables and their children alive" {
@@ -203,16 +203,16 @@ test "vm gc keeps rooted tables and their children alive" {
 
     {
         const parent = try vm.tables.get(parent_id);
-        try parent.putRaw(try vm.ownDataString("child"), Data.new.table(child_id), &vm);
+        try parent.putRaw(try vm.ownValueString("child"), Value.new.table(child_id), &vm);
     }
 
-    try vm.push(Data.new.table(parent_id));
+    try vm.push(Value.new.table(parent_id));
     defer _ = vm.pop() catch {};
 
     triggerGc(&vm);
 
     const parent = try vm.tables.get(parent_id);
-    const child = parent.getRaw(try vm.ownDataString("child"), &vm) orelse unreachable;
+    const child = parent.getRaw(try vm.ownValueString("child"), &vm) orelse unreachable;
     try testing.expect(child.isTable());
     try testing.expectEqual(child_id, child.asTable().?);
     _ = try vm.tables.get(child_id);
@@ -223,7 +223,7 @@ test "vm gc keeps globals rooted tables alive" {
     defer vm.deinit();
 
     const table_id = try vm.tables.create();
-    try vm.setGlobal("alive", Data.new.table(table_id));
+    try vm.setGlobal("alive", Value.new.table(table_id));
 
     triggerGc(&vm);
 
@@ -235,7 +235,7 @@ test "vm gc keeps tables written during sweep alive" {
     defer vm.deinit();
 
     const root_id = try vm.tables.create();
-    try vm.setGlobal("root", Data.new.table(root_id));
+    try vm.setGlobal("root", Value.new.table(root_id));
 
     for (0..1100) |_| {
         _ = try vm.tables.create();
@@ -243,11 +243,11 @@ test "vm gc keeps tables written during sweep alive" {
 
     triggerGc(&vm);
 
-    const key = try vm.ownDataString("child");
+    const key = try vm.ownValueString("child");
     const child_id = try vm.tables.create();
     {
         const root = try vm.tables.get(root_id);
-        try root.put(root_id, &vm, key, Data.new.table(child_id));
+        try root.put(root_id, &vm, key, Value.new.table(child_id));
     }
 
     vm.maybeCollectGarbage();
@@ -263,7 +263,7 @@ test "vm gc reuses freed function ids" {
     var vm = try VM.init(vt_runtime());
     defer vm.deinit();
 
-    const proto_id = try vm.functions.createPrototype(.{
+    const template_id = try vm.callable.createTemplate(.{
         .addr = 0,
         .arity = 0,
         .total_arity = 0,
@@ -272,11 +272,11 @@ test "vm gc reuses freed function ids" {
         .const_locals = &.{},
         .const_local_bits = &.{},
     });
-    const fn_id = try vm.functions.createClosure(proto_id, &.{});
+    const fn_id = try vm.callable.createClosure(template_id, &.{});
     triggerGc(&vm);
 
-    try testing.expectError(error.FunctionDNE, vm.functions.get(fn_id));
-    const reused = try vm.functions.createClosure(proto_id, &.{});
+    try testing.expectError(error.FunctionDNE, vm.callable.get(fn_id));
+    const reused = try vm.callable.createClosure(template_id, &.{});
     try testing.expectEqual(fn_id, reused);
 }
 
@@ -285,9 +285,9 @@ test "vm gc keeps rooted closures and captured tables alive" {
     defer vm.deinit();
 
     const table_id = try vm.tables.create();
-    try (try vm.tables.get(table_id)).putRaw(try vm.ownDataString("x"), Data.new.num(1), &vm);
+    try (try vm.tables.get(table_id)).putRaw(try vm.ownValueString("x"), Value.new.num(1), &vm);
 
-    const proto_id = try vm.functions.createPrototype(.{
+    const template_id = try vm.callable.createTemplate(.{
         .addr = 0,
         .arity = 0,
         .total_arity = 0,
@@ -296,18 +296,18 @@ test "vm gc keeps rooted closures and captured tables alive" {
         .const_locals = &.{},
         .const_local_bits = &.{},
     });
-    const upvalue_id = try vm.functions.createUpvalue(.{
+    const upvalue_id = try vm.callable.createUpvalue(.{
         .open_index = null,
-        .closed = Data.new.table(table_id),
+        .closed = Value.new.table(table_id),
         .owner_fiber_id = null,
     });
-    const closure_id = try vm.functions.createClosure(proto_id, &.{upvalue_id});
-    try vm.push(Data.new.function(closure_id));
+    const closure_id = try vm.callable.createClosure(template_id, &.{upvalue_id});
+    try vm.push(Value.new.function(closure_id));
     defer _ = vm.pop() catch {};
 
     triggerGc(&vm);
 
-    _ = try vm.functions.get(closure_id);
+    _ = try vm.callable.get(closure_id);
     _ = try vm.tables.get(table_id);
 }
 
@@ -332,7 +332,7 @@ test "vm gc keeps rooted strings alive" {
     defer vm.deinit();
 
     const s = try vm.strings.own("keep-me");
-    try vm.push(try vm.ownDataString(vm.stringValue(s)));
+    try vm.push(try vm.ownValueString(vm.stringValue(s)));
     defer _ = vm.pop() catch {};
 
     triggerGc(&vm);
@@ -357,15 +357,15 @@ test "vm gc stress test allocates many objects" {
         try table_ids.append(vt_runtime().alloc, tid);
 
         const ttbl = try vm.tables.get(tid);
-        try ttbl.putRaw(try vm.ownDataString("index"), Data.new.num(i), &vm);
+        try ttbl.putRaw(try vm.ownValueString("index"), Value.new.num(i), &vm);
 
         const sid = try vm.strings.own("stress-string");
         try string_ids.append(vt_runtime().alloc, sid);
     }
 
-    try vm.push(try vm.ownDataString("root"));
-    try vm.push(Data.new.table(table_ids.items[0]));
-    try vm.push(try vm.ownDataString(vm.stringValue(string_ids.items[0])));
+    try vm.push(try vm.ownValueString("root"));
+    try vm.push(Value.new.table(table_ids.items[0]));
+    try vm.push(try vm.ownValueString(vm.stringValue(string_ids.items[0])));
     // SAFETY: shut up zlint
     defer {
         _ = vm.pop() catch {};

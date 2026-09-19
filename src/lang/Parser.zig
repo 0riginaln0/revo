@@ -5,10 +5,10 @@ const Expr = ast.Expr;
 const Node = ast.Node;
 const Span = ast.Span;
 const Lexer = @import("Lexer.zig");
-const testing_helpers = @import("testing.zig");
+const testing_helpers = @import("test_helpers.zig");
 const Token = Lexer.Token;
 const TokenType = Lexer.TokenType;
-const type_serde = @import("type_serde.zig");
+const type_syntax = @import("type_syntax.zig");
 
 /// TODO: have an actual opts struct pLEASE
 pub var repl_mode: bool = false;
@@ -77,7 +77,7 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const Token) anyerror
 }
 
 /// lex + parse in one call, the pure frontend entry
-/// stdlib-free: prelude merging lives in pipeline.parse
+/// baselib-free: prelude merging lives in pipeline.parse
 pub fn parseSource(allocator: std.mem.Allocator, source: []const u8) !*Node {
     return switch (try parseSourceReport(allocator, source)) {
         .ok => |expr| expr,
@@ -294,7 +294,7 @@ fn parseExpression(self: *Parser, min_bp: u8) anyerror!*Node {
 
         // postfix: method call `obj:method(args)`; sugar for `obj.field(args)` with implicit self
         // `:foo(` must hug, so `"hi":split\n(" ")` is two stmts, not a call
-        if (self.peek().type == .hash and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) {
+        if (self.peek().type == .atom and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) {
             const method = self.advance();
             _ = try self.expect(.lparen);
             const call_args = try self.parseDelimitedExprList(.rparen);
@@ -505,7 +505,7 @@ fn parsePrefix(self: *Parser) anyerror!*Node {
             self.parseInterpolatedString(token)
         else
             self.allocExpr(token.span(), .{ .multiline_string = token.text }),
-        .hash => self.allocExpr(token.span(), .{ .hash = token.text[1..] }),
+        .atom => self.allocExpr(token.span(), .{ .atom = token.text[1..] }),
         .doc_comment => self.parseDocAttr(token),
         .ident => self.allocExpr(token.span(), .{ .ident = token.text }),
         .kw_const, .kw_global, .kw_let, .kw_test, .kw_suite, .kw_declare => self.parseDecl(token),
@@ -560,7 +560,7 @@ fn parsePrefix(self: *Parser) anyerror!*Node {
 }
 
 /// -, not
-fn parseUnary(self: *Parser, op: ast.UnOp, right_bp: u8, token: Token) anyerror!*Node {
+fn parseUnary(self: *Parser, op: ast.UnaryOp, right_bp: u8, token: Token) anyerror!*Node {
     const expr = try self.parseExpression(right_bp);
     return self.allocExpr(Span.merge(token.span(), expr.span), .{ .unary = .{ .op = op, .expr = expr } });
 }
@@ -649,7 +649,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
         const first_ident = self.advance();
 
         // `fn obj:method(params) body`, implicit self
-        if (self.peek().type == .hash) {
+        if (self.peek().type == .atom) {
             const atom_token = self.advance();
             const method_name = atom_token.text[1..];
             _ = try self.expect(.lparen);
@@ -667,7 +667,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
                 .fn_expr = .{ .params = new_params, .return_type = return_type, .body = body },
             });
             const obj_node = try self.allocExpr(first_ident.span(), .{ .ident = first_ident.text });
-            const key_node = try self.allocExpr(atom_token.span(), .{ .hash = method_name });
+            const key_node = try self.allocExpr(atom_token.span(), .{ .atom = method_name });
             const index_node = try self.allocExpr(Span.merge(first_ident.span(), atom_token.span()), .{
                 .index = .{ .object = obj_node, .key = key_node },
             });
@@ -689,7 +689,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
                 .fn_expr = .{ .params = params, .return_type = return_type, .body = body },
             });
             const obj_node = try self.allocExpr(first_ident.span(), .{ .ident = first_ident.text });
-            const key_node = try self.allocExpr(field_name.span(), .{ .hash = field_name.text });
+            const key_node = try self.allocExpr(field_name.span(), .{ .atom = field_name.text });
             const index_node = try self.allocExpr(Span.merge(first_ident.span(), field_name.span()), .{
                 .index = .{ .object = obj_node, .key = key_node },
             });
@@ -716,7 +716,7 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
             });
             return self.allocExpr(
                 Span.merge(start.span(), body.span),
-                .{ .decl = .{ .inner = bind_node, .kind = if (repl_mode) .global else .con } },
+                .{ .decl = .{ .inner = bind_node, .kind = if (repl_mode) .global else .@"const" } },
             );
         }
         return error.UnexpectedToken;
@@ -768,9 +768,9 @@ fn parseUnless(self: *Parser, start: Token) anyerror!*Node {
 /// match expr | pat expr | pat expr
 fn parseMatch(self: *Parser, start: Token, subj: ?*Node) anyerror!*Node {
     const subject = subj orelse blk: {
-        if (self.check(.pipe)) {
+        if (self.check(.bar)) {
             // synthetic `:true`
-            break :blk try self.allocExpr(start.span(), .{ .hash = "true" });
+            break :blk try self.allocExpr(start.span(), .{ .atom = "true" });
         }
         break :blk try self.parseExpression(25);
     };
@@ -782,7 +782,7 @@ fn parseMatch(self: *Parser, start: Token, subj: ?*Node) anyerror!*Node {
     }
 
     var end_span = subject.span;
-    while (self.match(.pipe)) {
+    while (self.match(.bar)) {
         const arm = try self.parseMatchArm();
         end_span = arm.then.span;
         try arms.append(self.alloc, arm);
@@ -828,7 +828,7 @@ fn parseMatchArm(self: *Parser) anyerror!ast.MatchArm {
 
 /// type Name = TypeExpr
 fn parseTypeExpr(self: *Parser) anyerror!*ast.TypeExpr {
-    return try type_serde.parseTypeExpr(self.tokens, &self.pos, self.alloc);
+    return try type_syntax.parseTypeExpr(self.tokens, &self.pos, self.alloc);
 }
 
 /// const x = expr or let x = expr, with const {a, b} = <expr> destructuring
@@ -885,7 +885,7 @@ fn parseBinding(self: *Parser, comptime kind_in: ast.DeclKind, start: Token) any
 fn parseDecl(self: *Parser, start: Token) anyerror!*Node {
     return switch (start.type) {
         .kw_const => {
-            return try self.parseBinding(.con, start);
+            return try self.parseBinding(.@"const", start);
         },
         .kw_let => {
             return try self.parseBinding(.let, start);
@@ -950,7 +950,7 @@ fn parseDecl(self: *Parser, start: Token) anyerror!*Node {
             );
         },
         .kw_declare => blk: {
-            // bodge: `type` and `import` are stdlib globals, usable as names
+            // bodge: `type` and `import` are baselib globals, usable as names
             if (!self.check(.ident)) switch (self.peek().type) {
                 .kw_type, .kw_import => {},
                 else => return error.UnexpectedToken,
@@ -986,11 +986,11 @@ fn parseDecl(self: *Parser, start: Token) anyerror!*Node {
 /// `allow_core` is false for `type`:: metatable slots are values, not types.
 fn parseDeclareHead(self: *Parser, first: Token, allow_core: bool) !struct { head: ?ast.DeclareHead, tps: []const []const u8 } {
     // peek first so a rejected core head leaves no partial consumption
-    if (!allow_core and (self.check(.hash) or self.check(.colon))) return error.UnexpectedToken;
+    if (!allow_core and (self.check(.atom) or self.check(.colon))) return error.UnexpectedToken;
     var head: ?ast.DeclareHead = null;
-    if (self.check(.hash)) {
+    if (self.check(.atom)) {
         // `string:__index`
-        //   the lexer merges `:` + key into one hash
+        //   the lexer merges `:` + key into one atom
         const key = self.advance();
         head = .{ .core = .{ .target = first.text, .key = key.text[1..] } };
     } else if (self.match(.colon)) {
@@ -1199,12 +1199,12 @@ fn parsePubPrefix(self: *Parser, _: Token) anyerror!*Node {
 
     if (decl_start.type == .kw_macro) {
         const node = try self.parseMacro(decl_start);
-        return self.allocExpr(node.span, .{ .decl = .{ .inner = node, .kind = .con, .pub_ = true } });
+        return self.allocExpr(node.span, .{ .decl = .{ .inner = node, .kind = .@"const", .pub_ = true } });
     }
 
     if (decl_start.type == .kw_proc) {
         const node = try self.parseProc(decl_start);
-        return self.allocExpr(node.span, .{ .decl = .{ .inner = node, .kind = .con, .pub_ = true } });
+        return self.allocExpr(node.span, .{ .decl = .{ .inner = node, .kind = .@"const", .pub_ = true } });
     }
 
     var node = try self.parseDecl(decl_start);
@@ -1317,7 +1317,7 @@ fn parseQuasiquote(self: *Parser, token: Token) anyerror!*Node {
 /// (calls only resolve one field level)
 /// , core slots are values not macros
 fn parseMacroHead(self: *Parser, first: Token) ![]const u8 {
-    if (self.check(.hash) or self.check(.colon)) return error.UnexpectedToken;
+    if (self.check(.atom) or self.check(.colon)) return error.UnexpectedToken;
     if (!self.match(.dot)) return first.text;
     const seg = try self.expectIdent();
 
@@ -1474,7 +1474,7 @@ fn parseParenExpr(self: *Parser, start: Token) anyerror!*Node {
 ///   ; value positions reject it later with a proper error
 fn parseAscribed(self: *Parser, first: *Node) anyerror!*Node {
     _ = try self.expect(.colon);
-    const type_name = try type_serde.parseTypeExpr(self.tokens, &self.pos, self.alloc);
+    const type_name = try type_syntax.parseTypeExpr(self.tokens, &self.pos, self.alloc);
 
     return self.allocExpr(
         Span.merge(first.span, type_name.span),
@@ -1816,7 +1816,7 @@ fn forcesStatementBoundary(self: *Parser, left: *const Node, next: TokenType) bo
 
 fn canContinueExpression(self: *Parser, left: *const Node) bool {
     const t = self.peek().type;
-    if (t == .dot or t == .lbracket or t == .assign or t == .dotdot or t == .pipe_forward or t == .hash) return true;
+    if (t == .dot or t == .lbracket or t == .assign or t == .dotdot or t == .pipe_forward or t == .atom) return true;
     if (t == .plus_assign or t == .minus_assign or t == .star_assign or
         t == .slash_assign or t == .percent_assign or t == .caret_assign or
         t == .concat_assign) return true;
@@ -1824,7 +1824,7 @@ fn canContinueExpression(self: *Parser, left: *const Node) bool {
     if (logical_binding_table.get(t) != null) return true;
     if (infix_binding_table.get(t) != null) return true;
     if (t == .lparen and self.pos > 0 and self.tokens[self.pos - 1].span().end == self.peek().span().start) return true;
-    if (t == .hash and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) return true;
+    if (t == .atom and self.peekAt(1).type == .lparen and self.peek().span().end == self.peekAt(1).span().start) return true;
     if (self.allow_bare_calls and exprAllowsBareCall(left)) return bare_call_arg_start_tokens.get(t);
     return false;
 }
@@ -1908,7 +1908,7 @@ fn wrapPipeCallWithTemp(
     const binding: ast.Binding = .{ .target = temp_target, .value = left };
     const bind = try self.allocExpr(left.span, .{ .decl = .{
         .inner = try self.allocExpr(left.span, .{ .binding = binding }),
-        .kind = ast.DeclKind.con,
+        .kind = ast.DeclKind.@"const",
     } });
 
     const call_args = try self.alloc.alloc(*Node, args.len + 1);
@@ -1933,7 +1933,7 @@ fn wrapPipeLexical(self: *Parser, left: *Node, right: *Node) anyerror!*Node {
     const binding: ast.Binding = .{ .target = underscore, .value = left };
     const bind = try self.allocExpr(left.span, .{ .decl = .{
         .inner = try self.allocExpr(left.span, .{ .binding = binding }),
-        .kind = ast.DeclKind.con,
+        .kind = ast.DeclKind.@"const",
     } });
     const exprs = try self.alloc.alloc(*Node, 2);
     errdefer self.alloc.free(exprs);
@@ -1959,7 +1959,7 @@ const infix_binding_table: InfixBindingTable = blk: {
     table.set(.minus, .{ .left = 40, .right = 41, .op = .sub });
     table.set(.star, .{ .left = 50, .right = 51, .op = .mul });
     table.set(.slash, .{ .left = 50, .right = 51, .op = .div });
-    table.set(.slash_slash, .{ .left = 50, .right = 51, .op = .int_div });
+    table.set(.floor_div, .{ .left = 50, .right = 51, .op = .int_div });
     table.set(.percent, .{ .left = 50, .right = 51, .op = .mod });
     // exponent: right-assoc, binds tighter than unary minus (python: -2^2 == -4)
     table.set(.caret, .{ .left = 62, .right = 61, .op = .pow });
@@ -1972,12 +1972,12 @@ const infix_binding_table: InfixBindingTable = blk: {
     break :blk table;
 };
 
-const InterpolationMode = enum { display, debug, pretty };
+const PrintMode = enum { plain, debug, pretty };
 
-fn interpolationMode(suffix: []const u8) ?InterpolationMode {
+fn interpolationMode(suffix: []const u8) ?PrintMode {
     if (suffix.len != 2 or suffix[0] != ':') return null;
     return switch (suffix[1]) {
-        'v' => .display,
+        'v' => .plain,
         '?' => .debug,
         'p' => .pretty,
         else => null,
@@ -2044,7 +2044,7 @@ fn parseInterpolatedString(self: *Parser, token: Token) anyerror!*Node {
         try appendFormatLiteral(&format, self.alloc, token.text[literal_start..open.idx]);
 
         var body = token.text[open.idx + 1 .. end];
-        var mode: InterpolationMode = .display;
+        var mode: PrintMode = .plain;
         const trailing = std.mem.trimEnd(u8, body, " \t\r\n");
         if (trailing.len >= 2) {
             if (interpolationMode(trailing[trailing.len - 2 ..])) |found| {
@@ -2081,7 +2081,7 @@ fn parseInterpolatedString(self: *Parser, token: Token) anyerror!*Node {
         };
         try args.append(self.alloc, value);
         try format.appendSlice(self.alloc, switch (mode) {
-            .display => "%v",
+            .plain => "%v",
             .debug => "%?",
             .pretty => "%p",
         });
@@ -2153,7 +2153,7 @@ const call_stmt_boundary_tokens = makeTokenSet(&.{
 });
 
 const expr_start_tokens = makeTokenSet(&.{
-    .number,       .string,    .multiline_string, .hash,     .ident,
+    .number,       .string,    .multiline_string, .atom,     .ident,
     .kw_const,     .kw_let,    .kw_macro,         .minus,    .kw_not,
     .pipe_forward, .lparen,    .kw_fn,            .kw_if,    .kw_unless,
     .kw_match,     .kw_do,     .kw_loop,          .kw_break, .kw_continue,
@@ -2412,7 +2412,7 @@ test "parses pub const with pub_ flag" {
     const root = try parseTokens(alloc, tokens);
     try std.testing.expect(root.expr == .decl);
     try std.testing.expect(root.expr.decl.pub_);
-    try std.testing.expect(root.expr.decl.kind == .con);
+    try std.testing.expect(root.expr.decl.kind == .@"const");
 }
 
 test "parses pub macro" {

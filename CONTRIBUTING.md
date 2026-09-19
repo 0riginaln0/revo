@@ -84,14 +84,14 @@ nm zig-out/lib/liberevo.a | rg erevo_
 
 see [src/lang/README.md](src/lang/README.md)
 
-### stdlib (`src/std/`)
+### baselib (`src/baselib/`)
 
 to make a new module:
 ~ copy any existing library - both its `foo.zig` implementation and the `iface/foo.d.rv` declaration\
 ~ add one `Group.init` line in `api.zig` w/ both the `iface/foo.d.rv` source and the zig `impls`
 
 how it works:\
-the surface is at `iface/*.d.rv`, files carry doc-comment+declatarion sigs; `api.zig` merges them with the zig `impls` at boot (`register_stdlib`) into `full_specs`, keyed on the bare name, so the doc set always matches the runtime. the primitive type metatable _is_ the module table, so `x:method()` dispatch is a single lookup
+the surface is at `iface/*.d.rv`, files carry doc-comment+declatarion sigs; `api.zig` merges them with the zig `impls` at boot (`register_baselib`) into `full_specs`, keyed on the bare name, so the doc set always matches the runtime. the primitive type metatable _is_ the module table, so `x:method()` dispatch is a single lookup
 
 ### c api, lsp, wasm, repl
 
@@ -137,7 +137,7 @@ this is a fish script i use for regenerating docs
 
 ```fish
 set STDOCPATH ~/projects/web/revo.lung.fyi/content/std.html
-revo doc --html --splice ./src/std/iface < "$STDOCPATH" > ./std.html
+revo doc --html --splice ./src/baselib/iface < "$STDOCPATH" > ./std.html
 mv ./std.html $STDOCPATH
 ```
 

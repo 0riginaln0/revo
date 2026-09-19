@@ -43,7 +43,7 @@ fn c_void_ptr(ptr: *mut ErevoVM) -> *mut std::ffi::c_void {
     ptr as *mut std::ffi::c_void
 }
 
-fn boxed(tag: RevoType, id: u64) -> RevoData {
+fn boxed(tag: RevoType, id: u64) -> RevoValue {
     REVO_BOX_TAG | ((tag as u64) << REVO_TAG_SHIFT) | (id & REVO_PAYLOAD_MASK)
 }
 
@@ -102,8 +102,8 @@ impl<'vm> Program<'vm> {
     }
 
     /// execute against the same vm it was compiled with
-    pub fn run(&mut self) -> Result<Data, String> {
-        let mut data: RevoData = 0;
+    pub fn run(&mut self) -> Result<Value, String> {
+        let mut data: RevoValue = 0;
 
         let ok = unsafe { erevo_run(self.vm_ptr, self.ptr, &mut data) };
 
@@ -111,7 +111,7 @@ impl<'vm> Program<'vm> {
             return Err(last_error_ptr(self.vm_ptr));
         }
 
-        Data::from_raw(self.vm_ptr, data).map_err(|e| e.to_string())
+        Value::from_raw(self.vm_ptr, data).map_err(|e| e.to_string())
     }
 }
 
@@ -157,12 +157,12 @@ impl VM {
     }
 
     /// compile, run, and free a program in one step
-    pub fn eval(&mut self, src: &str, name: Option<&str>) -> Result<Data, String> {
+    pub fn eval(&mut self, src: &str, name: Option<&str>) -> Result<Value, String> {
         let name_c = CString::new(name.unwrap_or("<run>"))
             .map_err(|e| format!("name contains interior nul: {e}"))?;
 
         let src_c = CString::new(src).map_err(|e| format!("source contains interior nul: {e}"))?;
-        let mut data: RevoData = 0;
+        let mut data: RevoValue = 0;
 
         let ok = unsafe { erevo_eval(self.ptr, name_c.as_ptr(), src_c.as_ptr(), &mut data) };
 
@@ -170,25 +170,25 @@ impl VM {
             return Err(self.last_error());
         }
 
-        Data::from_raw(self.ptr, data).map_err(|e| e.to_string())
+        Value::from_raw(self.ptr, data).map_err(|e| e.to_string())
     }
 
     /// read back a global; missing names come back as `:nil`
-    pub fn get_global(&self, name: &str) -> Result<Data, String> {
+    pub fn get_global(&self, name: &str) -> Result<Value, String> {
         let raw = unsafe { revo_getglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len()) };
-        Data::from_raw(self.ptr, raw).map_err(|e| e.to_string())
+        Value::from_raw(self.ptr, raw).map_err(|e| e.to_string())
     }
 
     /// bind a name to a value on the vm
-    pub fn set_global(&mut self, name: &str, val: &Data) -> Result<(), String> {
+    pub fn set_global(&mut self, name: &str, val: &Value) -> Result<(), String> {
         let raw = val.to_raw(self)?;
         unsafe { revo_setglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len(), raw) };
         Ok(())
     }
 
     /// call a revo function value with already-converted args
-    pub fn call(&mut self, func: &Data, args: &[Data]) -> Result<Data, String> {
-        if !matches!(func, Data::Function(_)) {
+    pub fn call(&mut self, func: &Value, args: &[Value]) -> Result<Value, String> {
+        if !matches!(func, Value::Function(_)) {
             return Err(format!("call target is not a function: {func:?}"));
         }
 
@@ -204,7 +204,7 @@ impl VM {
             argv.as_ptr()
         };
 
-        let mut out: RevoData = 0;
+        let mut out: RevoValue = 0;
         let ok = unsafe {
             revo_call(
                 c_void_ptr(self.ptr),
@@ -217,7 +217,7 @@ impl VM {
         if ok == 0 {
             return Err(err_or_unknown(self.ptr));
         }
-        Data::from_raw(self.ptr, out).map_err(|e| e.to_string())
+        Value::from_raw(self.ptr, out).map_err(|e| e.to_string())
     }
 }
 
@@ -268,30 +268,30 @@ pub struct TableId(u64);
 pub struct FunctionId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ForeignId(u64);
+pub struct OpaqueId(u64);
 
 /// the actual revodata is f64 unless boxed
 /// this one has a fat size=32 cost slapped onto it
 /// and lives past vm lifetime, real data are owned by gc
 #[derive(Debug, Clone, PartialEq)]
-pub enum Data {
+pub enum Value {
     Num(f64),
     Atom(Atom),
     String(String),
     Table(TableId),
     Function(FunctionId),
-    Foreign(ForeignId),
+    Opaque(OpaqueId),
 }
 
-impl Display for Data {
+impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Data::Num(n) => write!(f, "{n}"),
-            Data::Atom(a) => write!(f, ":{a}"),
-            Data::String(s) => write!(f, "{s}"),
-            Data::Table(id) => write!(f, "table#{}", id.0),
-            Data::Function(id) => write!(f, "function#{}", id.0),
-            Data::Foreign(id) => write!(f, "foreign#{}", id.0),
+            Value::Num(n) => write!(f, "{n}"),
+            Value::Atom(a) => write!(f, ":{a}"),
+            Value::String(s) => write!(f, "{s}"),
+            Value::Table(id) => write!(f, "table#{}", id.0),
+            Value::Function(id) => write!(f, "function#{}", id.0),
+            Value::Opaque(id) => write!(f, "opaque#{}", id.0),
         }
     }
 }
@@ -301,7 +301,7 @@ const BOX_TAG: u64 = 0x7FF8000000000000;
 const NAN_MASK: u64 = 0xFFF8000000000000;
 
 // drifts with box changes
-fn revo_type(d: RevoData) -> u64 {
+fn revo_type(d: RevoValue) -> u64 {
     if d & NAN_MASK == BOX_TAG {
         (d >> REVO_TAG_SHIFT) & u64::from(REVO_TAG_MASK)
     } else {
@@ -309,41 +309,41 @@ fn revo_type(d: RevoData) -> u64 {
     }
 }
 
-impl Data {
+impl Value {
     /// convert back into a raw box for passing into the vm
     /// strings and atoms are interned, so this needs the vm
-    pub fn to_raw(&self, vm: &VM) -> Result<RevoData, String> {
+    pub fn to_raw(&self, vm: &VM) -> Result<RevoValue, String> {
         self.to_raw_in(vm.ptr)
     }
 
-    fn to_raw_in(&self, vm_ptr: *mut ErevoVM) -> Result<RevoData, String> {
+    fn to_raw_in(&self, vm_ptr: *mut ErevoVM) -> Result<RevoValue, String> {
         match self {
-            Data::Num(n) => Ok(n.to_bits()),
-            Data::Atom(s) => Ok(boxed(RevoType_revo_atom, intern_atom_raw(vm_ptr, s)?)),
-            Data::String(s) => Ok(boxed(RevoType_revo_string, intern_raw(vm_ptr, s)?)),
-            Data::Table(id) => Ok(boxed(RevoType_revo_table, id.0)),
-            Data::Function(id) => Ok(boxed(RevoType_revo_function, id.0)),
-            Data::Foreign(id) => Ok(boxed(RevoType_revo_foreign, id.0)),
+            Value::Num(n) => Ok(n.to_bits()),
+            Value::Atom(s) => Ok(boxed(RevoType_revo_atom, intern_atom_raw(vm_ptr, s)?)),
+            Value::String(s) => Ok(boxed(RevoType_revo_string, intern_raw(vm_ptr, s)?)),
+            Value::Table(id) => Ok(boxed(RevoType_revo_table, id.0)),
+            Value::Function(id) => Ok(boxed(RevoType_revo_function, id.0)),
+            Value::Opaque(id) => Ok(boxed(RevoType_revo_opaque, id.0)),
         }
     }
 
     /// we dont want boxes leaking into the public api
-    pub fn from_raw(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<Data, &'static str> {
+    pub fn from_raw(vm_ptr: *mut ErevoVM, val: RevoValue) -> Result<Value, &'static str> {
         match revo_type(val) {
-            t if t == RevoType_revo_number as u64 => Ok(Data::Num(f64::from_bits(val))),
+            t if t == RevoType_revo_number as u64 => Ok(Value::Num(f64::from_bits(val))),
             t if t == RevoType_revo_atom as u64 => {
                 // atoms and strings share the same string pool
-                Ok(Data::Atom(Atom::from(get_revo_str(vm_ptr, val)?)))
+                Ok(Value::Atom(Atom::from(get_revo_str(vm_ptr, val)?)))
             }
-            t if t == RevoType_revo_string as u64 => Ok(Data::String(get_revo_str(vm_ptr, val)?)),
+            t if t == RevoType_revo_string as u64 => Ok(Value::String(get_revo_str(vm_ptr, val)?)),
             t if t == RevoType_revo_table as u64 => {
-                Ok(Data::Table(TableId(val & REVO_PAYLOAD_MASK)))
+                Ok(Value::Table(TableId(val & REVO_PAYLOAD_MASK)))
             }
             t if t == RevoType_revo_function as u64 => {
-                Ok(Data::Function(FunctionId(val & REVO_PAYLOAD_MASK)))
+                Ok(Value::Function(FunctionId(val & REVO_PAYLOAD_MASK)))
             }
-            t if t == RevoType_revo_foreign as u64 => {
-                Ok(Data::Foreign(ForeignId(val & REVO_PAYLOAD_MASK)))
+            t if t == RevoType_revo_opaque as u64 => {
+                Ok(Value::Opaque(OpaqueId(val & REVO_PAYLOAD_MASK)))
             }
             _ => Err("can't deduce the type"),
         }
@@ -353,7 +353,7 @@ impl Data {
 /// table handle, owned by the vm and managed by its gc
 #[derive(Debug)]
 pub struct Table<'vm> {
-    raw: RevoData,
+    raw: RevoValue,
     vm_ptr: *mut ErevoVM,
     _marker: PhantomData<&'vm VM>,
 }
@@ -370,7 +370,7 @@ impl<'vm> Table<'vm> {
     }
 
     /// build an array table from items
-    pub fn from_items(vm: &'vm VM, items: &[Data]) -> Result<Self, String> {
+    pub fn from_items(vm: &'vm VM, items: &[Value]) -> Result<Self, String> {
         let mut raw_items = Vec::with_capacity(items.len());
         for item in items {
             raw_items.push(item.to_raw(vm)?);
@@ -408,20 +408,20 @@ impl<'vm> Table<'vm> {
     }
 
     /// missing keys come back as `None`
-    pub fn get(&self, key: &Data) -> Result<Option<Data>, String> {
+    pub fn get(&self, key: &Value) -> Result<Option<Value>, String> {
         let key_raw = key.to_raw_in(self.vm_ptr)?;
-        let mut out: RevoData = 0;
+        let mut out: RevoValue = 0;
         let ok = unsafe { revo_table_get(self.c_ptr(), self.raw, key_raw, &mut out) };
         if ok == 0 {
             return Ok(None);
         }
 
         Ok(Some(
-            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+            Value::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
         ))
     }
 
-    pub fn set(&mut self, key: &Data, val: &Data) -> Result<(), String> {
+    pub fn set(&mut self, key: &Value, val: &Value) -> Result<(), String> {
         let key_raw = key.to_raw_in(self.vm_ptr)?;
         let val_raw = val.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_set(self.c_ptr(), self.raw, key_raw, val_raw) };
@@ -433,7 +433,7 @@ impl<'vm> Table<'vm> {
     }
 
     /// returns whether anything was actually removed
-    pub fn remove(&mut self, key: &Data) -> Result<bool, String> {
+    pub fn remove(&mut self, key: &Value) -> Result<bool, String> {
         let key_raw = key.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_remove(self.c_ptr(), self.raw, key_raw) };
 
@@ -441,18 +441,18 @@ impl<'vm> Table<'vm> {
     }
 
     /// array indexing
-    pub fn get_idx(&self, idx: u64) -> Result<Option<Data>, String> {
-        let mut out: RevoData = 0;
+    pub fn get_idx(&self, idx: u64) -> Result<Option<Value>, String> {
+        let mut out: RevoValue = 0;
         let ok = unsafe { revo_table_get_idx(self.c_ptr(), self.raw, idx, &mut out) };
         if ok == 0 {
             return Ok(None);
         }
         Ok(Some(
-            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+            Value::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
         ))
     }
 
-    pub fn push(&mut self, val: &Data) -> Result<(), String> {
+    pub fn push(&mut self, val: &Value) -> Result<(), String> {
         let val_raw = val.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_push(self.c_ptr(), self.raw, val_raw) };
         if ok == 0 {
@@ -462,8 +462,8 @@ impl<'vm> Table<'vm> {
     }
 
     /// field access by name (`t.x`)
-    pub fn get_name(&self, name: &str) -> Result<Option<Data>, String> {
-        let mut out: RevoData = 0;
+    pub fn get_name(&self, name: &str) -> Result<Option<Value>, String> {
+        let mut out: RevoValue = 0;
         let ok = unsafe {
             revo_table_get_name(
                 self.c_ptr(),
@@ -477,11 +477,11 @@ impl<'vm> Table<'vm> {
             return Ok(None);
         }
         Ok(Some(
-            Data::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
+            Value::from_raw(self.vm_ptr, out).map_err(|e| e.to_string())?,
         ))
     }
 
-    pub fn set_name(&mut self, name: &str, val: &Data) -> Result<(), String> {
+    pub fn set_name(&mut self, name: &str, val: &Value) -> Result<(), String> {
         let val_raw = val.to_raw_in(self.vm_ptr)?;
         let ok = unsafe {
             revo_table_set_name(
@@ -500,7 +500,7 @@ impl<'vm> Table<'vm> {
 }
 
 /// copies eagerly, strings randomly die of gc under vm's rule
-fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<String, &'static str> {
+fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoValue) -> Result<String, &'static str> {
     let id = val & REVO_PAYLOAD_MASK;
     let raw_ptr = c_void_ptr(vm_ptr);
     let len = unsafe { revo_string_length(raw_ptr, id) };
@@ -517,43 +517,43 @@ fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoData) -> Result<String, &'static 
 #[derive(Debug)]
 pub enum Error {
     ExpectedTable,
-    ExpectedDataType,
+    ExpectedValueType,
     ExpectedBool,
 }
 
 //
-// Data conversion types
+// Value conversion types
 //
 
-pub trait ToData {
-    fn to_data(self) -> Data;
+pub trait ToValue {
+    fn to_value(self) -> Value;
 }
-pub trait TryFromData {
+pub trait TryFromValue {
     type Output;
-    fn try_from_data(data: Data, vm: &VM) -> Result<Self::Output, Error>;
-    fn from_data(data: Data, vm: &VM) -> Option<Self::Output> {
-        Self::try_from_data(data, vm).ok()
+    fn try_from_value(data: Value, vm: &VM) -> Result<Self::Output, Error>;
+    fn from_value(data: Value, vm: &VM) -> Option<Self::Output> {
+        Self::try_from_value(data, vm).ok()
     }
-    fn from_data_unchecked(data: Data, vm: &VM) -> Self::Output {
-        Self::try_from_data(data, vm).unwrap()
+    fn from_value_unchecked(data: Value, vm: &VM) -> Self::Output {
+        Self::try_from_value(data, vm).unwrap()
     }
 }
 
 macro_rules! impl_num_data {
     ($($ty:ident),*) => {
         $(
-            impl ToData for $ty {
-                fn to_data(self) -> Data {
-                    Data::Num(self as f64)
+            impl ToValue for $ty {
+                fn to_value(self) -> Value {
+                    Value::Num(self as f64)
                 }
             }
 
-            impl TryFromData for $ty {
+            impl TryFromValue for $ty {
                 type Output = Self;
-                fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+                fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
                     match data {
-                        Data::Num(n) => Ok(n as Self::Output),
-                        _ => Err(Error::ExpectedDataType),
+                        Value::Num(n) => Ok(n as Self::Output),
+                        _ => Err(Error::ExpectedValueType),
                     }
                 }
             }
@@ -565,69 +565,69 @@ impl_num_data!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
 );
 
-impl ToData for bool {
-    fn to_data(self) -> Data {
+impl ToValue for bool {
+    fn to_value(self) -> Value {
         match self {
-            true => ::revo_sys::TRUE.to_data(),
-            false => ::revo_sys::FALSE.to_data(),
+            true => ::revo_sys::TRUE.to_value(),
+            false => ::revo_sys::FALSE.to_value(),
         }
     }
 }
-impl TryFromData for bool {
+impl TryFromValue for bool {
     type Output = Self;
-    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
         match data {
-            Data::Atom(a) => match a.as_str() {
+            Value::Atom(a) => match a.as_str() {
                 "true" => Ok(true),
                 "false" => Ok(false),
                 _ => Err(Error::ExpectedBool),
             },
-            _ => Err(Error::ExpectedDataType),
+            _ => Err(Error::ExpectedValueType),
         }
     }
 }
 
-impl ToData for String {
-    fn to_data(self) -> Data {
-        Data::String(self)
+impl ToValue for String {
+    fn to_value(self) -> Value {
+        Value::String(self)
     }
 }
-impl TryFromData for String {
+impl TryFromValue for String {
     type Output = Self;
-    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
         match data {
-            Data::String(s) => Ok(s),
-            _ => Err(Error::ExpectedDataType),
+            Value::String(s) => Ok(s),
+            _ => Err(Error::ExpectedValueType),
         }
     }
 }
 
-impl ToData for Atom {
-    fn to_data(self) -> Data {
-        Data::Atom(self)
+impl ToValue for Atom {
+    fn to_value(self) -> Value {
+        Value::Atom(self)
     }
 }
-impl TryFromData for Atom {
+impl TryFromValue for Atom {
     type Output = Self;
-    fn try_from_data(data: Data, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
         match data {
-            Data::Atom(a) => Ok(a),
-            _ => Err(Error::ExpectedDataType),
+            Value::Atom(a) => Ok(a),
+            _ => Err(Error::ExpectedValueType),
         }
     }
 }
 
-impl<'a> ToData for Table<'a> {
-    fn to_data(self) -> Data {
-        Data::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
+impl<'a> ToValue for Table<'a> {
+    fn to_value(self) -> Value {
+        Value::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
     }
 }
-impl<'a> TryFromData for Table<'a> {
+impl<'a> TryFromValue for Table<'a> {
     type Output = Self;
-    // wrap a `Data::Table` from eval back into a handle
-    fn try_from_data(data: Data, vm: &VM) -> Result<Self::Output, Error> {
+    // wrap a `Value::Table` from eval back into a handle
+    fn try_from_value(data: Value, vm: &VM) -> Result<Self::Output, Error> {
         match data {
-            Data::Table(id) => Ok(Self {
+            Value::Table(id) => Ok(Self {
                 raw: boxed(RevoType_revo_table, id.0),
                 vm_ptr: vm.ptr,
                 _marker: PhantomData,

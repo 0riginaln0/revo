@@ -1,14 +1,14 @@
 # lang
 
-the revo frontend: text in, bytecode artifact out. the vm lives in
-`../vm/`, the stdlib in `../std/`, this dir is everything between
+the revo frontend: text in, bytecode out. the vm lives in
+`../vm/`, the baselib in `../baselib/`, this dir is everything between
 
 ## pipeline
 
 one file per stage, data flows down, never back up:
 
 ```ruby
-source -> Lexer -> Parser -> expander -> semantic -> compiler -> artifact
+source -> Lexer -> Parser -> expander -> semantic -> compiler -> bytecode
 ```
 
 `pipeline.zig` drives it (`build` is the whole thing)
@@ -23,7 +23,7 @@ and `import_preload` (compile-time import extraction)
 - `Parser.zig`: `parseSource`, `parseSourceReport`, token to tree
 - `expander.zig`: template macros; `proc.zig` is `proc!` macros
 - `semantic.zig`: name and type checking, owns `Failure`
-- `compiler/`: lowering to bytecode; `types.zig` is where all the types are at
+- `compiler/`: compiling to bytecode; `types.zig` is where all the types are at
   plus `evalTypeExpr` and the `CheckCtx` interface every scope implements
 - `ir/`: `IrInst` plus the optimization passes
 - `type_serde.zig`: text-only type serialization/deserialiization
@@ -58,9 +58,9 @@ each have a one-line `check()`;\
 ## how to add things
 
 new syntax: `Lexer.zig` (tokens) -> `Parser.zig` (tree) -> `ast.zig`
-    (node kinds) -> `expander.zig` if it desugars, `compiler/` if it lowers
+    (node kinds) -> `expander.zig` if it desugars, `compiler/` if it compiles
 
-new builtin: `../std/iface/*.d.rv` decl plus zig impl (see `../std/`), iface @ `api.zig`
+new builtin: `../baselib/iface/*.d.rv` decl plus zig impl (see `../baselib/`), iface @ `api.zig`
     docs and runtime stay in sync that way
 
 new type behavior: `compiler/types.zig` inference, `type_serde.zig` only if the text spelling changes

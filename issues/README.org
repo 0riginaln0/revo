@@ -103,7 +103,7 @@ x for done,
 
 ** std/core
 
-*** expose zig code as stdlib
+*** expose zig code as baselib
 
 - [x] language's ast, assembler, lexer, and parser
 - [x] http client/server

@@ -27,17 +27,17 @@ pub fn analyze(
     opts: pipeline.BuildOptions,
 ) !pipeline.BuildResult {
     var analysis = try analyzeDetailed(self, alloc, id, opts);
-    if (analysis.artifact) |artifact| {
-        analysis.artifact = null;
+    if (analysis.bytecode) |bytecode| {
+        analysis.bytecode = null;
         defer analysis.deinit(alloc);
-        return .{ .ok = artifact };
+        return .{ .ok = bytecode };
     }
     defer analysis.deinit(alloc);
     return .{ .err = analysis.diagnostics.? };
 }
 
 /// full compile
-/// ret: detailed Analysis with artifact + diagnostics
+/// ret: detailed Analysis with bytecode + diagnostics
 pub fn analyzeDetailed(
     self: *Workspace,
     alloc: std.mem.Allocator,
@@ -48,8 +48,8 @@ pub fn analyzeDetailed(
     const vm = self.vm orelse return error.VmUnavailable;
     if (self.cache.get(id)) |cached| {
         if (cached.version == snap.version and common.sameOpts(cached.opts, opts)) {
-            const artifact = try common.copyArtifact(alloc, cached.artifact);
-            errdefer common.deinitArtifact(alloc, artifact);
+            const bytecode = try common.copyBytecode(alloc, cached.bytecode);
+            errdefer common.deinitBytecode(alloc, bytecode);
             var warnings: ?diagnostic.Report = null;
             errdefer if (warnings) |*w| w.deinit(alloc);
             if (cached.warnings) |cached_w| {
@@ -65,11 +65,11 @@ pub fn analyzeDetailed(
                 warnings = wcopy;
             }
             if (opts.install_debug_info) {
-                try vm.setProgramDebugInfo(artifact.spans, snap.text, snap.name);
+                try vm.setProgramDebugInfo(bytecode.spans, snap.text, snap.name);
             }
             return .{
                 .snapshot = snap,
-                .artifact = artifact,
+                .bytecode = bytecode,
                 .warnings = warnings,
                 .cached = true,
                 .symbols = try common.copySymbols(alloc, cached.symbols),
@@ -85,7 +85,7 @@ pub fn analyzeDetailed(
         .name = snap.name,
         .text = snap.text,
     }, .{
-        .include_stdlib_macros = opts.include_stdlib_macros,
+        .include_baselib_macros = opts.include_baselib_macros,
     });
 
     if (parsed == .err) {
@@ -118,10 +118,10 @@ pub fn analyzeDetailed(
     }, opts, &warn_report);
 
     return switch (build_result) {
-        .ok => |artifact| blk: {
-            defer common.deinitArtifact(vm.runtime.alloc, artifact);
-            const cache_artifact = try common.copyArtifact(self.alloc, artifact);
-            errdefer common.deinitArtifact(self.alloc, cache_artifact);
+        .ok => |bytecode| blk: {
+            defer common.deinitBytecode(vm.runtime.alloc, bytecode);
+            const cache_bytecode = try common.copyBytecode(self.alloc, bytecode);
+            errdefer common.deinitBytecode(self.alloc, cache_bytecode);
 
             const cache_symbols = try common.copySymbols(self.alloc, symbols);
             errdefer common.freeSymbols(self.alloc, cache_symbols);
@@ -145,16 +145,16 @@ pub fn analyzeDetailed(
                 break :blk_w owned;
             } else null;
 
-            try self.putCache(id, snap.version, opts, cache_artifact, cache_symbols, cache_warnings);
+            try self.putCache(id, snap.version, opts, cache_bytecode, cache_symbols, cache_warnings);
             cache_warnings = null;
 
-            const copy = try common.copyArtifact(alloc, artifact);
-            errdefer common.deinitArtifact(alloc, copy);
+            const copy = try common.copyBytecode(alloc, bytecode);
+            errdefer common.deinitBytecode(alloc, copy);
 
             errdefer if (warnings) |*w| w.deinit(alloc);
             break :blk .{
                 .snapshot = snap,
-                .artifact = copy,
+                .bytecode = copy,
                 .warnings = warnings,
                 .cached = false,
                 .symbols = try common.copySymbols(alloc, symbols),
@@ -221,7 +221,7 @@ pub fn diagnosticsWithWarnings(
             sem.diagnostics = null;
             const warnings = full.warnings;
             full.warnings = null;
-            return .{ .err = pipeline.Error{ .lower = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
+            return .{ .err = pipeline.Error{ .compile = .{ .kind = .CompileError, .report = merged_report } }, .warnings = warnings };
         }
         full.diagnostics = null;
         const warnings = full.warnings;
@@ -260,14 +260,14 @@ pub fn inspectDetailed(
     //   their spans point into the embedded sources,
     //   so theyd comw up as weird symbols/hovers with
     //   wrong lines
-    //      (expansion and lowering keep merging; completions
+    //      (expansion and compilation keep merging; completions
     //      derive the names from the same manifest sources instead)
     //
     const parsed = try pipeline.parse(arena.allocator(), .{
         .name = snap.name,
         .text = snap.text,
     }, .{
-        .include_stdlib_macros = false,
+        .include_baselib_macros = false,
     });
 
     if (parsed == .err) {
@@ -304,7 +304,7 @@ pub fn inspectDetailed(
     const WorkspaceResolver = struct {
         ws: *Workspace,
         source_name: []const u8,
-        mode: pipeline.RunMode,
+        mode: pipeline.ProjectMode,
         project_root: []const u8,
         fn resolve(ptr: *anyopaque, path: []const u8, a: std.mem.Allocator) ?[]const u8 {
             const s: *@This() = @ptrCast(@alignCast(ptr));
@@ -469,9 +469,9 @@ test "workspace invalidates cache on change" {
     const id = try ws.open("<test>", "1 + 1", .{});
     const first = try ws.analyze(alloc, id, .{});
     defer switch (first) {
-        .ok => |artifact| {
-            alloc.free(artifact.instructions);
-            alloc.free(artifact.spans);
+        .ok => |bytecode| {
+            alloc.free(bytecode.instructions);
+            alloc.free(bytecode.spans);
         },
         .err => |err| pipeline.deinitError(alloc, err),
     };
@@ -482,9 +482,9 @@ test "workspace invalidates cache on change" {
 
     const second = try ws.analyze(alloc, id, .{});
     defer switch (second) {
-        .ok => |artifact| {
-            alloc.free(artifact.instructions);
-            alloc.free(artifact.spans);
+        .ok => |bytecode| {
+            alloc.free(bytecode.instructions);
+            alloc.free(bytecode.spans);
         },
         .err => |err| pipeline.deinitError(alloc, err),
     };
@@ -508,18 +508,18 @@ test "workspace invalidates dependent caches" {
 
     const res_b = try ws.analyze(alloc, b, .{});
     defer switch (res_b) {
-        .ok => |artifact| {
-            alloc.free(artifact.instructions);
-            alloc.free(artifact.spans);
+        .ok => |bytecode| {
+            alloc.free(bytecode.instructions);
+            alloc.free(bytecode.spans);
         },
         .err => |err| pipeline.deinitError(alloc, err),
     };
 
     const res_c = try ws.analyze(alloc, c, .{});
     defer switch (res_c) {
-        .ok => |artifact| {
-            alloc.free(artifact.instructions);
-            alloc.free(artifact.spans);
+        .ok => |bytecode| {
+            alloc.free(bytecode.instructions);
+            alloc.free(bytecode.spans);
         },
         .err => |err| pipeline.deinitError(alloc, err),
     };
@@ -533,7 +533,7 @@ test "workspace invalidates dependent caches" {
     try std.testing.expect(ws.cache.get(c) == null);
 }
 
-test "analysis returns snapshot and artifact" {
+test "analysis returns snapshot and bytecode" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -549,7 +549,7 @@ test "analysis returns snapshot and artifact" {
     defer analysis.deinit(alloc);
 
     try std.testing.expectEqualStrings("<test>", analysis.snapshot.name);
-    try std.testing.expect(analysis.artifact != null);
+    try std.testing.expect(analysis.bytecode != null);
     try std.testing.expect(analysis.diagnostics == null);
 }
 
@@ -571,7 +571,7 @@ test "workspace diagnostics clean file" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    // *vm attached like the lsp does, stdlib fns come from its globals*
+    // *vm attached like the lsp does, baselib fns come from its globals*
     var vm = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
     defer vm.deinit();
     var ws = try Workspace.initWithVm(&vm, alloc);
@@ -611,7 +611,7 @@ test "workspace diagnostics warn on missing return arrow" {
     try std.testing.expect(diag != null);
 }
 
-test "workspace diagnostics merge semantic and lower failures" {
+test "workspace diagnostics merge semantic and compile failures" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -633,7 +633,7 @@ test "workspace diagnostics merge semantic and lower failures" {
     const report = switch (diag.?) {
         .parse => |f| f.report,
         .expand => |f| f.report,
-        .lower => |f| f.report,
+        .compile => |f| f.report,
         .semantic => |f| f.report,
     };
 

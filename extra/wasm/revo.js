@@ -348,7 +348,7 @@ export class Revo {
 	}
 
 	/**
-	 * re-init the vm (clears globals, reregisters stdlib)
+	 * re-init the vm (clears globals, reregisters baselib)
 	 *
 	 * calls revo_wasm_deinit + revo_wasm_init on the same instance
 	 *

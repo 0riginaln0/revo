@@ -10,8 +10,8 @@
 #include "revo.h"
 
 // load needs func, func needs __call
-static int func_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res);
-static int __call(void *vm, size_t argc, RevoData *argv, RevoData *out_res);
+static int func_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res);
+static int __call(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res);
 
 // need these two otherwise we have to malloc
 #define CFFI_MAX_ARGS 32
@@ -98,7 +98,7 @@ static ffi_type *cffi_type_for(char c) {
 // copy revo str val into a null-terminated mallocd cstr
 // (revo_string_data is the gc owned one)
 // TODO: add this to revo.h
-static char *revo_to_cstr(void *vm, RevoData v) {
+static char *revo_to_cstr(void *vm, RevoValue v) {
   if (!revo_is_string(v))
     return NULL;
 
@@ -116,19 +116,19 @@ static char *revo_to_cstr(void *vm, RevoData v) {
 // clang-format off
 // TODO: add these two to revo.h
 static inline
-int set_name_cstr(void *vm, RevoData tbl, const char *name, RevoData val) {
+int set_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue val) {
   return revo_table_set_name(vm, tbl, (uint64_t)(uintptr_t)name, strlen(name), val);
 }
 
 static inline
-int get_name_cstr(void *vm, RevoData tbl, const char *name, RevoData *out) {
+int get_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue *out) {
   return revo_table_get_name(vm, tbl, (uint64_t)(uintptr_t)name, strlen(name), out);
 }
 // clang-format on
 
-static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
-                        uint64_t nargs, RevoData sig_table, char ret_c,
-                        RevoData *out_res) {
+static int do_ffi_callv(void *vm, void (*sym)(void), RevoValue *args,
+                        uint64_t nargs, RevoValue sig_table, char ret_c,
+                        RevoValue *out_res) {
   if (revo_table_alen(vm, sig_table) != nargs)
     return revo_c_err_other(vm, "arguments and types dont match in length");
   if (nargs > CFFI_MAX_ARGS)
@@ -150,7 +150,7 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
   int rc = REVO_OK;
 
   for (uint64_t i = 0; i < nargs; i++) {
-    RevoData tdata = 0;
+    RevoValue tdata = 0;
     if (!revo_table_get_idx(vm, sig_table, i, &tdata)) {
       rc = revo_c_err_other(vm, "could not get argument type");
       goto farewell;
@@ -165,7 +165,7 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
       goto farewell;
     }
     char s = *(const char *)revo_string_data(vm, _tid);
-    RevoData aout = args[i];
+    RevoValue aout = args[i];
 
     atypes[i] = cffi_type_for(s);
     if (!atypes[i]) {
@@ -185,12 +185,12 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
       CFFI_NUM_ARG('f', f, float)
       CFFI_NUM_ARG('d', d, double)
     case 'p': {
-      if (revo_is_foreign(aout))
-        slots[i].p = revo_foreign_ptr(aout);
+      if (revo_is_opaque(aout))
+        slots[i].p = revo_opaque_ptr(aout);
       else if (revo_is_nil(aout))
         slots[i].p = NULL;
       else {
-        rc = revo_c_err_other(vm, "pointer arg must be foreign or nil");
+        rc = revo_c_err_other(vm, "pointer arg must be opaque or nil");
         goto farewell;
       }
       aval[i] = &slots[i].p;
@@ -252,7 +252,7 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoData *args,
     CFFI_NUM_RET('f', f)
     CFFI_NUM_RET('d', d)
   case 'p':
-    *out_res = revo_foreign_new(ret_slot.p);
+    *out_res = revo_opaque_new(ret_slot.p);
     break;
   case 's': {
     if (!ret_slot.s) {
@@ -277,8 +277,8 @@ farewell:
   return rc;
 }
 
-// load(path) -> lib table { _handle = foreign, func = cfunc }
-static int load_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
+// load(path) -> lib table { _handle = opaque, func = cfunc }
+static int load_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
   if (argc != 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_string(argv[0]))
@@ -294,18 +294,18 @@ static int load_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
   if (!lib)
     return revo_c_err_other(vm, "could not open lib");
 
-  RevoData tbl = revo_table_create(vm);
+  RevoValue tbl = revo_table_create(vm);
   if (!revo_is_table(tbl)) {
     dlclose(lib);
     return revo_c_err_other(vm, "could not create lib table???");
   }
 
-  if (!set_name_cstr(vm, tbl, "_handle", revo_foreign_new(lib))) {
+  if (!set_name_cstr(vm, tbl, "_handle", revo_opaque_new(lib))) {
     dlclose(lib);
     return revo_c_err_other(vm, "could not store lib handle???");
   }
 
-  RevoData func_c =
+  RevoValue func_c =
       revo_cfunc_new(vm, (void *)func_fn, (uint64_t)(uintptr_t)"func", 4);
   if (!revo_is_function(func_c)) {
     dlclose(lib);
@@ -321,14 +321,14 @@ static int load_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
   return REVO_OK;
 }
 
-static int free_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
+static int free_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
   if (argc != 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_table(argv[0]))
     return revo_c_err_type(vm, 0, "table", argv[0]);
-  RevoData h = 0;
-  if (get_name_cstr(vm, argv[0], "_handle", &h) && revo_is_foreign(h)) {
-    void *p = revo_foreign_ptr(h);
+  RevoValue h = 0;
+  if (get_name_cstr(vm, argv[0], "_handle", &h) && revo_is_opaque(h)) {
+    void *p = revo_opaque_ptr(h);
     if (p)
       dlclose(p);
     // dont double close
@@ -339,7 +339,7 @@ static int free_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
 }
 
 // lib:func(name, sig, ret) -> table with __call
-static int func_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
+static int func_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
   if (argc != 4)
     return revo_c_err_arity(vm, argc, 4);
   if (!revo_is_table(argv[0]))
@@ -353,10 +353,10 @@ static int func_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
   CFFI_CHAR_OF(vm, argv[3], 3, ret_c);
   (void)ret_c; // might be bullshit in the table but validated here
 
-  RevoData h = 0;
-  if (!get_name_cstr(vm, argv[0], "_handle", &h) || !revo_is_foreign(h))
+  RevoValue h = 0;
+  if (!get_name_cstr(vm, argv[0], "_handle", &h) || !revo_is_opaque(h))
     return revo_c_err_type(vm, 0, "lib table", argv[0]);
-  void *lib = revo_foreign_ptr(h);
+  void *lib = revo_opaque_ptr(h);
   if (!lib)
     return revo_c_err_other(vm, "null lib handle???");
 
@@ -370,18 +370,18 @@ static int func_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
   if (!sym)
     return revo_c_err_other(vm, "could not find sym???");
 
-  RevoData tbl = revo_table_create(vm);
+  RevoValue tbl = revo_table_create(vm);
   if (!revo_is_table(tbl))
     return revo_c_err_other(vm, "could not create func table???");
 
-  if (!set_name_cstr(vm, tbl, "_func", revo_foreign_new(sym)))
+  if (!set_name_cstr(vm, tbl, "_func", revo_opaque_new(sym)))
     return revo_c_err_other(vm, "could not store func ptr???");
   if (!set_name_cstr(vm, tbl, "_sig", argv[2]))
     return revo_c_err_other(vm, "could not store sig???");
   if (!set_name_cstr(vm, tbl, "_ret", argv[3]))
     return revo_c_err_other(vm, "could not store ret???");
 
-  RevoData call_c =
+  RevoValue call_c =
       revo_cfunc_new(vm, (void *)__call, (uint64_t)(uintptr_t)"__call", 6);
   if (!revo_is_function(call_c))
     return revo_c_err_other(vm, "could not create __call binding???");
@@ -398,39 +398,39 @@ static int func_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
 // iw(a, b, c)    # spread args (no table alloc!)
 // iw{args_table} # table args
 // iw()           # no args
-static int __call(void *vm, size_t argc, RevoData *argv, RevoData *out_res) {
+static int __call(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
   if (argc < 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_table(argv[0]))
     return revo_c_err_type(vm, 0, "table", argv[0]);
 
-  RevoData self = argv[0];
-  RevoData fdata = 0, sig = 0, ret = 0;
+  RevoValue self = argv[0];
+  RevoValue fdata = 0, sig = 0, ret = 0;
   CFFI_FIELD(vm, self, "_func", &fdata);
   CFFI_FIELD(vm, self, "_sig", &sig);
   CFFI_FIELD(vm, self, "_ret", &ret);
 
-  if (!revo_is_foreign(fdata))
-    return revo_c_err_other(vm, "bad callable! _func not foreign");
+  if (!revo_is_opaque(fdata))
+    return revo_c_err_other(vm, "bad callable! _func not opaque");
   if (!revo_is_table(sig))
     return revo_c_err_other(vm, "bad callable! _sig not table");
 
   char ret_c;
   CFFI_CHAR_OF(vm, ret, 0, ret_c);
 
-  void (*sym)(void) = revo_foreign_ptr(fdata);
+  void (*sym)(void) = revo_opaque_ptr(fdata);
   if (!sym)
     return revo_c_err_other(vm, "null func pointer :(");
 
   if (argc == 1) {
     return do_ffi_callv(vm, sym, NULL, 0, sig, ret_c, out_res);
   } else if (argc == 2 && revo_is_table(argv[1])) {
-    RevoData args_table = argv[1];
+    RevoValue args_table = argv[1];
     uint64_t nargs = revo_table_alen(vm, argv[1]);
     if (nargs > CFFI_MAX_ARGS)
       return revo_c_err_other(vm, "too many args.....");
 
-    RevoData args[CFFI_MAX_ARGS];
+    RevoValue args[CFFI_MAX_ARGS];
     for (uint64_t i = 0; i < nargs; i++)
       if (!revo_table_get_idx(vm, args_table, i, &args[i]))
         return revo_c_err_other(vm, "could not get argument");

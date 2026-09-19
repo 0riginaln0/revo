@@ -1,12 +1,12 @@
 const revo = @import("revo");
 
 const std = @import("std");
-const Data = @import("memory.zig").Data;
+const Value = @import("memory.zig").Value;
 const mem = @import("memory.zig");
 const VM = @import("VM.zig");
 
 pub const FieldLookup = struct {
-    value: Data,
+    value: Value,
     from_meta: bool,
 };
 
@@ -14,7 +14,7 @@ pub const FieldLookup = struct {
 /// should land on resume: the metamethod runs on the fiber and its eventual
 /// ret is rerouted there (see VM.callFunctionParts), so a dispatch
 /// instruction that parks mid-lookup resumes with its result register filled
-pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("opcode.zig").Register) VM.EvalError!?FieldLookup {
+pub fn resolveField(self: *VM, object: Value, key: Value, result_reg: ?@import("opcode.zig").Register) VM.RunError!?FieldLookup {
     switch (object.tag()) {
         .table => {
             const table_id = object.asTable().?;
@@ -25,13 +25,13 @@ pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("op
             return resolveTableMiss(self, object, t, key, result_reg);
         },
         .string => {
-            const type_mt_id = self.metatables[@intFromEnum(mem.Type.string)] orelse return null;
+            const type_mt_id = self.metatables[@intFromEnum(mem.ValueTag.string)] orelse return null;
             const mt = try self.tables.get(type_mt_id);
             if (mt.getRaw(key, self)) |value| {
                 return .{ .value = value, .from_meta = true };
             }
             // numeric character access: "str"[n]
-            if (key.asNum()) |n| {
+            if (key.asNumOpt()) |n| {
                 const str = self.stringValue(object.asString().?);
                 // get the nth-last value of the string
 
@@ -42,20 +42,20 @@ pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("op
                 // negative index, counting from the end. slice needs to be handled separately in execSlice
                 if (n < 0) {
                     if (str.len < idx) return null;
-                    return .{ .value = try self.ownDataStringNoDedup(&.{str[str.len - idx]}), .from_meta = false };
+                    return .{ .value = try self.ownValueStringNoDedup(&.{str[str.len - idx]}), .from_meta = false };
                 }
 
                 // an oob lookup should return null, rather than panicking
                 // if it needs to panic, it'll be handled from above
                 if (idx < str.len) {
-                    return .{ .value = try self.ownDataStringNoDedup(str[idx .. idx + 1]), .from_meta = false };
+                    return .{ .value = try self.ownValueStringNoDedup(str[idx .. idx + 1]), .from_meta = false };
                 }
                 return error.TypeError;
             }
             return null;
         },
         .number => {
-            const type_mt_id = self.metatables[@intFromEnum(mem.Type.number)] orelse return null;
+            const type_mt_id = self.metatables[@intFromEnum(mem.ValueTag.number)] orelse return null;
             const mt = try self.tables.get(type_mt_id);
             if (mt.getRaw(key, self)) |value| {
                 return .{ .value = value, .from_meta = true };
@@ -63,7 +63,7 @@ pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("op
             return null;
         },
         .atom => {
-            const type_mt_id = self.metatables[@intFromEnum(mem.Type.atom)] orelse return null;
+            const type_mt_id = self.metatables[@intFromEnum(mem.ValueTag.atom)] orelse return null;
             const mt = try self.tables.get(type_mt_id);
             if (mt.getRaw(key, self)) |value| {
                 return .{ .value = value, .from_meta = true };
@@ -79,25 +79,25 @@ pub fn resolveField(self: *VM, object: Data, key: Data, result_reg: ?@import("op
 
 /// for when the caller already did the direct `getRaw` and missed
 ///   and you need to skip straight to the metatables instead of hashing the same key twice
-pub fn resolveTableMiss(self: *VM, object: Data, t: *revo.table.Table, key: Data, result_reg: ?@import("opcode.zig").Register) VM.EvalError!?FieldLookup {
+pub fn resolveTableMiss(self: *VM, object: Value, t: *revo.table.Table, key: Value, result_reg: ?@import("opcode.zig").Register) VM.RunError!?FieldLookup {
     if (t.metatable) |mt_id| {
         if (try resolveViaMetatable(self, object, key, mt_id, result_reg)) |resolved| {
             return resolved;
         }
     }
-    const type_mt_id = self.metatables[@intFromEnum(mem.Type.table)] orelse return null;
+    const type_mt_id = self.metatables[@intFromEnum(mem.ValueTag.table)] orelse return null;
     return resolveViaMetatable(self, object, key, type_mt_id, result_reg);
 }
 
-fn resolveViaMetatable(self: *VM, object: Data, key: Data, mt_id: mem.TableID, result_reg: ?@import("opcode.zig").Register) VM.EvalError!?FieldLookup {
+fn resolveViaMetatable(self: *VM, object: Value, key: Value, mt_id: mem.TableID, result_reg: ?@import("opcode.zig").Register) VM.RunError!?FieldLookup {
     const mt = try self.tables.get(mt_id);
     if (mt.getRaw(key, self)) |value| {
         return .{ .value = value, .from_meta = true };
     }
-    if (mt.getRawAtom(revo.core_atoms.atomId(.__index), self)) |indexer| {
+    if (mt.getRawAtom(revo.CoreAtoms.atomId(.__index), self)) |indexer| {
         const result = try resolveIndexDepth(self, object, key, indexer, MAX_TAG_LOOP, result_reg);
         if (result) |r| {
-            if (r.value.bits == revo.Data.new.core(.undef).bits and key.asNum() == null)
+            if (r.value.bits == revo.Value.new.core(.undef).bits and key.asNumOpt() == null)
                 return null;
         }
         return result;
@@ -107,11 +107,11 @@ fn resolveViaMetatable(self: *VM, object: Data, key: Data, mt_id: mem.TableID, r
 
 const MAX_TAG_LOOP = 200;
 
-fn resolveIndexDepth(self: *VM, object: Data, key: Data, indexer: Data, depth: usize, result_reg: ?@import("opcode.zig").Register) VM.EvalError!?FieldLookup {
+fn resolveIndexDepth(self: *VM, object: Value, key: Value, indexer: Value, depth: usize, result_reg: ?@import("opcode.zig").Register) VM.RunError!?FieldLookup {
     switch (indexer.tag()) {
         .function => {
             const fn_id = indexer.asFunction().?;
-            const func = try self.functions.get(fn_id);
+            const func = try self.callable.get(fn_id);
             const value = switch (func.*) {
                 .closure => |closure| switch (closure.arity) {
                     1 => try self.callFunctionParts(indexer, null, &.{object}, result_reg),
@@ -134,8 +134,8 @@ fn resolveIndexDepth(self: *VM, object: Data, key: Data, indexer: Data, depth: u
                 if (mt.getRaw(key, self)) |value| {
                     return .{ .value = value, .from_meta = true };
                 }
-                if (mt.getRawAtom(revo.core_atoms.atomId(.__index), self)) |next_indexer| {
-                    return resolveIndexDepth(self, Data.new.table(table_id), key, next_indexer, depth - 1, result_reg);
+                if (mt.getRawAtom(revo.CoreAtoms.atomId(.__index), self)) |next_indexer| {
+                    return resolveIndexDepth(self, Value.new.table(table_id), key, next_indexer, depth - 1, result_reg);
                 }
             }
             return null;
@@ -144,10 +144,10 @@ fn resolveIndexDepth(self: *VM, object: Data, key: Data, indexer: Data, depth: u
     }
 }
 
-pub fn setMetatable(self: *VM, val: Data, mt: ?mem.TableID) !void {
+pub fn setMetatable(self: *VM, val: Value, mt: ?mem.TableID) !void {
     switch (val.tag()) {
         .table => try self.setTableMetatable(val.asTable().?, mt),
-        .number => self.metatables[@intFromEnum(mem.Type.number)] = mt,
+        .number => self.metatables[@intFromEnum(mem.ValueTag.number)] = mt,
         else => self.metatables[@intFromEnum(val.tag())] = mt,
     }
 }
@@ -157,6 +157,6 @@ pub fn setTableMetatable(self: *VM, id: mem.TableID, mt: ?mem.TableID) !void {
         const tbl_ref = try self.tables.get(id);
         tbl_ref.metatable = mt;
     } else {
-        self.metatables[@intFromEnum(mem.Type.table)] = mt;
+        self.metatables[@intFromEnum(mem.ValueTag.table)] = mt;
     }
 }

@@ -96,7 +96,7 @@ async def test_clean_diagnostics(client: LanguageClient):
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_each_string_no_diag(client: LanguageClient):
-    """`each("hello", fn(c) print(c))` is a valid stdlib call and
+    """`each("hello", fn(c) print(c))` is a valid baselib call and
     wont wont raise a parse error"""
     uri = "file:///test/each.rv"
     text = 'each("hello", fn(c) print(c))\n'

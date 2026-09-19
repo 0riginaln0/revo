@@ -1,0 +1,11 @@
+#!
+dataframe functions
+!#
+
+#type Dataframe = table<string, table<any>>
+
+#*
+selects only the given columns for a new dataframe, in the input order
+*#
+pub declare dataframe.select = fn(input: table<string, table<any>>, columns: table<string>) -> table<string, table<any>>
+

@@ -1,10 +1,10 @@
 const std = @import("std");
 
 const revo = @import("revo");
-const style = revo.pretty.style;
+const style = revo.term.style;
 
 const memory = @import("memory.zig");
-const Data = memory.Data;
+const Value = memory.Value;
 
 const color_reset = "\x1b[0m";
 const color_accent = "\x1b[33m"; // numbers, atoms, array indices, table keys
@@ -53,7 +53,7 @@ fn isVisiting(addr: usize) bool {
 // . bounds-checked independently of write_depth rather than assuming the two counters stay in lockstep
 // ; they don't in every path
 //   (writeTable can be entered directly
-//   , without first passing through writeData's own depth check)
+//   , without first passing through writeValue's own depth check)
 fn pushVisiting(addr: usize) bool {
     if (visiting_len >= visiting.len) return false;
     visiting[visiting_len] = addr;
@@ -67,7 +67,7 @@ fn popVisiting() void {
 
 fn styledPrint(
     writer: *std.Io.Writer,
-    mode: Data.RenderMode,
+    mode: Value.PrintMode,
     color: []const u8,
     comptime fmt: []const u8,
     args: anytype,
@@ -104,7 +104,7 @@ fn writeEscapedString(writer: *std.Io.Writer, s: []const u8) anyerror!void {
     try writer.writeByte('"');
 }
 
-pub fn writeData(self: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.RenderMode) anyerror!void {
+pub fn writeValue(self: Value, writer: *std.Io.Writer, vm: *revo.VM, mode: Value.PrintMode) anyerror!void {
     if (write_depth >= max_write_depth) {
         try writer.writeAll("<max-depth-exceeded>");
         return;
@@ -113,19 +113,19 @@ pub fn writeData(self: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.Re
     defer write_depth -= 1;
 
     const metamethod = switch (mode) {
-        .display => try vm.getMetamethodByAtom(self, try vm.internAtom("__display")) orelse
-            try vm.getMetamethodByAtom(self, revo.core_atoms.__tostring.atomId()),
-        .debug, .pretty => try vm.getMetamethodByAtom(self, revo.core_atoms.__debug.atomId()),
+        .plain => try vm.getMetamethodByAtom(self, try vm.internAtom("__display")) orelse
+            try vm.getMetamethodByAtom(self, revo.CoreAtoms.__tostring.atomId()),
+        .debug, .pretty => try vm.getMetamethodByAtom(self, revo.CoreAtoms.__debug.atomId()),
     };
     if (metamethod) |mm| {
         if (mm.tag() != .function) return error.TypeError;
-        return writeData(try vm.callFunctionParts(mm, null, &.{self}, null), writer, vm, mode);
+        return writeValue(try vm.callFunctionParts(mm, null, &.{self}, null), writer, vm, mode);
     }
 
     switch (self.tag()) {
-        .number => try styledPrint(writer, mode, color_accent, "{}", .{self.asNum().?}),
+        .number => try styledPrint(writer, mode, color_accent, "{}", .{self.asNumOpt().?}),
         .string => switch (mode) {
-            .display => try writer.writeAll(vm.stringValue(self.asString().?)),
+            .plain => try writer.writeAll(vm.stringValue(self.asString().?)),
             .debug => try writeEscapedString(writer, vm.stringValue(self.asString().?)),
             .pretty => {
                 try style(writer, color_string);
@@ -138,7 +138,7 @@ pub fn writeData(self: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.Re
         },
         .function => {
             const id = self.asFunction().?;
-            const f = try vm.functions.get(id);
+            const f = try vm.callable.get(id);
             switch (f.*) {
                 .host => try writer.print("#fn@{}()/{}", .{ id, f.arity() }),
                 .c_function => |cf| try writer.print("${s}@{}()/{}", .{ cf.name, id, f.arity() }),
@@ -152,11 +152,11 @@ pub fn writeData(self: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.Re
             };
             tbl.write(writer, vm, mode) catch try writer.writeAll("<table-unprintable>");
         },
-        .foreign => try writer.print("<foreign {*}>", .{self.asForeign().?}),
+        .@"opaque" => try writer.print("<opaque {*}>", .{self.asOpaque().?}),
     }
 }
 
-fn writeTableKey(key: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.RenderMode) anyerror!void {
+fn writeTableKey(key: Value, writer: *std.Io.Writer, vm: *revo.VM, mode: Value.PrintMode) anyerror!void {
     const colored = mode == .pretty;
     switch (key.tag()) {
         .atom => {
@@ -169,11 +169,11 @@ fn writeTableKey(key: Data, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.Ren
             try writeEscapedString(writer, vm.stringValue(key.asString().?));
             if (colored) try style(writer, color_reset);
         },
-        else => try writeData(key, writer, vm, mode),
+        else => try writeValue(key, writer, vm, mode),
     }
 }
 
-pub fn writeTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM, mode: Data.RenderMode) anyerror!void {
+pub fn writeTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM, mode: Value.PrintMode) anyerror!void {
     if (mode == .pretty) {
         try writePrettyTable(tbl, writer, vm, 0);
         return;
@@ -208,14 +208,14 @@ pub fn writeTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM, 
             if (!first) try writer.writeAll(", ");
             first = false;
 
-            try writeData(entry.value, writer, vm, mode);
+            try writeValue(entry.value, writer, vm, mode);
         } else if (multi_line) {
             if (!first) try writer.writeAll(",");
             try writer.writeAll("\n  ");
             try writeTableKey(entry.key, writer, vm, mode);
             try writer.writeAll(" = ");
 
-            try writeData(entry.value, writer, vm, mode);
+            try writeValue(entry.value, writer, vm, mode);
             first = false;
         } else {
             if (!first) try writer.writeAll(", ");
@@ -223,7 +223,7 @@ pub fn writeTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM, 
             try writeTableKey(entry.key, writer, vm, mode);
             try writer.writeAll(" = ");
 
-            try writeData(entry.value, writer, vm, mode);
+            try writeValue(entry.value, writer, vm, mode);
         }
     }
 
@@ -278,7 +278,7 @@ fn writePrettyTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM
         for (tbl.array.items) |val| {
             if (!first) try writer.writeAll(", ");
             first = false;
-            try writePrettyDataValue(val, writer, vm, indent_level + 1);
+            try writePrettyValue(val, writer, vm, indent_level + 1);
         }
         try writer.writeAll(",\n");
     }
@@ -292,7 +292,7 @@ fn writePrettyTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM
         }
         try writeTableKey(entry.key, writer, vm, .pretty);
         try writer.writeAll(" = ");
-        try writePrettyDataValue(entry.value, writer, vm, indent_level + 1);
+        try writePrettyValue(entry.value, writer, vm, indent_level + 1);
         if (hi + 1 < tbl.hash.count) {
             try writer.writeAll(",");
         }
@@ -309,7 +309,7 @@ fn writePrettyTable(tbl: *revo.table.Table, writer: *std.Io.Writer, vm: *revo.VM
     try style(writer, color_reset);
 }
 
-fn writePrettyDataValue(val: Data, writer: *std.Io.Writer, vm: *revo.VM, indent_level: usize) anyerror!void {
+fn writePrettyValue(val: Value, writer: *std.Io.Writer, vm: *revo.VM, indent_level: usize) anyerror!void {
     if (val.tag() == .table) {
         const tbl = vm.tables.get(val.asTable().?) catch {
             try writer.writeAll("<dead-table>");
@@ -317,6 +317,6 @@ fn writePrettyDataValue(val: Data, writer: *std.Io.Writer, vm: *revo.VM, indent_
         };
         try writePrettyTable(tbl, writer, vm, indent_level);
     } else {
-        try writeData(val, writer, vm, .pretty);
+        try writeValue(val, writer, vm, .pretty);
     }
 }

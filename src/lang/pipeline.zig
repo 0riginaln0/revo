@@ -1,6 +1,6 @@
-//! parse -> expand -> check -> lower orchestration
-//! stage companions live in pipeline/: module_scope (@exports wiring)
-//! and import_preload (compile-time import extraction)
+//! parse -> expand -> check -> compile orchestration
+//! stage companions live in pipeline/: scope_wiring (@exports wiring)
+//! and import_scan (compile-time import extraction)
 
 pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
     var dropped: ?diagnostic.Report = null;
@@ -22,17 +22,17 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
 
-    // set module_dir from source name so preloadImports can find local modules
-    const prev_module_dir = vm.module_dir;
-    defer vm.module_dir = prev_module_dir;
+    // set import_dir from source name so preloadImports can find local modules
+    const prev_import_dir = vm.import_dir;
+    defer vm.import_dir = prev_import_dir;
     if (source.name) |name| {
         if (std.Io.Dir.path.dirname(name)) |dir| {
-            vm.module_dir = dir;
+            vm.import_dir = dir;
         }
     }
 
     var parsed = switch (try parse(arena.allocator(), source, .{
-        .include_stdlib_macros = opts.include_stdlib_macros,
+        .include_baselib_macros = opts.include_baselib_macros,
     })) {
         .ok => |ok| ok,
         .err => |failure| {
@@ -44,15 +44,15 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     };
     // module scope? wrap ast to build exports table from pub decls
     if (opts.module_scope)
-        parsed.root = try module_scope.wrapModule(arena.allocator(), parsed.root);
+        parsed.root = try scope_wiring.wrapModule(arena.allocator(), parsed.root);
 
     // closures with pub decls should return their @exports table
-    parsed.root = try module_scope.wrapPubFunctions(arena.allocator(), parsed.root);
+    parsed.root = try scope_wiring.wrapPubFunctions(arena.allocator(), parsed.root);
 
     if (!opts.skip_preload and comptime !revo.is_freestanding)
-        import_preload.preloadImports(vm, parsed.root, arena.allocator()) catch |err| switch (err) {
+        import_scan.preloadImports(vm, parsed.root, arena.allocator()) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => revo.pretty.fatal("preload: {s}", .{@errorName(err)}, vm),
+            else => revo.term.fatal("preload: {s}", .{@errorName(err)}, vm),
         };
 
     const expand_result = try expandWithVmSource(
@@ -82,14 +82,14 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     }
 
     var known_globals = try std.ArrayList([]const u8)
-        .initCapacity(vm.runtime.alloc, vm.const_globals.count());
+        .initCapacity(vm.runtime.alloc, vm.frozen_globals.count());
     defer known_globals.deinit(vm.runtime.alloc);
     {
-        var cit = vm.const_globals.keyIterator();
+        var cit = vm.frozen_globals.keyIterator();
         while (cit.next()) |atom_id| {
             try known_globals.append(vm.runtime.alloc, vm.stringValue(atom_id.*));
         }
-        var git = vm.globals.iterator();
+        var git = vm.user_globals.iterator();
         while (git.next()) |entry| {
             try known_globals.append(vm.runtime.alloc, vm.stringValue(entry.key_ptr.*));
         }
@@ -100,7 +100,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         fn resolve(ptr: *anyopaque, path: []const u8, a: std.mem.Allocator) ?[]const u8 {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             if (comptime !revo.is_freestanding) {
-                const resolved = (import_preload.resolveModuleFile(self.vm, path) catch return null) orelse return null;
+                const resolved = (import_scan.resolveModuleFile(self.vm, path) catch return null) orelse return null;
                 defer self.vm.runtime.alloc.free(resolved);
                 // shared libs carry their sigs as data, instead of source source
                 // a sibling `lib.d.rv` manifest is the type interface and required for
@@ -140,14 +140,14 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         return .{ .err = .{ .semantic = .{ .kind = failure.kind, .report = copied } } };
     }
 
-    const lower_result = try lower(vm, expanded, .{
+    const compile_result = try compile(vm, expanded, .{
         .install_debug_info = opts.install_debug_info,
         .source = source,
         .test_mode = opts.test_mode,
     }, &type_annotations);
-    return switch (lower_result) {
-        .ok => |artifact| .{ .ok = artifact },
-        .err => |failure| .{ .err = .{ .lower = failure } },
+    return switch (compile_result) {
+        .ok => |bytecode| .{ .ok = bytecode },
+        .err => |failure| .{ .err = .{ .compile = failure } },
     };
 }
 
@@ -157,24 +157,24 @@ pub const Source = struct {
 };
 
 pub const ParseOptions = struct {
-    include_stdlib_macros: bool = false,
+    include_baselib_macros: bool = false,
 };
 
-pub const LowerOptions = struct {
+pub const CompileOptions = struct {
     install_debug_info: bool = false,
     source: ?Source = null,
     test_mode: bool = false,
 };
-pub const RunMode = enum {
+pub const ProjectMode = enum {
     script,
     project,
 };
 
 pub const BuildOptions = struct {
-    include_stdlib_macros: bool = true,
+    include_baselib_macros: bool = true,
     install_debug_info: bool = true,
     test_mode: bool = false,
-    mode: RunMode = .script,
+    mode: ProjectMode = .script,
     module_scope: bool = false, // build exports table from pub decls
     skip_preload: bool = false, // for repl
 };
@@ -194,12 +194,12 @@ pub const ExpandFailure = struct {
 pub const Error = union(enum) {
     parse: Parser.ParseFailure,
     expand: ExpandFailure,
-    lower: compiler.LowerFailure,
+    compile: compiler.CompileFailure,
     semantic: semantic.Failure,
 };
 
 pub const ParseResult = Result(Parsed, Parser.ParseFailure);
-pub const ExpandError = expander.ExpandError || proc.ExpandError;
+pub const ExpandError = macro_pattern.ExpandError || macro_proc.ExpandError;
 pub const ExpandResult = Result(Expanded, ExpandError);
 pub const ExpandWithVmResult = union(enum) {
     ok: Expanded,
@@ -301,11 +301,11 @@ fn collectUnexpandedMacros(alloc: std.mem.Allocator, root: *const Node) ![]Unexp
     return out.toOwnedSlice(alloc);
 }
 
-pub const LowerResult = Result(Artifact, compiler.LowerFailure);
-pub const BuildResult = Result(Artifact, Error);
+pub const CompileResult = Result(Bytecode, compiler.CompileFailure);
+pub const BuildResult = Result(Bytecode, Error);
 
 pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !ParseResult {
-    if (!opts.include_stdlib_macros) {
+    if (!opts.include_baselib_macros) {
         return switch (try Parser.parseSourceReport(allocator, source.text)) {
             .ok => |expr| .{ .ok = .{ .root = expr } },
             .err => |failure| blk: {
@@ -317,9 +317,9 @@ pub fn parse(allocator: std.mem.Allocator, source: Source, opts: ParseOptions) !
     }
 
     // manifest macros replace the old fixed prelude: same merge shape,
-    // authority lives in iface/*.d.rv instead of a lang-side string.
+    // authority lives in sigs/*.d.rv instead of a lang-side string.
     // the list is permanent like full_specs, never freed.
-    const macro_srcs = try revo.std_lib.api.macroSources(allocator);
+    const macro_srcs = try revo.baselib.specs.macroSources(allocator);
     var preludes = try std.ArrayList(*Node).initCapacity(allocator, macro_srcs.len);
     defer preludes.deinit(allocator);
     for (macro_srcs) |src| {
@@ -347,13 +347,13 @@ pub fn expandWithVmSource(
     source_name: []const u8,
     source: []const u8,
 ) !ExpandWithVmResult {
-    const template_expanded = try expander.expandExpr(allocator, parsed.root);
-    const proc_result = try proc.expandExprWithSource(vm, allocator, template_expanded, source_name, source);
+    const template_expanded = try macro_pattern.expandExpr(allocator, parsed.root);
+    const proc_result = try macro_proc.expandExprWithSource(vm, allocator, template_expanded, source_name, source);
 
     if (proc_result.error_report) |report|
         return .{ .proc_err = report };
 
-    const final = try expander.expandExpr(allocator, proc_result.root.?);
+    const final = try macro_pattern.expandExpr(allocator, proc_result.root.?);
     const missed = try collectUnexpandedMacros(allocator, final);
 
     if (missed.len > 0) {
@@ -388,25 +388,25 @@ fn macroReport(
     };
 }
 
-pub fn lower(
+pub fn compile(
     vm: *VM,
     expanded: Expanded,
-    opts: LowerOptions,
+    opts: CompileOptions,
     type_annotations: ?*const std.AutoHashMap(*const Node, compiler.types.TypeInfo),
-) !LowerResult {
-    const lowered = try compiler.lowerExprArtifactReport(
+) !CompileResult {
+    const compiled = try compiler.compileExprReport(
         vm,
         expanded.root,
         opts.test_mode,
         type_annotations,
     );
-    return switch (lowered) {
-        .ok => |artifact| blk: {
+    return switch (compiled) {
+        .ok => |bytecode| blk: {
             if (opts.install_debug_info) {
                 const source: Source = opts.source orelse Source{ .text = "", .name = "<source>" };
-                try vm.setProgramDebugInfo(artifact.spans, source.text, source.name orelse "<source>");
+                try vm.setProgramDebugInfo(bytecode.spans, source.text, source.name orelse "<source>");
             }
-            break :blk .{ .ok = artifact };
+            break :blk .{ .ok = bytecode };
         },
         .err => |failure| blk: {
             var diag = failure;
@@ -429,7 +429,7 @@ pub fn renderError(allocator: std.mem.Allocator, writer: *std.Io.Writer, source:
         .expand => |failure| blk: {
             break :blk diagnostic.renderReport(allocator, writer, failure.report);
         },
-        .lower => |failure| blk: {
+        .compile => |failure| blk: {
             var report = failure.report;
             report.source_name = report.source_name orelse source.name;
             report.source = source.text;
@@ -459,7 +459,7 @@ pub fn deinitError(alloc: std.mem.Allocator, err: Error) void {
     switch (mutable) {
         .parse => |*failure| failure.report.deinit(alloc),
         .expand => |*failure| failure.report.deinit(alloc),
-        .lower => |*failure| failure.report.deinit(alloc),
+        .compile => |*failure| failure.report.deinit(alloc),
         .semantic => |*failure| failure.report.deinit(alloc),
     }
 }
@@ -504,13 +504,13 @@ const ast = @import("ast.zig");
 const Node = ast.Node;
 const compiler = @import("compiler/root.zig");
 const diagnostic = @import("diagnostic.zig");
-const expander = @import("expander.zig");
-const import_preload = @import("pipeline/import_preload.zig");
-const module_scope = @import("pipeline/module_scope.zig");
+const import_scan = @import("pipeline/import_scan.zig");
+const macro_pattern = @import("macro_pattern.zig");
+const macro_proc = @import("macro_proc.zig");
 const Parser = @import("Parser.zig");
-const proc = @import("proc.zig");
+const scope_wiring = @import("pipeline/scope_wiring.zig");
 const semantic = @import("semantic.zig");
-pub const Artifact = compiler.Artifact;
+pub const Bytecode = compiler.Bytecode;
 pub const ParseFailure = Parser.ParseFailure;
-pub const LowerErrorKind = compiler.LowerErrorKind;
-pub const LowerFailure = compiler.LowerFailure;
+pub const CompileErrorKind = compiler.CompileErrorKind;
+pub const CompileFailure = compiler.CompileFailure;

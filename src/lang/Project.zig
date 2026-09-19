@@ -1,11 +1,11 @@
 const std = @import("std");
 const Workspace = @import("Workspace.zig");
-const RunMode = @import("pipeline.zig").RunMode;
+const ProjectMode = @import("pipeline.zig").ProjectMode;
 const FileId = @import("Workspace.zig").FileId;
 
 pub const Project = @This();
 
-mode: RunMode,
+mode: ProjectMode,
 root: []const u8,
 
 /// open a file in ws using this project's mode and root

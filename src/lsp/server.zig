@@ -14,7 +14,7 @@ pub fn main(init: std.process.Init) !void {
     try runLsp(init.gpa, init.io, .script, "");
 }
 
-pub fn runLsp(gpa: std.mem.Allocator, io: std.Io, mode: revo.lang.RunMode, project_root: []const u8) !void {
+pub fn runLsp(gpa: std.mem.Allocator, io: std.Io, mode: revo.lang.ProjectMode, project_root: []const u8) !void {
     var read_buf: [1024]u8 = undefined;
     var stdio = lsp.Transport.Stdio.init(&read_buf, .stdin(), .stdout());
 
@@ -47,7 +47,7 @@ const Handler = struct {
         alloc: std.mem.Allocator,
         transport: *lsp.Transport,
         io: std.Io,
-        mode: revo.lang.RunMode,
+        mode: revo.lang.ProjectMode,
         project_root: []const u8,
     ) !Handler {
         var vm = try revo.VM.init(.{ .alloc = alloc, .io = io, .diag_alloc = alloc });
@@ -284,14 +284,14 @@ const Handler = struct {
             try label.appendSlice(arena, p.name);
             if (p.optional) try label.append(arena, '?');
             if (p.type_name) |ti| {
-                const pt = try lang.type_serde.formatTypeOpts(arena, ti, .{});
+                const pt = try lang.type_syntax.formatTypeOpts(arena, ti, .{});
                 try label.appendSlice(arena, ": ");
                 try label.appendSlice(arena, pt);
             }
         }
         try label.append(arena, ')');
         if (sig.return_type) |rt| {
-            const rt_str = try lang.type_serde.formatTypeOpts(arena, rt, .{});
+            const rt_str = try lang.type_syntax.formatTypeOpts(arena, rt, .{});
             try label.appendSlice(arena, ": ");
             try label.appendSlice(arena, rt_str);
         }
@@ -307,7 +307,7 @@ const Handler = struct {
             pos += @as(u32, @intCast(p.name.len));
             if (p.optional) pos += 1;
             if (p.type_name) |ti| {
-                const pt = try lang.type_serde.formatTypeOpts(arena, ti, .{});
+                const pt = try lang.type_syntax.formatTypeOpts(arena, ti, .{});
                 pos += 2 + @as(u32, @intCast(pt.len));
             }
             params_list.appendAssumeCapacity(.{
@@ -456,7 +456,7 @@ const Handler = struct {
             const report = switch (err) {
                 .parse => |f| f.report,
                 .expand => |f| f.report,
-                .lower => |f| f.report,
+                .compile => |f| f.report,
                 .semantic => |f| f.report,
             };
             try all.appendSlice(arena, try reportToDiags(arena, report, uri, h.enc));

@@ -13,7 +13,7 @@ tuples and structs are gone now, most breaking change yet
 
 ### Added
 
-- stdlib-style native extension api, `revo.ext`
+- baselib-style native extension api, `revo.ext`
   - see `examples/foreign/raylib`
 - structural table types: annotate tables by shape with `{ name: string, age: num }`
   - structs deprecated in favour of this, should be removed by 0.1.3
@@ -212,7 +212,7 @@ tuples and structs are gone now, most breaking change yet
   - `type_serde` is text-only now: eval moved next to inference in
     `compiler/types.zig`, TypeExpr printing/cloning lives in `ast.zig`
   - `parseSource`/`parseSourceReport` moved to `Parser` (pure frontend entry,
-    no prelude); `pipeline.parse` keeps the stdlib merge
+    no prelude); `pipeline.parse` keeps the baselib merge
   - `compiler/type_check.zig` is gone, its methods live on `Compiler`
   - semantic failures carry their own `semantic.Failure` instead of borrowing
     the lowering kind; test helpers split by stage (`expectSemanticError`,
@@ -319,7 +319,7 @@ big release - many misc bugs are fixed but not noted
 
 <img width="1018" height="925" alt="image" src="https://github.com/user-attachments/assets/69b74a23-c98e-4f4d-9b10-25c05631921c" />
 
-- stdlib:
+- baselib:
   - `exit(number)`
   - `revo.dofile(path)` -- do file & return; resole path like `import`
   - `csv.decode`, `csv.encode`
@@ -402,8 +402,8 @@ big release - many misc bugs are fixed but not noted
 - `table.remove(t, key)` -- now works with both indices (array part) and keys (hash part)
 - **Breaking:** doc-comments are `#* ... *#` now, comments attach to any declaration and are stored in types, hover follows aliases, repl `:h` renders exactly what hover renders
 - **Breaking:** cli is now subcommand-based: `compile`, `repl`, `dis`, `bench`, `docs`, `lsp`. options must come before the script name, everything after goes to runtime argv. the old flags like `-b` and `--dis` are gone in favor of their subcommands
-- **Breaking:** c api values use nanbox: `RevoData` is a single u64 now, boxed payloads are intern ids instead of pointers
-- **Breaking:** stdlib `read()` renamed to `input()`, and only reads stdin lines. use `fs.open()?:read()` to read files
+- **Breaking:** c api values use nanbox: `RevoValue` is a single u64 now, boxed payloads are intern ids instead of pointers
+- **Breaking:** baselib `read()` renamed to `input()`, and only reads stdin lines. use `fs.open()?:read()` to read files
 - **Breaking:** `fmt` and string interpolation now only support `%v` (value, plain), `%?` (debug, quoted strings, multilined tables), `%p` (pretty, debug with colors)
 - **Breaking:** `int`/`float`/`number` now `num` across everywhere. opcodes are gone too
 - `Native` renamed to `Host` throughout the codebase
@@ -416,7 +416,7 @@ big release - many misc bugs are fixed but not noted
 - compiler: table literal entries declaring bindings reserved parent-frame registers mid-expression, clobbering the table under construction and desyncing enclosing call windows ("want table, got function"). declaring entries now compile in an isolated child frame, and keyless binding entries land in the array part instead of under the binding's name
 - `orelse` falls through on `:undef`, so `t.missing orelse 0` works for absent table keys (GH-40)
 - diagnostics expand tabs to tab stops before rendering carets, which no longer drift left on tab-indented lines (GH-36)
-- stdlib `len()` signature corrected from `number|:nil` to `number`
+- baselib `len()` signature corrected from `number|:nil` to `number`
 - lsp signature help deep-copies parsed types so shared comptime sentinels can't dangle
 - vm: table printing now consistent for `%v` `%?` `%p`; atom keys without `:`, ` = ` separator, multiline for debug/pretty when 2+ hash entries, pretty grouped array line, colored braces for empty
 - vm: string escapes `\b` `\f` `\v` `\0` `\xXX` now rendered for non-printable bytes
@@ -442,9 +442,9 @@ big release - many misc bugs are fixed but not noted
 - new arithmetic operations: `//`, `^`, `xor`, and the rest of the binary operations
 - lsp: hover, semantic tokens, completion for imports, symbol rename
 - feature flags in zig build: `mimalloc`, `regex`
-- stdlib module `re` for regex
-- stdlib module `rng`
-- stdlib module `compress`
+- baselib module `re` for regex
+- baselib module `rng`
+- baselib module `compress`
 
 ### Changed
 

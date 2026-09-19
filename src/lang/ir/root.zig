@@ -131,9 +131,9 @@ pub fn compactIr(self: *Compiler, n: usize, live: []const bool) !void {
     for (self.ir_builder.instructions.items) |inst| {
         if (isBranch(inst.opcode)) inst.op_arg = new_index[inst.op_arg];
     }
-    for (self.pending_prototypes.items) |proto_id| {
-        const proto = &self.vm.functions.prototypes.items[proto_id];
-        proto.addr = @intCast(new_index[proto.addr]);
+    for (self.pending_templates.items) |template_id| {
+        const template = &self.vm.callable.templates.items[template_id];
+        template.addr = @intCast(new_index[template.addr]);
     }
 }
 
@@ -148,7 +148,7 @@ pub fn lowerInst(alloc: std.mem.Allocator, out: *std.ArrayList(Instruction), ins
         .add, .sub, .mul, .div, .mod, .concat, .pow, .band, .bor, .bxor, .shl, .shr, .int_div, .eq, .neq, .lt, .gt, .lte, .gte, .eq_int, .neq_int, .lt_int, .gt_int, .lte_int, .gte_int, .@"and", .@"or" => bc = .{ .op = op, .a = r, .b = r, .c = r + 1 },
         .add_imm, .sub_imm, .mul_imm, .band_imm, .lt_int_imm => bc = .{ .op = op, .a = r, .b = r, .bx = bxi },
         .negate, .not => bc = .{ .op = op, .a = r, .b = r },
-        .load_global, .load_stdlib_global, .load_upval, .closure => bc = .{ .op = op, .a = r, .bx = bxi },
+        .load_user_global, .load_builtin_global, .load_upval, .make_closure => bc = .{ .op = op, .a = r, .bx = bxi },
         .load_local => bc = .{ .op = op, .a = r, .b = @intCast(bx) },
         .table_new => bc = .{ .op = op, .a = r },
         .load_nil => bc = .{ .op = op, .a = r },
@@ -157,7 +157,7 @@ pub fn lowerInst(alloc: std.mem.Allocator, out: *std.ArrayList(Instruction), ins
         .halt, .ret => bc = .{ .op = op, .a = if (r == 0) 0 else r },
         .jump => bc = .{ .op = op, .bx = bxi },
         .jump_if_false, .jump_if_true, .jump_err => bc = .{ .op = op, .a = r, .bx = bxi },
-        .store_global, .store_global_const, .store_upval => bc = .{ .op = op, .a = r, .bx = bxi },
+        .store_user_global, .store_user_global_const, .store_upval => bc = .{ .op = op, .a = r, .bx = bxi },
         .store_local, .bind_local => bc = .{ .op = op, .a = @intCast(bx), .b = r },
         .table_set => bc = .{ .op = op, .a = r, .b = r + 1, .c = r + 2 },
         .table_get => bc = .{ .op = op, .a = r, .b = r, .c = r + 1 },

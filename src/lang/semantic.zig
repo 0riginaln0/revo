@@ -3,10 +3,10 @@ const std = @import("std");
 
 const ast = @import("./ast.zig");
 const diagnostic = @import("diagnostic.zig");
-const module_iface = @import("module_iface.zig");
+const import_types = @import("import_types.zig");
 const Parser = @import("Parser.zig");
 const revo = @import("revo");
-const type_serde = @import("type_serde.zig");
+const type_syntax = @import("type_syntax.zig");
 const types_mod = @import("compiler/types.zig");
 
 pub const Kind = enum {
@@ -71,7 +71,7 @@ pub fn analyze(
 /// , or null when the pattern is not one
 fn patternLitType(pattern: *const ast.Node) ?types_mod.TypeInfo {
     return switch (pattern.expr) {
-        .hash => |name| .{ .tag = .{ .atom = name } },
+        .atom => |name| .{ .tag = .{ .atom = name } },
         .nil => .{ .tag = .{ .atom = ":nil" } },
         .number => .{ .tag = .number },
         .string, .multiline_string => .{ .tag = .string },
@@ -85,7 +85,7 @@ fn patternLitType(pattern: *const ast.Node) ?types_mod.TypeInfo {
 fn patternSubsumes(prior: *const ast.Node, cur: *const ast.Node) bool {
     if (prior.expr == .ident) return true;
     switch (prior.expr) {
-        .hash => |name| return cur.expr == .hash and std.mem.eql(u8, ast.atomName(cur.expr.hash), ast.atomName(name)),
+        .atom => |name| return cur.expr == .atom and std.mem.eql(u8, ast.atomName(cur.expr.atom), ast.atomName(name)),
         .nil => return cur.expr == .nil,
         .number => |n| return cur.expr == .number and cur.expr.number.value == n.value,
         .string, .multiline_string => |s| {
@@ -185,12 +185,12 @@ const SemanticChecker = struct {
     type_aliases: std.StringHashMap(Entry),
     /// caller-owned out-map: declared name -> doc text, last declare wins
     docs: ?*std.StringHashMap([]const u8),
-    /// one sig per stdlib spec, keyed by the spec's const-storage address
-    sig_cache: std.AutoHashMap(*const revo.std_lib.api.FnSpec, *const FnSig),
-    /// function sigs parsed from stdlib specs (globals, methods, module
+    /// one sig per baselib spec, keyed by the spec's const-storage address
+    sig_cache: std.AutoHashMap(*const revo.baselib.specs.FnSpec, *const FnSig),
+    /// function sigs parsed from baselib specs (globals, methods, module
     /// fns); used to mark which call sites the compiler can trust an
     /// annotation for instead of its own inference
-    stdlib_sig_ptrs: std.ArrayList(*const types_mod.FunctionSignature),
+    baselib_sig_ptrs: std.ArrayList(*const types_mod.FunctionSignature),
     return_types: std.ArrayList(types_mod.TypeInfo),
     type_map: ?*std.StringHashMap(types_mod.TypeInfo),
     type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
@@ -201,7 +201,7 @@ const SemanticChecker = struct {
     /// (never cleared; may miss flags, never false-flags)
     escaped: std.StringHashMap(void),
     /// vm globals, module field resolution only applies to these so a
-    /// local binding named `fs` shadows the stdlib module
+    /// local binding named `fs` shadows the baselib module
     known_globals: std.StringHashMap(void),
     /// known globals rebound by user code (shadowed by a local binding)
     shadowed_globals: std.StringHashMap(void),
@@ -235,7 +235,7 @@ const SemanticChecker = struct {
             .type_aliases = .init(alloc),
             .docs = docs,
             .sig_cache = .init(alloc),
-            .stdlib_sig_ptrs = try .initCapacity(alloc, 4),
+            .baselib_sig_ptrs = try .initCapacity(alloc, 4),
             .return_types = try .initCapacity(alloc, 4),
             .type_map = type_map,
             .type_annotations = type_annotations,
@@ -256,29 +256,29 @@ const SemanticChecker = struct {
         for (known_globals) |name|
             try checker.known_globals.put(name, {});
 
-        // registers stdlib function types
+        // registers baselib function types
         for (known_globals) |name| {
             const spec = find_global: {
-                for (revo.std_lib.api.full_specs) |group| for (group) |*s| {
+                for (revo.baselib.specs.full_specs) |group| for (group) |*s| {
                     if (s.is_type) continue;
                     if (!std.mem.eql(u8, s.name, name)) continue;
                     if (s.head.kind == .global) break :find_global s;
                 };
-                break :find_global revo.std_lib.api.findFn(name);
+                break :find_global revo.baselib.specs.findFn(name);
             } orelse continue;
             if (try checker.makeStdlibSig(spec)) |sig| {
                 try checker.scopes.items[checker.scopes.items.len - 1].values.put(name, .{ .info = .{ .tag = .{ .function = sig } } });
             }
         }
 
-        for (revo.std_lib.api.full_specs) |group| {
+        for (revo.baselib.specs.full_specs) |group| {
             for (group) |*s| {
                 if (!s.is_type) continue;
                 const t = checker.evalCheckedTypeExpr(s.type) catch types_mod.TypeInfo{ .tag = .any };
                 // aliases live where values live
                 // : module heads seed the per-module table
                 //   (`uri.Hi`, docs ride on the spec), bare names seed globals
-                if (s.head.kind == .module) {
+                if (s.head.kind == .namespaced) {
                     const gop = try checker.import_aliases.getOrPut(s.head.module.?);
                     if (!gop.found_existing) gop.value_ptr.* = std.StringHashMap(types_mod.TypeInfo).init(checker.alloc);
                     try gop.value_ptr.put(s.name, t);
@@ -498,7 +498,7 @@ const SemanticChecker = struct {
                             if (fields.get(name) != null) return;
                         }
                     }
-                    const obj_str = try type_serde.formatTypeOpts(self.alloc, object_type, .{});
+                    const obj_str = try type_syntax.formatTypeOpts(self.alloc, object_type, .{});
                     const msg = try std.fmt.allocPrint(self.alloc, "field `{s}` is not defined on {s}", .{ name, obj_str });
                     try self.appendError(msg, span, "unknown field");
                 }
@@ -541,7 +541,7 @@ const SemanticChecker = struct {
 
     pub fn inferFieldType(self: *SemanticChecker, object: *const ast.Node, name: []const u8) types_mod.TypeInfo {
         const object_type = types_mod.inferExprType(self.check(), object);
-        // user-defined table fields shadow stdlib methods: literal shapes
+        // user-defined table fields shadow baselib methods: literal shapes
         // first, flow-sensitive assignment tracking second
         if (object_type.tag == .table) {
             if (object_type.tag.table.fields) |fs| {
@@ -554,7 +554,7 @@ const SemanticChecker = struct {
             }
         }
         // method lookup for string and table
-        const target: ?revo.std_lib.TypeSpec = switch (object_type.tag) {
+        const target: ?revo.baselib.host.ParamType = switch (object_type.tag) {
             .number => .number,
             .string => .string,
             .table => .table,
@@ -566,7 +566,7 @@ const SemanticChecker = struct {
                     return .{ .tag = .{ .function = sig } };
                 }
             }
-            // single-entry stdlib: the module fn doubles as the method, e.g.
+            // single-entry baselib: the module fn doubles as the method, e.g.
             // `t:unwrap_err()` resolves `table.unwrap_err` at runtime
             if (findModuleByNameAndTarget(name, t)) |spec| {
                 if (self.makeStdlibSig(spec) catch null) |sig| {
@@ -574,18 +574,18 @@ const SemanticChecker = struct {
                 }
             }
         }
-        // stdlib module function lookup: fs.exists?, file.read, time.now.
+        // baselib module function lookup: fs.exists?, file.read, time.now.
         // only globals are modules; a local binding shadows the module
         if (object.expr == .ident and
             self.known_globals.contains(object.expr.ident) and
             !self.shadowed_globals.contains(object.expr.ident))
         {
             const module_name = object.expr.ident;
-            for (revo.std_lib.api.full_specs) |group| for (group) |*spec| {
+            for (revo.baselib.specs.full_specs) |group| for (group) |*spec| {
                 if (spec.is_type) continue;
                 if (!std.mem.eql(u8, spec.name, name)) continue;
                 const head = spec.head;
-                if (head.kind == .module and std.mem.eql(u8, head.module.?, module_name)) {
+                if (head.kind == .namespaced and std.mem.eql(u8, head.module.?, module_name)) {
                     if (self.makeStdlibSig(spec) catch null) |sig| {
                         return .{ .tag = .{ .function = sig } };
                     }
@@ -595,7 +595,7 @@ const SemanticChecker = struct {
         return .{ .tag = .any };
     }
 
-    fn makeStdlibSig(self: *SemanticChecker, spec: *const revo.std_lib.api.FnSpec) !?*const FnSig {
+    fn makeStdlibSig(self: *SemanticChecker, spec: *const revo.baselib.specs.FnSpec) !?*const FnSig {
         if (spec.is_type) return null;
         if (self.sig_cache.get(spec)) |sig| return sig;
         const saved = self.current_type_params;
@@ -614,7 +614,7 @@ const SemanticChecker = struct {
         const names_slice = try param_names.toOwnedSlice(self.alloc);
         const types_slice = try param_types.toOwnedSlice(self.alloc);
 
-        // required comes from the host arity, not the `?` flags: stdlib
+        // required comes from the host arity, not the `?` flags: baselib
         // spells optionals as nilable unions (`mode: string?`) with variadic
         // hosts, so flag-derived counts would over-require. keep in sync.
         const ret = if (ft.return_type) |r| types_mod.evalTypeExpr(self.check(), r) catch types_mod.TypeInfo{ .tag = .any } else types_mod.TypeInfo{ .tag = .any };
@@ -628,7 +628,7 @@ const SemanticChecker = struct {
         });
 
         try self.sig_cache.put(spec, sig);
-        try self.stdlib_sig_ptrs.append(self.alloc, sig);
+        try self.baselib_sig_ptrs.append(self.alloc, sig);
         return sig;
     }
 
@@ -709,7 +709,7 @@ const SemanticChecker = struct {
             .return_expr => |val| try self.analyzeReturn(val, node.span),
             .call => |call| blk: {
                 const t = try self.analyzeCall(call, node.span);
-                // stdlib and method callees resolve from spec sigs only the
+                // baselib and method callees resolve from spec sigs only the
                 // semantic checker knows
                 //
                 // annotate them so compiler can
@@ -722,7 +722,7 @@ const SemanticChecker = struct {
                         types_mod.inferExprType(self.check(), call.callee);
                     if (resolved) |r| {
                         if (r.tag == .function and
-                            std.mem.findScalar(*const types_mod.FunctionSignature, self.stdlib_sig_ptrs.items, r.tag.function) != null)
+                            std.mem.findScalar(*const types_mod.FunctionSignature, self.baselib_sig_ptrs.items, r.tag.function) != null)
                         {
                             map.put(node, t) catch {};
                         }
@@ -757,7 +757,7 @@ const SemanticChecker = struct {
                 const inner_type = try self.analyzeNode(inner);
                 if (inner_type.tag != .any and !types_mod.isResultType(inner_type)) {
                     try self.appendError(
-                        try std.fmt.allocPrint(self.alloc, "try expects :ok/:err tagged result, got {s}", .{try type_serde.formatTypeOpts(self.alloc, inner_type, .{})}),
+                        try std.fmt.allocPrint(self.alloc, "try expects :ok/:err tagged result, got {s}", .{try type_syntax.formatTypeOpts(self.alloc, inner_type, .{})}),
                         inner.span,
                         "not a result type",
                     );
@@ -779,7 +779,7 @@ const SemanticChecker = struct {
                 _ = try self.analyzeNode(idx.key);
                 // `t[:a]` / `t["a"]` with a static key check like `t.a`
                 const static_key: ?[]const u8 = switch (idx.key.expr) {
-                    .hash => |name| ast.atomName(name),
+                    .atom => |name| ast.atomName(name),
                     .string => |s| s,
                     else => null,
                 };
@@ -873,7 +873,7 @@ const SemanticChecker = struct {
                             }
                         }
                         if (!overlaps) {
-                            const subject_str = try type_serde.formatTypeOpts(self.alloc, subject_type, .{});
+                            const subject_str = try type_syntax.formatTypeOpts(self.alloc, subject_type, .{});
 
                             try self.appendWarn(
                                 try std.fmt.allocPrint(self.alloc, "match pattern never matches {s}", .{subject_str}),
@@ -938,7 +938,7 @@ const SemanticChecker = struct {
                             .{listed},
                         );
                     } else blk_msg: {
-                        const subject_str = try type_serde.formatTypeOpts(self.alloc, subject_type, .{});
+                        const subject_str = try type_syntax.formatTypeOpts(self.alloc, subject_type, .{});
                         break :blk_msg try std.fmt.allocPrint(
                             self.alloc,
                             "match is not exhaustive for {s}, miss yields :nil",
@@ -1031,7 +1031,7 @@ const SemanticChecker = struct {
                 const pred_type = try self.analyzeNode(v.predicate);
                 if (!types_mod.canCoerce(pred_type, .{ .tag = .bool })) {
                     try self.appendError(
-                        try std.fmt.allocPrint(self.alloc, "while predicate must be boolean, got {s}", .{try type_serde.formatTypeOpts(self.alloc, pred_type, .{})}),
+                        try std.fmt.allocPrint(self.alloc, "while predicate must be boolean, got {s}", .{try type_syntax.formatTypeOpts(self.alloc, pred_type, .{})}),
                         v.predicate.span,
                         "expected bool",
                     );
@@ -1051,7 +1051,7 @@ const SemanticChecker = struct {
                         else => &[_]*ast.Node{@constCast(dep)},
                     };
 
-                    if (module_iface.moduleInterface(self.alloc, items)) |iface| {
+                    if (import_types.moduleInterface(self.alloc, items)) |iface| {
                         var aliases = std.StringHashMap(types_mod.TypeInfo).init(self.alloc);
                         for (iface.aliases) |a| try aliases.put(a.name, a.info);
                         try self.import_aliases.put(stmt.name, aliases);
@@ -1069,7 +1069,7 @@ const SemanticChecker = struct {
                 try self.declare(m.name, .{ .tag = .any }, null);
                 break :blk .{ .tag = .any };
             },
-            .number, .string, .multiline_string, .hash, .nil, .table, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),
+            .number, .string, .multiline_string, .atom, .nil, .table, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),
             .ascribed => blk: {
                 try self.appendError(
                     "type ascriptions only go in match patterns",
@@ -1083,11 +1083,11 @@ const SemanticChecker = struct {
     }
 
     fn analyzeIdent(self: *SemanticChecker, name: []const u8, span: ast.Span) !types_mod.TypeInfo {
-        // stdlib fns are only declared into scope when the checker runs with
+        // baselib fns are only declared into scope when the checker runs with
         // vm globals (repl); without them, fall back to the spec registry so
         // bare calls like `print(x)` don't read as unknown
         if (self.lookup(name) == null and !ast.isDiscardName(name) and
-            !(self.fn_nesting > 0 and self.predeclared.contains(name)) and revo.std_lib.api.findFn(name) == null)
+            !(self.fn_nesting > 0 and self.predeclared.contains(name)) and revo.baselib.specs.findFn(name) == null)
         {
             const msg = try std.fmt.allocPrint(self.alloc, "name `{s}` is not defined", .{name});
             if (self.first_code == null) self.first_code = "unknown-name";
@@ -1134,10 +1134,10 @@ const SemanticChecker = struct {
         try self.declare(alias.name, t, doc orelse alias.doc);
         // also usable in type positions: `const x: MAX_ITEMS = 5`
         try self.type_aliases.put(alias.name, .{ .info = t, .doc = doc orelse alias.doc });
-        // host-contract sigs are as trustworthy as stdlib sigs: trust the
+        // host-contract sigs are as trustworthy as baselib sigs: trust the
         // return type at call sites
         if (t.tag == .function) {
-            try self.stdlib_sig_ptrs.append(self.alloc, t.tag.function);
+            try self.baselib_sig_ptrs.append(self.alloc, t.tag.function);
         }
         return .{ .tag = .any };
     }
@@ -1397,7 +1397,7 @@ const SemanticChecker = struct {
         };
         if (items.len == 0) return;
         const first = items[0];
-        const tag = if (first.expr == .hash) first.expr.hash else return;
+        const tag = if (first.expr == .atom) first.expr.atom else return;
         const variants = switch (subject_type.tag) {
             .@"union" => |us| us,
             else => return,
@@ -1474,7 +1474,7 @@ const SemanticChecker = struct {
             .add, .sub, .div, .int_div, .mod, .pow => {
                 if ((l.tag == .number and r.tag == .string) or (l.tag == .string and r.tag == .number)) {
                     try self.appendError(
-                        try std.fmt.allocPrint(self.alloc, "cannot {s} {s} and {s}", .{ @tagName(op), try type_serde.formatTypeOpts(self.alloc, l, .{}), try type_serde.formatTypeOpts(self.alloc, r, .{}) }),
+                        try std.fmt.allocPrint(self.alloc, "cannot {s} {s} and {s}", .{ @tagName(op), try type_syntax.formatTypeOpts(self.alloc, l, .{}), try type_syntax.formatTypeOpts(self.alloc, r, .{}) }),
                         span,
                         "invalid operands",
                     );
@@ -1483,7 +1483,7 @@ const SemanticChecker = struct {
             .mul => {
                 if (!isOptimisticOperand(l) and !isOptimisticOperand(r) and (l.tag != .number or r.tag != .number)) {
                     try self.appendError(
-                        try std.fmt.allocPrint(self.alloc, "cannot multiply {s} and {s}", .{ try type_serde.formatTypeOpts(self.alloc, l, .{}), try type_serde.formatTypeOpts(self.alloc, r, .{}) }),
+                        try std.fmt.allocPrint(self.alloc, "cannot multiply {s} and {s}", .{ try type_syntax.formatTypeOpts(self.alloc, l, .{}), try type_syntax.formatTypeOpts(self.alloc, r, .{}) }),
                         span,
                         "invalid operands",
                     );
@@ -1493,7 +1493,7 @@ const SemanticChecker = struct {
             .band, .bor, .bxor, .shl, .shr => {
                 if (!isOptimisticOperand(l) and !isOptimisticOperand(r) and (l.tag != .number or r.tag != .number)) {
                     try self.appendError(
-                        try std.fmt.allocPrint(self.alloc, "cannot apply {s} to {s} and {s}", .{ @tagName(op), try type_serde.formatTypeOpts(self.alloc, l, .{}), try type_serde.formatTypeOpts(self.alloc, r, .{}) }),
+                        try std.fmt.allocPrint(self.alloc, "cannot apply {s} to {s} and {s}", .{ @tagName(op), try type_syntax.formatTypeOpts(self.alloc, l, .{}), try type_syntax.formatTypeOpts(self.alloc, r, .{}) }),
                         span,
                         "invalid operands",
                     );
@@ -1537,7 +1537,7 @@ const SemanticChecker = struct {
                 // them; numbers stay untracked (never field names)
                 if (idx.object.expr == .ident) {
                     const key_name: ?[]const u8 = switch (idx.key.expr) {
-                        .hash => |name| ast.atomName(name),
+                        .atom => |name| ast.atomName(name),
                         .string => |s| s,
                         else => null,
                     };
@@ -1559,7 +1559,7 @@ const SemanticChecker = struct {
                 {
                     try self.markEscaped(idx.object.expr.ident);
                     const static = switch (idx.key.expr) {
-                        .hash, .string => true,
+                        .atom, .string => true,
                         else => false,
                     };
                     if (!static and actual_type.tag.table.fields != null) {
@@ -1570,7 +1570,7 @@ const SemanticChecker = struct {
                     }
                 }
                 if (!types_mod.canCoerce(types_mod.TABLE_GENERIC, actual_type)) {
-                    const name_str = try type_serde.formatTypeOpts(self.alloc, actual_type, .{});
+                    const name_str = try type_syntax.formatTypeOpts(self.alloc, actual_type, .{});
 
                     try self.appendError(
                         try std.fmt.allocPrint(self.alloc, "mutation is not allowed for {s}", .{name_str}),
@@ -1628,7 +1628,7 @@ const SemanticChecker = struct {
             // ~ dot-call callees read the field first (`t.f()`)
             // ~ colon-calls (`t:f()`) dispatch to methods
             // ~ `!` callees are macro calls, handled by expansion reporting instead
-            // ~ a field that is also a stdlib method (`t.len()`) dispatches
+            // ~ a field that is also a baselib method (`t.len()`) dispatches
             //   at runtime, so only flag names that resolve to neither
             if (!call.implicit_self and !std.mem.endsWith(u8, call.callee.expr.field.name, "!")) {
                 const f = call.callee.expr.field;
@@ -1659,19 +1659,19 @@ const SemanticChecker = struct {
             const self_offset: usize = if (call.implicit_self) 1 else 0;
             const total_args = call.args.len + self_offset;
             if (total_args < sig.required_count or (total_args > sig.params.len)) {
-                const stdlib_spec = find_spec: {
+                const baselib_spec = find_spec: {
                     // same name can exist as both a global and a method
                     // (e.g. `read` vs `file:read`); match the call kind
-                    for (revo.std_lib.api.full_specs) |group| for (group) |*s| {
+                    for (revo.baselib.specs.full_specs) |group| for (group) |*s| {
                         if (s.is_type) continue;
                         if (!std.mem.eql(u8, s.name, name)) continue;
                         const head = s.head;
                         if (call.implicit_self and head.kind == .method) break :find_spec s;
                         if (!call.implicit_self and head.kind == .global) break :find_spec s;
                     };
-                    break :find_spec revo.std_lib.api.findFn(name);
+                    break :find_spec revo.baselib.specs.findFn(name);
                 };
-                const is_variadic = if (stdlib_spec) |sp| revo.std_lib.api.isVariadic(sp) else false;
+                const is_variadic = if (baselib_spec) |sp| revo.baselib.specs.isVariadic(sp) else false;
                 if (is_variadic and total_args >= sig.params.len -| 1) {
                     // variadic fns are fine with >= min
                 } else if (total_args < sig.required_count) {
@@ -1736,8 +1736,8 @@ const SemanticChecker = struct {
                         const actual = types_mod.inferExprType(self.check(), call.callee.expr.field.object);
                         const expected = sig.params[i];
                         if (!numberAccepts(expected, actual)) {
-                            const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-                            const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+                            const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+                            const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
                             try self.appendError(
                                 try std.fmt.allocPrint(self.alloc, "arg 1 to `{s}` wants {s}, got {s}", .{
                                     name, expected_str, actual_str,
@@ -1760,8 +1760,8 @@ const SemanticChecker = struct {
                                 const actual = types_mod.inferExprType(self.check(), arg.expr.assign_expr.value);
                                 if (expected.tag == .type_var) continue;
                                 if (!numberAccepts(expected, actual)) {
-                                    const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-                                    const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+                                    const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+                                    const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
                                     try self.appendError(
                                         try std.fmt.allocPrint(self.alloc, "arg `{s}` to `{s}` wants {s}, got {s}", .{
                                             pn, name, expected_str, actual_str,
@@ -1783,8 +1783,8 @@ const SemanticChecker = struct {
                         if (expected.tag == .type_var) continue;
                         if (!numberAccepts(expected, actual)) {
                             const param_name = if (pi < sig.param_names.len and sig.param_names[pi].len > 0) sig.param_names[pi] else "";
-                            const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-                            const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+                            const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+                            const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
                             try self.appendError(
                                 try std.fmt.allocPrint(self.alloc, "arg {d} (`{s}`) to `{s}` wants {s}, got {s}", .{
                                     pi + 1, param_name, name, expected_str, actual_str,
@@ -1809,8 +1809,8 @@ const SemanticChecker = struct {
                 if (expected.tag == .type_var) continue;
                 if (!numberAccepts(expected, actual)) {
                     const param_name = if (i < sig.param_names.len and sig.param_names[i].len > 0) sig.param_names[i] else "";
-                    const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-                    const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+                    const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+                    const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
                     const msg = if (call.implicit_self and i == 0)
                         try std.fmt.allocPrint(self.alloc, "arg 1 (`{s}`) to `{s}` wants {s}, got {s}", .{
                             param_name, name, expected_str, actual_str,
@@ -1859,8 +1859,8 @@ const SemanticChecker = struct {
         return assign.target.expr.ident;
     }
 
-    fn findMethodByNameAndTarget(name: []const u8, target: revo.std_lib.TypeSpec) ?*const revo.std_lib.api.FnSpec {
-        for (revo.std_lib.api.full_specs) |group| {
+    fn findMethodByNameAndTarget(name: []const u8, target: revo.baselib.host.ParamType) ?*const revo.baselib.specs.FnSpec {
+        for (revo.baselib.specs.full_specs) |group| {
             for (group) |*spec| {
                 if (spec.is_type) continue;
                 if (!std.mem.eql(u8, spec.name, name)) continue;
@@ -1873,14 +1873,14 @@ const SemanticChecker = struct {
         return null;
     }
 
-    fn findModuleByNameAndTarget(name: []const u8, target: revo.std_lib.TypeSpec) ?*const revo.std_lib.api.FnSpec {
+    fn findModuleByNameAndTarget(name: []const u8, target: revo.baselib.host.ParamType) ?*const revo.baselib.specs.FnSpec {
         const module_name = target.moduleName() orelse return null;
-        for (revo.std_lib.api.full_specs) |group| {
+        for (revo.baselib.specs.full_specs) |group| {
             for (group) |*spec| {
                 if (spec.is_type) continue;
                 if (!std.mem.eql(u8, spec.name, name)) continue;
                 const head = spec.head;
-                if (head.kind == .module and std.mem.eql(u8, head.module.?, module_name)) return spec;
+                if (head.kind == .namespaced and std.mem.eql(u8, head.module.?, module_name)) return spec;
             }
         }
         return null;
@@ -1917,8 +1917,8 @@ const SemanticChecker = struct {
         expected: types_mod.TypeInfo,
         actual: types_mod.TypeInfo,
     ) !void {
-        const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-        const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+        const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+        const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
         const msg = try std.fmt.allocPrint(self.alloc, "`{s}` wants {s}, got {s}", .{
             name,
             expected_str,
@@ -1934,8 +1934,8 @@ const SemanticChecker = struct {
     }
 
     fn appendReturnMismatch(self: *SemanticChecker, span: ast.Span, expected: types_mod.TypeInfo, actual: types_mod.TypeInfo) !void {
-        const expected_str = try type_serde.formatTypeOpts(self.alloc, expected, .{});
-        const actual_str = try type_serde.formatTypeOpts(self.alloc, actual, .{});
+        const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected, .{});
+        const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual, .{});
         const msg = try std.fmt.allocPrint(self.alloc, "return type mismatch: wanted {s}, got {s}", .{
             expected_str,
             actual_str,

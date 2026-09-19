@@ -5,6 +5,13 @@
 //! yes there are hella re-exports and its 100% intentional
 //! dont hit "organize @import"
 //!
+//! workspace/ providers, one file per ide feature:
+//!   store (file entries + open/close), cache (build cache put/get),
+//!   analyze (analyzeDetailed/inspect orchestration), common (shared
+//!   copy/free/report helpers), text (offsets, edits, spans),
+//!   imports (import graph edges), deps (dependents + invalidation),
+//!   symbols (document/workspace symbols + index), definition (go to),
+//!   hover, signature, completion, inlay (per-position queries)
 
 pub const Workspace = @This();
 alloc: std.mem.Allocator,
@@ -36,7 +43,7 @@ pub const FileEntry = struct {
     version: u32,
     name: []u8,
     text: []u8,
-    mode: pipeline.RunMode = .script,
+    mode: pipeline.ProjectMode = .script,
     project_root: []u8 = &.{},
 };
 
@@ -44,7 +51,7 @@ pub const FileEntry = struct {
 pub const CacheEntry = struct {
     version: u32,
     opts: pipeline.BuildOptions,
-    artifact: pipeline.Artifact,
+    bytecode: pipeline.Bytecode,
     warnings: ?diagnostic.Report = null,
     symbols: []Symbol,
 };
@@ -81,7 +88,7 @@ pub const InspectCacheEntry = struct {
 
 pub const Analysis = struct {
     snapshot: Snapshot,
-    artifact: ?pipeline.Artifact = null,
+    bytecode: ?pipeline.Bytecode = null,
     diagnostics: ?pipeline.Error = null,
     /// non-failing warnings; only set on success, dropped on error
     warnings: ?diagnostic.Report = null,
@@ -90,9 +97,9 @@ pub const Analysis = struct {
     dependencies: []FileId = &.{},
 
     pub fn deinit(self: *Analysis, alloc: std.mem.Allocator) void {
-        if (self.artifact) |artifact| {
-            alloc.free(artifact.instructions);
-            alloc.free(artifact.spans);
+        if (self.bytecode) |bytecode| {
+            alloc.free(bytecode.instructions);
+            alloc.free(bytecode.spans);
         }
         if (self.diagnostics) |err| {
             pipeline.deinitError(alloc, err);
@@ -121,7 +128,7 @@ pub const Symbol = struct {
     /// condensed literal values per field (`name` -> `"me"`)
     /// for value-showing hover
     /// no default so every constructor decides
-    field_values: ?[]type_serde.FieldPreview,
+    field_values: ?[]type_syntax.FieldPreview,
 };
 
 pub const Hover = struct {
@@ -169,7 +176,7 @@ pub const IndexedSymbol = struct {
 };
 
 pub const OpenOptions = struct {
-    mode: pipeline.RunMode = .script,
+    mode: pipeline.ProjectMode = .script,
     project_root: []const u8 = &.{},
 };
 
@@ -243,7 +250,7 @@ pub const findSymbols = symbols_mod.findSymbols;
 pub const analyze = analyze_mod.analyze;
 
 /// full compile
-/// ret: detailed Analysis with artifact + diagnostics
+/// ret: detailed Analysis with bytecode + diagnostics
 pub const analyzeDetailed = analyze_mod.analyzeDetailed;
 
 /// get diagnostics for a file (or null if clean)
@@ -294,7 +301,7 @@ pub const inspectCached = cache_mod.inspectCached;
 /// cache error state and return Analysis with diags
 pub const inspectParseError = cache_mod.inspectParseError;
 
-// store build artifact in cache
+// store build bytecode in cache
 pub const putCache = cache_mod.putCache;
 
 /// invalidate a file and all its transitive dependents
@@ -355,7 +362,7 @@ pub const collectDependencyClosure = deps_mod.collectDependencyClosure;
 /// walk ast & collect
 ///     bindings, functions, type aliases
 ///
-/// full dotted macro names from stdlib manifests
+/// full dotted macro names from baselib manifests
 ///     (`uri.asdf!`, `ok?!`)
 ///
 /// names borrow the embedded sources (static)
@@ -363,7 +370,7 @@ pub const collectDependencyClosure = deps_mod.collectDependencyClosure;
 /// . callers split scope from member
 /// ; the parser caps heads at one dot.
 ///
-pub const stdlibMacroNames = symbols_mod.stdlibMacroNames;
+pub const baselibMacroNames = symbols_mod.baselibMacroNames;
 
 pub const collectSymbolsFromParsed = symbols_mod.collectSymbolsFromParsed;
 
@@ -432,7 +439,7 @@ const signature = @import("workspace/signature.zig");
 const store = @import("workspace/store.zig");
 const symbols_mod = @import("workspace/symbols.zig");
 const txt = @import("workspace/text.zig");
-const type_serde = @import("type_serde.zig");
+const type_syntax = @import("type_syntax.zig");
 const types = @import("compiler/types.zig");
 
 pub const FileId = txt.FileId;

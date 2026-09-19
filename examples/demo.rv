@@ -220,7 +220,7 @@ fn tables() do
   # structural types describe a table's shape; annotate bindings
   # with them and the compiler checks the fields. method fields go
   # in the type too, so colon calls resolve to them instead of
-  # stdlib methods with the same name
+  # baselib methods with the same name
   type Point = { x: number, y: number, mag: function, add: function }
   # methods are something you call via the colon syntax, `obj:mag()`
   # that puts `obj` as the first argument (`self`, in this case)
@@ -412,8 +412,8 @@ fn comp_time() do
 end
 
 # some builtin globals
-fn stdlib() do
-  print("\nstdlib")
+fn baselib() do
+  print("\nbaselib")
 
   # conversion functions
   print(number("42"), number(3.14))
@@ -534,7 +534,7 @@ fn main() do
   macros()
   proc_macros()
   comp_time()
-  stdlib()
+  baselib()
   modules()
   run_tests()
 

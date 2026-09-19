@@ -61,7 +61,7 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     let ty = arg_pat.ty.clone();
                     let pat = arg_pat.pat.clone();
                     all_args.push(quote!(
-                        let #pat = #ty::from_data_unchecked(::revo::Data::from_raw(vm.ptr, args[#i]).unwrap(), &#vm_pat);
+                        let #pat = #ty::from_value_unchecked(::revo::Value::from_raw(vm.ptr, args[#i]).unwrap(), &#vm_pat);
                     ));
                 }
 
@@ -70,7 +70,7 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     syn::ReturnType::Default => quote!(::revo_sys::NIL),
                     syn::ReturnType::Type(_, _) => {
                         // Assume access to `return_value` of a rust type
-                        quote!(return_value.to_data().to_raw(&#vm_pat).unwrap())
+                        quote!(return_value.to_value().to_raw(&#vm_pat).unwrap())
                     }
                 };
 
@@ -88,7 +88,7 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
                 let vm_ident = &vm_arg.pat;
                 let expanded = quote!(
-                    extern "C" fn #fn_name(vm: *mut std::ffi::c_void, argc: usize, argv: *mut ::revo_sys::RevoData, out: *mut ::revo_sys::RevoData) {
+                    extern "C" fn #fn_name(vm: *mut std::ffi::c_void, argc: usize, argv: *mut ::revo_sys::RevoValue, out: *mut ::revo_sys::RevoValue) {
 
                         // reject if wrong number of params was provided
                         // TODO: make this work for optional params
@@ -96,7 +96,7 @@ pub fn revo_bindings(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             panic!("expected {} arguments, got {}", #param_count, argc);
                         }
 
-                        let args = unsafe { ::std::slice::from_raw_parts_mut::<::revo_sys::RevoData>(argv, argc) };
+                        let args = unsafe { ::std::slice::from_raw_parts_mut::<::revo_sys::RevoValue>(argv, argc) };
 
                         let #vm_ident = ::revo::VM::from_ptr(vm);
                         #(#all_args)*

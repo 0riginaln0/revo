@@ -8,7 +8,7 @@ const ast = @import("../ast.zig");
 const Parser = @import("../Parser.zig");
 const pipeline = @import("../pipeline.zig");
 const txt = @import("text.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 
 const W = @import("../Workspace.zig");
 const Workspace = W.Workspace;
@@ -45,7 +45,7 @@ pub fn inlayHints(
             defer alloc.free(decl_needle);
             if (std.mem.find(u8, line, decl_needle) != null) {
                 if (std.mem.find(u8, line, "->") != null or ti.tag.function.return_type.tag == .any) continue;
-                const ret = try type_serde.formatTypeOpts(alloc, ti.tag.function.return_type, .{});
+                const ret = try type_syntax.formatTypeOpts(alloc, ti.tag.function.return_type, .{});
                 defer alloc.free(ret);
 
                 var paren = sym.range.end.character;
@@ -61,7 +61,7 @@ pub fn inlayHints(
             }
         }
 
-        const tn = try type_serde.formatTypeOpts(alloc, ti, .{});
+        const tn = try type_syntax.formatTypeOpts(alloc, ti, .{});
         defer alloc.free(tn);
         const needle = try std.fmt.allocPrint(alloc, ": {s}", .{tn});
         defer alloc.free(needle);
@@ -79,7 +79,7 @@ pub fn inlayHints(
     return hints.toOwnedSlice(alloc);
 }
 
-/// local fns via the sig map, stdlib globals as fallback
+/// local fns via the sig map, baselib globals as fallback
 const ParamHintVisitor = struct {
     ws: *Workspace,
     id: FileId,
@@ -113,7 +113,7 @@ const ParamHintVisitor = struct {
             }
         }
 
-        if (revo.std_lib.api.findFn(name)) |spec| {
+        if (revo.baselib.specs.findFn(name)) |spec| {
             var out = std.ArrayList([]const u8).empty;
             for (spec.type.kind.function.params) |p| out.append(self.alloc, p.name) catch return &.{};
             return out.toOwnedSlice(self.alloc) catch &.{};

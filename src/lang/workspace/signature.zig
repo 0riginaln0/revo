@@ -26,9 +26,9 @@ pub fn signatureHelp(
     const snap = self.snapshot(id) orelse return null;
     const call_info = txt.findCallAtPosition(snap.text, pos) orelse return null;
 
-    // stdlib fallback: name not bound in any AST
+    // baselib fallback: name not bound in any AST
     if (try self.bestLocation(alloc, call_info.name, id, pos, opts) == null) {
-        if (revo.std_lib.api.findFn(call_info.name)) |spec| {
+        if (revo.baselib.specs.findFn(call_info.name)) |spec| {
             const ft = spec.type.kind.function;
             const name = try alloc.dupe(u8, spec.name);
             errdefer alloc.free(name);

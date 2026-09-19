@@ -10,7 +10,7 @@ const revo = @import("revo");
 const ast = @import("../ast.zig");
 const diagnostic = @import("../diagnostic.zig");
 const pipeline = @import("../pipeline.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 const types = @import("../compiler/types.zig");
 
 const W = @import("../Workspace.zig");
@@ -25,16 +25,16 @@ pub fn sameOpts(a: pipeline.BuildOptions, b: pipeline.BuildOptions) bool {
     return true;
 }
 
-pub fn copyArtifact(alloc: std.mem.Allocator, artifact: pipeline.Artifact) !pipeline.Artifact {
+pub fn copyBytecode(alloc: std.mem.Allocator, bytecode: pipeline.Bytecode) !pipeline.Bytecode {
     return .{
-        .instructions = try alloc.dupe(revo.Instruction, artifact.instructions),
-        .spans = try alloc.dupe(ast.Span, artifact.spans),
+        .instructions = try alloc.dupe(revo.Instruction, bytecode.instructions),
+        .spans = try alloc.dupe(ast.Span, bytecode.spans),
     };
 }
 
-pub fn deinitArtifact(alloc: std.mem.Allocator, artifact: pipeline.Artifact) void {
-    alloc.free(artifact.instructions);
-    alloc.free(artifact.spans);
+pub fn deinitBytecode(alloc: std.mem.Allocator, bytecode: pipeline.Bytecode) void {
+    alloc.free(bytecode.instructions);
+    alloc.free(bytecode.spans);
 }
 
 /// merge two error reports into one (dedup span parts by range+message)
@@ -42,13 +42,13 @@ pub fn mergeReports(alloc: std.mem.Allocator, a: pipeline.Error, b: pipeline.Err
     const a_report = switch (a) {
         .parse => |f| f.report,
         .expand => |f| f.report,
-        .lower => |f| f.report,
+        .compile => |f| f.report,
         .semantic => |f| f.report,
     };
     const b_report = switch (b) {
         .parse => |f| f.report,
         .expand => |f| f.report,
-        .lower => |f| f.report,
+        .compile => |f| f.report,
         .semantic => |f| f.report,
     };
     const total = a_report.parts.len + b_report.parts.len;
@@ -112,11 +112,11 @@ pub fn copyError(
             report.source = try alloc.dupe(u8, source);
             break :blk .{ .expand = .{ .report = report } };
         },
-        .lower => |failure| blk: {
+        .compile => |failure| blk: {
             var report = try failure.report.copy(alloc);
             report.source_name = try alloc.dupe(u8, source_name);
             report.source = try alloc.dupe(u8, source);
-            break :blk .{ .lower = .{ .kind = failure.kind, .report = report } };
+            break :blk .{ .compile = .{ .kind = failure.kind, .report = report } };
         },
         .semantic => |failure| blk: {
             var report = try failure.report.copy(alloc);
@@ -141,8 +141,8 @@ pub fn copySymbols(alloc: std.mem.Allocator, symbols: []const Symbol) ![]Symbol 
     return dupes;
 }
 
-pub fn cloneFieldPreviews(alloc: std.mem.Allocator, fvs: []const type_serde.FieldPreview) ![]type_serde.FieldPreview {
-    const owned = try alloc.alloc(type_serde.FieldPreview, fvs.len);
+pub fn cloneFieldPreviews(alloc: std.mem.Allocator, fvs: []const type_syntax.FieldPreview) ![]type_syntax.FieldPreview {
+    const owned = try alloc.alloc(type_syntax.FieldPreview, fvs.len);
     for (fvs, owned) |fv, *dst| dst.* = .{
         .name = try alloc.dupe(u8, fv.name),
         .preview = try alloc.dupe(u8, fv.preview),
@@ -203,11 +203,11 @@ pub fn formatTypeParams(alloc: std.mem.Allocator, type_params: []const []const u
 pub fn getKnownGlobals(ws: *Workspace, alloc: std.mem.Allocator) ![]const []const u8 {
     const vm = ws.vm orelse return &.{};
     var list = try std.ArrayList([]const u8).initCapacity(alloc, 64);
-    var cit = vm.const_globals.keyIterator();
+    var cit = vm.frozen_globals.keyIterator();
     while (cit.next()) |atom_id| {
         try list.append(alloc, vm.stringValue(atom_id.*));
     }
-    var git = vm.globals.iterator();
+    var git = vm.user_globals.iterator();
     while (git.next()) |entry| {
         try list.append(alloc, vm.stringValue(entry.key_ptr.*));
     }

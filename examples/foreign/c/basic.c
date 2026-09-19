@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
-static void print_value(void *vm, RevoData value) {
+static void print_value(void *vm, RevoValue value) {
   if (revo_is_number(value)) {
     printf("number: %.0f\n", revo_num_value(value));
   } else if (revo_is_string(value)) {
@@ -42,7 +42,7 @@ int main(void) {
     return 1;
   }
 
-  ErevoData val;
+  ErevoValue val;
   if (!erevo_run(vm, prog, &val)) {
     puts(erevo_vm_last_error(vm));
     erevo_program_destroy(prog);
@@ -81,19 +81,19 @@ int main(void) {
   }
 
   // val is the table, read its field by name
-  RevoData tval;
+  RevoValue tval;
   if (!revo_table_get_name(vm, val, (uint64_t)(uintptr_t)"x", 1, &tval)) return 1;
   printf("table.x = ");
   print_value(vm, tval);
 
-  // foreign round-trip through a global; c owns the memory
+  // opaque round-trip through a global; c owns the memory
   static int native_state = 7;
-  RevoData handle = revo_foreign_new(&native_state);
-  printf("foreign is_foreign? %d tag=%d\n", revo_is_foreign(handle), revo_type(handle));
+  RevoValue handle = revo_opaque_new(&native_state);
+  printf("opaque is_opaque? %d tag=%d\n", revo_is_opaque(handle), revo_type(handle));
   revo_setglobal_cstr(vm, "handle", handle);
   val = revo_getglobal_cstr(vm, "handle");
-  printf("foreign round-trip ok? %d\n",
-         revo_is_foreign(val) && revo_foreign_ptr(val) == &native_state);
+  printf("opaque round-trip ok? %d\n",
+         revo_is_opaque(val) && revo_opaque_ptr(val) == &native_state);
 
   //
   // check nil, bool helpers

@@ -14,7 +14,7 @@ const std = @import("std");
 
 const revo = @import("revo");
 const root = @import("root.zig");
-const Data = root.Data;
+const Value = root.Value;
 const VM = root.VM;
 const Fiber = VM.Fiber;
 const FiberID = VM.FiberID;
@@ -46,7 +46,7 @@ threadlocal var tl_fid: FiberID = 0;
 /// fiber waiting on channel, send or recv
 pub const ChannelWaiter = struct {
     fiber_id: FiberID,
-    value: ?Data = null,
+    value: ?Value = null,
 };
 
 /// buffered or unbuffered
@@ -54,7 +54,7 @@ pub const ChannelWaiter = struct {
 pub const ChannelState = struct {
     cap: usize = 0,
     /// ring buf; items.len is the capacity, the count lives in queue_count
-    queue: std.ArrayList(Data),
+    queue: std.ArrayList(Value),
     queue_head: usize = 0,
     queue_count: usize = 0,
     send_waiters: std.ArrayList(ChannelWaiter),
@@ -64,7 +64,7 @@ pub const ChannelState = struct {
 
     pub fn init(alloc: std.mem.Allocator, cap: usize) !ChannelState {
         const queue_cap = if (cap == 0) 1 else cap;
-        var queue = try std.ArrayList(Data).initCapacity(alloc, queue_cap);
+        var queue = try std.ArrayList(Value).initCapacity(alloc, queue_cap);
         errdefer queue.deinit(alloc);
         var send_waiters = try std.ArrayList(ChannelWaiter).initCapacity(alloc, 2);
         errdefer send_waiters.deinit(alloc);
@@ -92,14 +92,14 @@ pub const ChannelState = struct {
         return self.queue_count;
     }
 
-    fn pushQueue(self: *ChannelState, value: Data) !void {
+    fn pushQueue(self: *ChannelState, value: Value) !void {
         const cap = self.queue.items.len;
         const tail = (self.queue_head + self.queue_count) % cap;
         self.queue.items[tail] = value;
         self.queue_count += 1;
     }
 
-    fn popQueue(self: *ChannelState) ?Data {
+    fn popQueue(self: *ChannelState) ?Value {
         if (self.queue_count == 0) return null;
 
         const value = self.queue.items[self.queue_head];
@@ -327,13 +327,13 @@ pub fn parkCurrentForIo(
 }
 
 /// wake a waiting fiber, passing optional result into its slot or stack
-pub fn wakeFiber(self: *@This(), fid: FiberID, result: ?Data) !void {
+pub fn wakeFiber(self: *@This(), fid: FiberID, result: ?Value) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
     try self.wakeFiberLocked(fid, result);
 }
 
-fn wakeFiberLocked(self: *@This(), fid: FiberID, result: ?Data) !void {
+fn wakeFiberLocked(self: *@This(), fid: FiberID, result: ?Value) !void {
     if (fid >= self.fibers.items.len) return;
     var fiber = self.fibers.items[fid];
     if (fiber.state != .waiting) return;
@@ -563,14 +563,14 @@ pub inline fn enqueueRunnable(self: *@This(), fid: FiberID) !void {
 inline fn enqueueRunnableLocked(self: *@This(), fid: FiberID) !void {
     if (fid >= self.fibers.items.len) return;
     const fiber = self.fibers.items[fid];
-    if (fiber.in_runq or fiber.state != .ready) return;
+    if (fiber.in_run_queue or fiber.state != .ready) return;
 
     const new_tail = (self.ring_tail + 1) & self.ring_mask;
     if (new_tail == self.ring_head) try self.growRingLocked();
 
     self.ring_buf[self.ring_tail] = fid;
     self.ring_tail = (self.ring_tail + 1) & self.ring_mask;
-    fiber.in_runq = true;
+    fiber.in_run_queue = true;
 
     self.signalWakeup();
 }
@@ -583,7 +583,6 @@ fn growRingLocked(self: *@This()) !void {
     const new_buf = try self.alloc.alloc(FiberID, new_cap);
     const count = if (self.ring_tail >= self.ring_head)
         self.ring_tail - self.ring_head
-
     else
         self.ring_tail + old_cap - self.ring_head;
     if (self.ring_head + count <= old_cap) {
@@ -613,7 +612,7 @@ inline fn dequeueRunnableLocked(self: *@This()) ?FiberID {
 
     const fid = self.ring_buf[self.ring_head];
     self.ring_head = (self.ring_head + 1) & self.ring_mask;
-    self.fibers.items[fid].in_runq = false;
+    self.fibers.items[fid].in_run_queue = false;
 
     return fid;
 }
@@ -644,14 +643,14 @@ const FREE_FIBER_CAP: usize = 256;
 const FREE_SLOT_CAP: usize = 1024;
 
 /// mark a fiber as dead and wake all its waiters
-pub fn finishFiber(self: *@This(), fid: FiberID, result: Data) !void {
+pub fn finishFiber(self: *@This(), fid: FiberID, result: Value) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
 
     try self.finishFiberLocked(fid, result);
 }
 
-fn finishFiberLocked(self: *@This(), fid: FiberID, result: Data) !void {
+fn finishFiberLocked(self: *@This(), fid: FiberID, result: Value) !void {
     var fiber = self.fibers.items[fid];
     fiber.result = result;
     fiber.running = false;
@@ -741,7 +740,7 @@ pub fn channelCreate(
 pub fn channelSend(
     self: *@This(),
     channel_id: ChannelID,
-    value: Data,
+    value: Value,
 ) !void {
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -751,7 +750,7 @@ pub fn channelSend(
 fn channelSendLocked(
     self: *@This(),
     channel_id: ChannelID,
-    value: Data,
+    value: Value,
 ) !void {
     var channel = self.channels.getPtr(channel_id) orelse return error.InvalidChannel;
 
@@ -775,13 +774,13 @@ fn channelSendLocked(
 }
 
 /// null means parked, the value gets delivered on wake
-pub fn channelRecv(self: *@This(), channel_id: ChannelID) !?Data {
+pub fn channelRecv(self: *@This(), channel_id: ChannelID) !?Value {
     self.mutex.lock();
     defer self.mutex.unlock();
     return self.channelRecvLocked(channel_id);
 }
 
-fn channelRecvLocked(self: *@This(), channel_id: ChannelID) !?Data {
+fn channelRecvLocked(self: *@This(), channel_id: ChannelID) !?Value {
     var channel = self.channels.getPtr(channel_id) orelse return error.InvalidChannel;
 
     if (channel.queueLen() > 0) {

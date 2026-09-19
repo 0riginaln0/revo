@@ -73,25 +73,25 @@ pub fn inspectParseError(
     };
 }
 
-// store build artifact in cache
+// store build bytecode in cache
 pub fn putCache(
     self: *Workspace,
     id: FileId,
     version: u32,
     opts: pipeline.BuildOptions,
-    artifact: pipeline.Artifact,
+    bytecode: pipeline.Bytecode,
     symbols: []Symbol,
     warnings: ?diagnostic.Report,
 ) !void {
     const entry = CacheEntry{
         .version = version,
         .opts = opts,
-        .artifact = artifact,
+        .bytecode = bytecode,
         .warnings = warnings,
         .symbols = symbols,
     };
     if (self.cache.getPtr(id)) |slot| {
-        common.deinitArtifact(self.alloc, slot.artifact);
+        common.deinitBytecode(self.alloc, slot.bytecode);
         common.freeSymbols(self.alloc, slot.symbols);
         if (slot.warnings) |*w| w.deinit(self.alloc);
         slot.* = entry;
@@ -118,7 +118,7 @@ pub fn invalidateCacheImpl(
 
     if (self.cache.fetchRemove(id)) |kv| {
         var val = kv.value;
-        common.deinitArtifact(self.alloc, val.artifact);
+        common.deinitBytecode(self.alloc, val.bytecode);
         common.freeSymbols(self.alloc, val.symbols);
         if (val.warnings) |*w| w.deinit(self.alloc);
     }
@@ -139,7 +139,7 @@ pub fn invalidateCacheImpl(
 pub fn clearCache(self: *Workspace) void {
     var it = self.cache.iterator();
     while (it.next()) |entry| {
-        common.deinitArtifact(self.alloc, entry.value_ptr.artifact);
+        common.deinitBytecode(self.alloc, entry.value_ptr.bytecode);
         common.freeSymbols(self.alloc, entry.value_ptr.symbols);
         if (entry.value_ptr.warnings) |*w| w.deinit(self.alloc);
     }

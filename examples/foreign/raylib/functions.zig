@@ -3,17 +3,17 @@
 const revo = @import("revo");
 const rl = @import("raylib");
 
-const ext = revo.ext;
-const T = ext.T;
-const VM = ext.VM;
-const Data = ext.Data;
-const HostResult = ext.HostResult;
+const extension = revo.extension;
+const Args = extension.ArgTypes;
+const VM = extension.VM;
+const Value = extension.Value;
+const HostResult = extension.HostResult;
 
-const Alpha = T.Optional(.number, 255);
+const Alpha = Args.Optional(.number, 255);
 
 // -- helpers --
 
-fn color(r: T.number, g: T.number, b: T.number, a: Alpha) rl.Color {
+fn color(r: Args.number, g: Args.number, b: Args.number, a: Alpha) rl.Color {
     return .{
         .r = @intFromFloat(r),
         .g = @intFromFloat(g),
@@ -25,48 +25,48 @@ fn color(r: T.number, g: T.number, b: T.number, a: Alpha) rl.Color {
 const Impl = struct {
     // -- core --
 
-    pub fn init_window(vm: *VM, w: T.number, h: T.number, title: T.string) !HostResult {
-        const name = try ext.zstr(vm, title);
-        defer ext.freeZstr(vm, name);
+    pub fn init_window(vm: *VM, w: Args.number, h: Args.number, title: Args.string) !HostResult {
+        const name = try extension.zstr(vm, title);
+        defer extension.freeZstr(vm, name);
         rl.initWindow(@intFromFloat(w), @intFromFloat(h), name);
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn close_window(vm: *VM) !HostResult {
         _ = vm;
         rl.closeWindow();
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn window_should_close(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.windowShouldClose()));
+        return .data(Value.new.boolean(rl.windowShouldClose()));
     }
 
-    pub fn set_target_fps(vm: *VM, fps: T.number) !HostResult {
+    pub fn set_target_fps(vm: *VM, fps: Args.number) !HostResult {
         _ = vm;
         rl.setTargetFPS(@intFromFloat(fps));
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn get_fps(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getFPS()));
+        return .data(Value.new.num(rl.getFPS()));
     }
 
     pub fn get_frame_time(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getFrameTime()));
+        return .data(Value.new.num(rl.getFrameTime()));
     }
 
     pub fn get_screen_width(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getScreenWidth()));
+        return .data(Value.new.num(rl.getScreenWidth()));
     }
 
     pub fn get_screen_height(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getScreenHeight()));
+        return .data(Value.new.num(rl.getScreenHeight()));
     }
 
     // -- drawing --
@@ -74,47 +74,47 @@ const Impl = struct {
     pub fn begin_drawing(vm: *VM) !HostResult {
         _ = vm;
         rl.beginDrawing();
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn end_drawing(vm: *VM) !HostResult {
         _ = vm;
         rl.endDrawing();
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
-    pub fn clear_background(vm: *VM, r: T.number, g: T.number, b: T.number, a: Alpha) !HostResult {
+    pub fn clear_background(vm: *VM, r: Args.number, g: Args.number, b: Args.number, a: Alpha) !HostResult {
         _ = vm;
         rl.clearBackground(color(r, g, b, a));
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn draw_text(
         vm: *VM,
-        text: T.string,
-        x: T.number,
-        y: T.number,
-        size: T.number,
-        r: T.number,
-        g: T.number,
-        b: T.number,
+        text: Args.string,
+        x: Args.number,
+        y: Args.number,
+        size: Args.number,
+        r: Args.number,
+        g: Args.number,
+        b: Args.number,
         a: Alpha,
     ) !HostResult {
-        const t = try ext.zstr(vm, text);
-        defer ext.freeZstr(vm, t);
+        const t = try extension.zstr(vm, text);
+        defer extension.freeZstr(vm, t);
         rl.drawText(t, @intFromFloat(x), @intFromFloat(y), @intFromFloat(size), color(r, g, b, a));
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn draw_rectangle(
         vm: *VM,
-        x: T.number,
-        y: T.number,
-        w: T.number,
-        h: T.number,
-        r: T.number,
-        g: T.number,
-        b: T.number,
+        x: Args.number,
+        y: Args.number,
+        w: Args.number,
+        h: Args.number,
+        r: Args.number,
+        g: Args.number,
+        b: Args.number,
         a: Alpha,
     ) !HostResult {
         _ = vm;
@@ -125,34 +125,34 @@ const Impl = struct {
             @intFromFloat(h),
             color(r, g, b, a),
         );
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn draw_circle(
         vm: *VM,
-        cx: T.number,
-        cy: T.number,
-        radius: T.number,
-        r: T.number,
-        g: T.number,
-        b: T.number,
+        cx: Args.number,
+        cy: Args.number,
+        radius: Args.number,
+        r: Args.number,
+        g: Args.number,
+        b: Args.number,
         a: Alpha,
     ) !HostResult {
         _ = vm;
         rl.drawCircle(@intFromFloat(cx), @intFromFloat(cy), @floatCast(radius), color(r, g, b, a));
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     pub fn draw_line(
         vm: *VM,
-        x1: T.number,
-        y1: T.number,
-        x2: T.number,
-        y2: T.number,
-        thick: T.number,
-        r: T.number,
-        g: T.number,
-        b: T.number,
+        x1: Args.number,
+        y1: Args.number,
+        x2: Args.number,
+        y2: Args.number,
+        thick: Args.number,
+        r: Args.number,
+        g: Args.number,
+        b: Args.number,
         a: Alpha,
     ) !HostResult {
         _ = vm;
@@ -162,64 +162,64 @@ const Impl = struct {
             @floatCast(thick),
             color(r, g, b, a),
         );
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
-    pub fn draw_fps(vm: *VM, x: T.number, y: T.number) !HostResult {
+    pub fn draw_fps(vm: *VM, x: Args.number, y: Args.number) !HostResult {
         _ = vm;
         rl.drawFPS(@intFromFloat(x), @intFromFloat(y));
-        return .data(Data.new.nil());
+        return .data(Value.new.nil());
     }
 
     // -- input --
 
-    pub fn is_key_pressed(vm: *VM, key: T.number) !HostResult {
+    pub fn is_key_pressed(vm: *VM, key: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.isKeyPressed(@enumFromInt(@as(i32, @intFromFloat(key))))));
+        return .data(Value.new.boolean(rl.isKeyPressed(@enumFromInt(@as(i32, @intFromFloat(key))))));
     }
 
-    pub fn is_key_down(vm: *VM, key: T.number) !HostResult {
+    pub fn is_key_down(vm: *VM, key: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.isKeyDown(@enumFromInt(@as(i32, @intFromFloat(key))))));
+        return .data(Value.new.boolean(rl.isKeyDown(@enumFromInt(@as(i32, @intFromFloat(key))))));
     }
 
-    pub fn is_key_released(vm: *VM, key: T.number) !HostResult {
+    pub fn is_key_released(vm: *VM, key: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.isKeyReleased(@enumFromInt(@as(i32, @intFromFloat(key))))));
+        return .data(Value.new.boolean(rl.isKeyReleased(@enumFromInt(@as(i32, @intFromFloat(key))))));
     }
 
     pub fn get_key_pressed(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(@intFromEnum(rl.getKeyPressed())));
+        return .data(Value.new.num(@intFromEnum(rl.getKeyPressed())));
     }
 
-    pub fn is_mouse_button_pressed(vm: *VM, btn: T.number) !HostResult {
+    pub fn is_mouse_button_pressed(vm: *VM, btn: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.isMouseButtonPressed(@enumFromInt(@as(i32, @intFromFloat(btn))))));
+        return .data(Value.new.boolean(rl.isMouseButtonPressed(@enumFromInt(@as(i32, @intFromFloat(btn))))));
     }
 
-    pub fn is_mouse_button_down(vm: *VM, btn: T.number) !HostResult {
+    pub fn is_mouse_button_down(vm: *VM, btn: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.boolean(rl.isMouseButtonDown(@enumFromInt(@as(i32, @intFromFloat(btn))))));
+        return .data(Value.new.boolean(rl.isMouseButtonDown(@enumFromInt(@as(i32, @intFromFloat(btn))))));
     }
 
     pub fn get_mouse_x(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getMouseX()));
+        return .data(Value.new.num(rl.getMouseX()));
     }
 
     pub fn get_mouse_y(vm: *VM) !HostResult {
         _ = vm;
-        return .data(Data.new.num(rl.getMouseY()));
+        return .data(Value.new.num(rl.getMouseY()));
     }
 
     // -- text --
 
-    pub fn measure_text(vm: *VM, text: T.string, size: T.number) !HostResult {
-        const t = try ext.zstr(vm, text);
-        defer ext.freeZstr(vm, t);
-        return .data(Data.new.num(rl.measureText(t, @intFromFloat(size))));
+    pub fn measure_text(vm: *VM, text: Args.string, size: Args.number) !HostResult {
+        const t = try extension.zstr(vm, text);
+        defer extension.freeZstr(vm, t);
+        return .data(Value.new.num(rl.measureText(t, @intFromFloat(size))));
     }
 };
 
-pub export const revo_native_bindings_ex = ext.bindingsFor(Impl);
+pub export const revo_native_bindings_ex = extension.bindingsFor(Impl);

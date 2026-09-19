@@ -22,17 +22,17 @@ pub const debug_assert_types = false;
 
 pub const VM = @This();
 
-pub const Globals = std.AutoHashMap(GlobalID, Data);
-pub const ConstGlobals = std.AutoHashMap(GlobalID, void);
+pub const UserGlobals = std.AutoHashMap(GlobalID, Value);
+pub const FrozenGlobals = std.AutoHashMap(GlobalID, void);
 
-pub const ModuleStamp = struct {
+pub const ImportStamp = struct {
     mtime: u64,
     size: usize,
 };
 
-pub const ModuleCache = std.StringHashMap(struct {
-    result: Data,
-    stamp: ModuleStamp,
+pub const ImportCache = std.StringHashMap(struct {
+    result: Value,
+    stamp: ImportStamp,
 });
 
 pub const FiberID = usize;
@@ -47,11 +47,25 @@ pub const DebugInfo = struct {
 // main loop: run runnable fibers, wake sleepers
 // wait for io/timers if needed
 
+/// a single call frame. the hot fields (return_addr, base, program) come
+/// first so the dispatch loop's per-instruction frame reads hit the same
+/// offsets as the old dedicated hot frame; the cold fields are only touched
+/// on return, stack traces, and gc marking
+pub const Frame = struct {
+    return_addr: ProgramCounter,
+    base: usize,
+    program: []const revo.Instruction,
+    call_site_pc: ?ProgramCounter,
+    result_register: opcode.Register,
+    register_count: opcode.Register,
+    closure_id: ?mem.FunctionID,
+};
+
 /// quite a hefty struct,,, but its worth it
 pub const Fiber = struct {
     pub const OpenUpvalueRef = struct {
         slot_index: usize,
-        id: root.functions.UpvalueID,
+        id: root.callable.UpvalueID,
     };
 
     pub const WaitKey = struct {
@@ -71,7 +85,7 @@ pub const Fiber = struct {
     pc: ProgramCounter,
     program: []const Instruction,
     debug_info_id: ?DebugInfoID,
-    registers: []Data,
+    registers: []Value,
     registers_len: usize = 0,
     frames: std.ArrayList(Frame),
     /// cached base of the top frame; the dispatch loop reads this instead of
@@ -82,12 +96,12 @@ pub const Fiber = struct {
 
     running: bool,
     state: State,
-    in_runq: bool,
+    in_run_queue: bool,
     wait: WaitKind,
     /// woken value lands here when set, else it gets pushed on the stack
     parked_result_slot: ?usize,
     // will be set to no_result in init
-    result: Data = Data.new.nil(),
+    result: Value = Value.new.nil(),
     // error channel maybe
     err_atom: ?mem.AtomID = null,
     /// fibers joining on this one, woken at finish
@@ -109,7 +123,7 @@ pub const Fiber = struct {
     };
 
     pub fn init(alloc: std.mem.Allocator, id: FiberID, program: []const Instruction, reg_count: usize) !Fiber {
-        const registers = try alloc.alloc(Data, reg_count);
+        const registers = try alloc.alloc(Value, reg_count);
         errdefer alloc.free(registers);
         var frames = try std.ArrayList(Frame).initCapacity(alloc, INITIAL_HOT_FRAMES);
         errdefer frames.deinit(alloc);
@@ -127,11 +141,11 @@ pub const Fiber = struct {
             .open_upvalues = open_upvalues,
             .running = false,
             .state = .ready,
-            .in_runq = false,
+            .in_run_queue = false,
             .wait = .none,
             .parked_result_slot = null,
             .waiters = waiters,
-            .result = revo.Data.new.core(.nil),
+            .result = revo.Value.new.core(.nil),
             .pending_host = null,
         };
 
@@ -161,30 +175,30 @@ gil: Scheduler.SpinLock = .{},
 /// workers set this and stop the pool on first failure
 mt_failed: std.atomic.Value(bool) = .init(false),
 /// the failure itself, reported by the main thread
-mt_failure: ?EvalFailure = null,
+mt_failure: ?RunFailure = null,
 /// how deep runReport is nested; idle math exempts our own quanta
 run_depth: usize = 0,
 
-constants: std.ArrayList(Data),
-stdlib_globals: Globals,
-/// iface specs loaded at init; released by `deinit` through `api.freeLoadedSpecs`
-loaded_specs: []const []const revo.std_lib.api.FnSpec = &.{},
+constants: std.ArrayList(Value),
+builtin_globals: UserGlobals,
+/// iface specs loaded at init; released by `deinit` through `specs.freeLoadedSpecs`
+loaded_specs: []const []const revo.baselib.specs.FnSpec = &.{},
 tables: TablePool,
-functions: FunctionPool,
+callable: FunctionPool,
 strings: Interner,
 atoms: std.StringHashMap(mem.AtomID),
 debug: DebugOptions = .{},
-globals: Globals,
-const_globals: ConstGlobals,
-module_dir: ?[]const u8,
+user_globals: UserGlobals,
+frozen_globals: FrozenGlobals,
+import_dir: ?[]const u8,
 project_root: []const u8 = "",
 loading_stack: std.ArrayList([]const u8),
 
-/// indexed by @intFromEnum(mem.Type); tags are non-contiguous (0, 8-13)
+/// indexed by @intFromEnum(mem.ValueTag); tags are non-contiguous (0, 8-13)
 metatables: [
-    @as(usize, @intFromEnum(memory.Type.foreign)) + 1
+    @as(usize, @intFromEnum(memory.ValueTag.@"opaque")) + 1
 ]?mem.TableID = @splat(null),
-module_cache: ModuleCache,
+import_cache: ImportCache,
 package_path: std.ArrayList([]const u8),
 debug_infos: std.ArrayList(DebugInfo),
 pending_debug_info_id: ?DebugInfoID = null,
@@ -212,19 +226,19 @@ gc_pause_factor: usize = 4,
 gc_nursery_threshold: usize = 8 * 1024 * 1024,
 
 gc_mark_stack: std.ArrayList(MarkItem),
-gc_finalizers: std.AutoHashMap(mem.TableID, Data),
+gc_finalizers: std.AutoHashMap(mem.TableID, Value),
 gc_in_finalizer: bool = false,
 
 /// pinned for c callers (`revo_ref`), roots til `revo_unref`
 /// , ids monotonic, never reused, 0 never valid
-c_refs: std.AutoHashMap(u64, Data),
+c_refs: std.AutoHashMap(u64, Value),
 c_ref_next: u64 = 1,
 
 const MarkItem = union(enum) {
-    data: Data,
+    data: Value,
     table: mem.TableID,
     function: mem.FunctionID,
-    upvalue: root.functions.UpvalueID,
+    upvalue: root.callable.UpvalueID,
 };
 
 /// nonblocking self-pipe for scheduler wakeups
@@ -261,12 +275,12 @@ pub fn init(runtime: revo.Runtime) !VM {
     var sched = try Scheduler.init(rt.alloc);
     errdefer sched.deinit();
     sched.thread_count = rt.threads;
-    var constants = try std.ArrayList(Data).initCapacity(rt.alloc, 16);
+    var constants = try std.ArrayList(Value).initCapacity(rt.alloc, 16);
     errdefer constants.deinit(rt.alloc);
     var tables = try TablePool.init(rt.alloc);
     errdefer tables.deinit();
-    var functions = try FunctionPool.init(rt.alloc);
-    errdefer functions.deinit();
+    var callable = try FunctionPool.init(rt.alloc);
+    errdefer callable.deinit();
     var strings = try Interner.init(rt.alloc);
     errdefer strings.deinit();
     var package_path = try std.ArrayList([]const u8).initCapacity(rt.alloc, 4);
@@ -282,23 +296,23 @@ pub fn init(runtime: revo.Runtime) !VM {
         .runtime = rt,
         .sched = sched,
         .constants = constants,
-        .stdlib_globals = Globals.init(rt.alloc),
+        .builtin_globals = UserGlobals.init(rt.alloc),
         .tables = tables,
-        .functions = functions,
+        .callable = callable,
         .strings = strings,
         .atoms = std.StringHashMap(mem.AtomID).init(rt.alloc),
-        .module_cache = ModuleCache.init(rt.alloc),
+        .import_cache = ImportCache.init(rt.alloc),
         .package_path = package_path,
         .debug_infos = debug_infos,
-        .globals = Globals.init(rt.alloc),
-        .const_globals = ConstGlobals.init(rt.alloc),
-        .module_dir = null,
+        .user_globals = UserGlobals.init(rt.alloc),
+        .frozen_globals = FrozenGlobals.init(rt.alloc),
+        .import_dir = null,
         .loaded_specs = &.{},
         .loading_stack = loading_stack,
         .loaded_extensions = .empty,
         .gc_mark_stack = gc_mark_stack,
-        .gc_finalizers = std.AutoHashMap(mem.TableID, Data).init(rt.alloc),
-        .c_refs = std.AutoHashMap(u64, Data).init(rt.alloc),
+        .gc_finalizers = std.AutoHashMap(mem.TableID, Value).init(rt.alloc),
+        .c_refs = std.AutoHashMap(u64, Value).init(rt.alloc),
     };
     if (revo.can_async) {
         if (makeWakeupPipe()) |fds| {
@@ -314,12 +328,12 @@ pub fn init(runtime: revo.Runtime) !VM {
         .pc = 0,
         .program = &.{},
         .debug_info_id = null,
-        .registers = try runtime.alloc.alloc(Data, INIT_REG_COUNT),
+        .registers = try runtime.alloc.alloc(Value, INIT_REG_COUNT),
         .frames = try std.ArrayList(Frame).initCapacity(runtime.alloc, INITIAL_HOT_FRAMES),
         .running = false,
         .open_upvalues = try std.ArrayList(Fiber.OpenUpvalueRef).initCapacity(runtime.alloc, 1),
         .state = .ready,
-        .in_runq = false,
+        .in_run_queue = false,
         .wait = .none,
         .parked_result_slot = null,
         .waiters = try std.ArrayList(FiberID).initCapacity(runtime.alloc, 1),
@@ -327,10 +341,10 @@ pub fn init(runtime: revo.Runtime) !VM {
 
     // set initial fiber result to no_result
     // after core atoms are initialized
-    vm.sched.fibers.items[0].result = revo.Data.new.core(.no_result);
+    vm.sched.fibers.items[0].result = revo.Value.new.core(.no_result);
 
-    try revo.std_lib.register_stdlib(&vm);
-    try revo.lang.proc.register(&vm);
+    try revo.baselib.register_baselib(&vm);
+    try revo.lang.macro_proc.register(&vm);
 
     return vm;
 }
@@ -392,10 +406,10 @@ pub fn deinit(self: *VM) void {
     }
 
     self.constants.deinit(self.runtime.alloc);
-    self.globals.deinit();
-    self.const_globals.deinit();
-    self.stdlib_globals.deinit();
-    revo.std_lib.api.freeLoadedSpecs(self.runtime.alloc, self.loaded_specs);
+    self.user_globals.deinit();
+    self.frozen_globals.deinit();
+    self.builtin_globals.deinit();
+    revo.baselib.specs.freeLoadedSpecs(self.runtime.alloc, self.loaded_specs);
 
     for (self.loading_stack.items) |path|
         self.runtime.alloc.free(path);
@@ -409,7 +423,7 @@ pub fn deinit(self: *VM) void {
             const func = entry.value_ptr.*;
             if (id < self.tables.tables.items.len) {
                 if (self.tables.tables.items[id] != null) {
-                    _ = self.callFunctionParts(func, null, &.{Data.new.table(id)}, null) catch {};
+                    _ = self.callFunctionParts(func, null, &.{Value.new.table(id)}, null) catch {};
                 }
             }
         }
@@ -418,7 +432,7 @@ pub fn deinit(self: *VM) void {
     self.c_refs.deinit();
     self.sched.deinit();
     self.tables.deinit();
-    self.functions.deinit();
+    self.callable.deinit();
     self.strings.deinit();
     self.atoms.deinit();
 
@@ -431,11 +445,11 @@ pub fn deinit(self: *VM) void {
     self.package_path.deinit(self.runtime.alloc);
     if (self.project_root.len > 0) self.runtime.alloc.free(self.project_root);
 
-    var cache_it = self.module_cache.keyIterator();
+    var cache_it = self.import_cache.keyIterator();
     while (cache_it.next()) |key|
         self.runtime.alloc.free(key.*);
 
-    self.module_cache.deinit();
+    self.import_cache.deinit();
 
     if (!revo.is_freestanding) {
         for (self.loaded_extensions.items) |*lib| {
@@ -449,7 +463,7 @@ pub fn deinit(self: *VM) void {
 }
 
 /// func runs when the table gets swept
-pub fn registerFinalizer(self: *VM, table_id: mem.TableID, func: Data) !void {
+pub fn registerFinalizer(self: *VM, table_id: mem.TableID, func: Value) !void {
     try self.gc_finalizers.put(table_id, func);
 }
 
@@ -462,7 +476,7 @@ pub fn hasFinalizer(self: *VM, table_id: mem.TableID) bool {
     return self.gc_finalizers.contains(table_id);
 }
 
-pub fn moduleStamp(self: *VM, path: []const u8) !ModuleStamp {
+pub fn importStamp(self: *VM, path: []const u8) !ImportStamp {
     const stat = try std.Io.Dir.cwd().statFile(self.runtime.io, path, .{});
     return .{
         .mtime = @intCast(stat.mtime.toNanoseconds()),
@@ -470,15 +484,15 @@ pub fn moduleStamp(self: *VM, path: []const u8) !ModuleStamp {
     };
 }
 
-pub fn invalidateModuleCache(self: *VM, path: []const u8) bool {
-    if (self.module_cache.fetchRemove(path)) |entry| {
+pub fn invalidateImportCache(self: *VM, path: []const u8) bool {
+    if (self.import_cache.fetchRemove(path)) |entry| {
         self.runtime.alloc.free(entry.key);
         return true;
     }
     return false;
 }
 
-pub fn addConstant(self: *VM, val: Data) !ConstantID {
+pub fn addConstant(self: *VM, val: Value) !ConstantID {
     const idx: ConstantID = @intCast(self.constants.items.len);
     try self.constants.append(self.runtime.alloc, val);
     return idx;
@@ -490,21 +504,21 @@ pub fn addConstant(self: *VM, val: Data) !ConstantID {
 
 // TODO: make a pools field, move all pools there
 /// dupes yours
-pub fn ownDataString(self: *VM, value: []const u8) !Data {
-    return Data.new.str(try self.strings.own(value));
+pub fn ownValueString(self: *VM, value: []const u8) !Value {
+    return Value.new.str(try self.strings.own(value));
 }
 
 /// kills yours
-pub fn adoptDataString(self: *VM, value: []u8) !Data {
-    return Data.new.str(try self.strings.adopt(value));
+pub fn adoptValueString(self: *VM, value: []u8) !Value {
+    return Value.new.str(try self.strings.adopt(value));
 }
 
-pub fn adoptDataStringNoDedup(self: *VM, value: []u8) !Data {
-    return Data.new.str(try self.strings.adoptNoDedup(value));
+pub fn adoptValueStringNoDedup(self: *VM, value: []u8) !Value {
+    return Value.new.str(try self.strings.adoptNoDedup(value));
 }
 
-pub fn ownDataStringNoDedup(self: *VM, value: []const u8) !Data {
-    return Data.new.str(try self.strings.ownNoDedup(value));
+pub fn ownValueStringNoDedup(self: *VM, value: []const u8) !Value {
+    return Value.new.str(try self.strings.ownNoDedup(value));
 }
 
 pub fn stringValue(self: *VM, id: mem.StringID) []const u8 {
@@ -517,24 +531,24 @@ pub fn stringValue(self: *VM, id: mem.StringID) []const u8 {
 /// single-shot array table from items
 /// ; no calls happen between create and fill
 /// so callers must pass a side buffer, never pool-borrowed memory
-pub fn tableOfSlice(self: *VM, val: []const Data) !Data {
+pub fn tableOfSlice(self: *VM, val: []const Value) !Value {
     const id = try self.tables.create();
     const ptr = try self.tables.get(id);
     try ptr.array.appendSlice(self.runtime.alloc, val);
-    return Data.new.table(id);
+    return Value.new.table(id);
 }
 
 /// `{:tag, payload}` result table, the `{:ok, v}` / `{:err, e}` shape
-pub fn resultTable(self: *VM, tag: revo.core_atoms, payload: Data) !Data {
-    return self.tableOfSlice(&[_]Data{
-        Data.new.atom(tag.atomId()),
+pub fn resultTable(self: *VM, tag: revo.CoreAtoms, payload: Value) !Value {
+    return self.tableOfSlice(&[_]Value{
+        Value.new.atom(tag.atomId()),
         payload,
     });
 }
 
 /// split of a `{:tag, ...}` table: tag in [0], payload in [1] when present
-pub const ResultParts = struct { tag: Data, payload: ?Data, len: usize };
-pub fn resultParts(self: *VM, val: Data) ?ResultParts {
+pub const ResultParts = struct { tag: Value, payload: ?Value, len: usize };
+pub fn resultParts(self: *VM, val: Value) ?ResultParts {
     const tid = val.asTable() orelse return null;
     const t = self.tables.get(tid) catch return null;
     if (t.array.items.len == 0) return null;
@@ -546,28 +560,28 @@ pub fn resultParts(self: *VM, val: Data) ?ResultParts {
 }
 
 /// `:err` table check, for `?`, `orelse`, jumps, `try`
-pub fn isErrTable(self: *VM, val: Data) bool {
+pub fn isErrTable(self: *VM, val: Value) bool {
     const parts = self.resultParts(val) orelse return false;
     const atom = parts.tag.asAtom() orelse return false;
-    return atom == revo.core_atoms.atomId(.err);
+    return atom == revo.CoreAtoms.atomId(.err);
 }
 
 /// `:ok` table check, pairs `isErrTable`
-pub fn isOkTable(self: *VM, val: Data) bool {
+pub fn isOkTable(self: *VM, val: Value) bool {
     const parts = self.resultParts(val) orelse return false;
     const atom = parts.tag.asAtom() orelse return false;
-    return atom == revo.core_atoms.atomId(.ok);
+    return atom == revo.CoreAtoms.atomId(.ok);
 }
 
 /// named-field write without the intern dance
-pub fn putField(self: *VM, tid: mem.TableID, name: []const u8, val: Data) !void {
+pub fn putField(self: *VM, tid: mem.TableID, name: []const u8, val: Value) !void {
     const t = try self.tables.get(tid);
     try t.putRawAtom(try self.internAtom(name), val, self);
 }
 
 /// named-field raw read, null when missing or not a table
 /// never interns, so core names resolve even if nothing interned them yet
-pub fn getField(self: *VM, val: Data, name: []const u8) ?Data {
+pub fn getField(self: *VM, val: Value, name: []const u8) ?Value {
     const tid = val.asTable() orelse return null;
     const t = self.tables.get(tid) catch return null;
     const id = self.atoms.get(name) orelse self.strings.lookup(name) orelse return null;
@@ -575,22 +589,22 @@ pub fn getField(self: *VM, val: Data, name: []const u8) ?Data {
 }
 
 /// remove a named field, false when missing or not a table
-pub fn removeField(self: *VM, val: Data, name: []const u8) bool {
+pub fn removeField(self: *VM, val: Value, name: []const u8) bool {
     const tid = val.asTable() orelse return false;
     const t = self.tables.get(tid) catch return false;
     const id = self.atoms.get(name) orelse self.strings.lookup(name) orelse return false;
-    return t.remove(Data.new.atom(id), self);
+    return t.remove(Value.new.atom(id), self);
 }
 
 /// array-part read with bounds check, null when out of range
-pub fn arrayGet(self: *VM, tid: mem.TableID, idx: usize) ?Data {
+pub fn arrayGet(self: *VM, tid: mem.TableID, idx: usize) ?Value {
     const t = self.tables.get(tid) catch return null;
     if (idx >= t.array.items.len) return null;
     return t.array.items[idx];
 }
 
 /// deep copy of a table: array part in order, then keyed entries
-pub fn copyTable(self: *VM, src: mem.TableID) !Data {
+pub fn copyTable(self: *VM, src: mem.TableID) !Value {
     const s = try self.tables.get(src);
     const id = try self.tables.create();
     const d = try self.tables.get(id);
@@ -600,23 +614,23 @@ pub fn copyTable(self: *VM, src: mem.TableID) !Data {
 
     while (it.next()) |entry|
         try d.putRaw(entry.key, entry.value, self);
-    return Data.new.table(id);
+    return Value.new.table(id);
 }
 
-pub fn push(self: *VM, val: Data) !void {
+pub fn push(self: *VM, val: Value) !void {
     const fiber = self.currentFiber();
     try ensureRegCapacity(fiber, self.runtime.alloc, fiber.registers_len + 1);
     fiber.registers[fiber.registers_len] = val;
     fiber.registers_len += 1;
 }
 
-pub fn currentResult(self: *VM) Data {
+pub fn currentResult(self: *VM) Value {
     const fiber = self.currentFiber();
     if (fiber.registers_len > 0) return fiber.registers[fiber.registers_len - 1];
     return fiber.result;
 }
 
-pub inline fn mainResult(self: *VM) Data {
+pub inline fn mainResult(self: *VM) Value {
     const fiber = self.mainFiber();
     if (fiber.registers_len > 0) return fiber.registers[fiber.registers_len - 1];
     return fiber.result;
@@ -654,7 +668,7 @@ pub inline fn schedNowMonotonicNs(self: *VM) u64 {
 //
 // slot helpers
 //
-pub fn pop(self: *VM) !Data {
+pub fn pop(self: *VM) !Value {
     const fiber = self.currentFiber();
     if (fiber.registers_len == 0) return error.StackUnderflow;
     fiber.registers_len -= 1;
@@ -672,27 +686,27 @@ fn ensureAbsoluteSlot(self: *VM, slot: usize) !void {
     try ensureRegCapacity(fiber, self.runtime.alloc, slot + 1);
     if (slot < fiber.registers_len) return;
     const old_len = fiber.registers_len;
-    @memset(fiber.registers[old_len .. slot + 1], revo.Data.new.core(.missing));
+    @memset(fiber.registers[old_len .. slot + 1], revo.Value.new.core(.missing));
     fiber.registers_len = slot + 1;
 }
 
 /// call when slot is valid and capacity is enough
-pub inline fn writeRegisterUnsafe(self: *VM, slot: usize, value: Data) void {
+pub inline fn writeRegisterUnsafe(self: *VM, slot: usize, value: Value) void {
     self.currentFiber().registers[slot] = value;
 }
 
 /// register read using a cached slots pointer (avoids currentFiber call)
-pub inline fn regRead(slots: []const Data, base: usize, reg: opcode.Register) Data {
+pub inline fn regRead(slots: []const Value, base: usize, reg: opcode.Register) Value {
     if (builtin.mode != .ReleaseFast) {
         const slot = base + reg;
         if (slot >= slots.len)
-            return revo.Data.new.core(.missing);
+            return revo.Value.new.core(.missing);
     }
     return slots[base + reg];
 }
 
 /// register write using a cached slots pointer (avoids currentFiber call)
-pub inline fn regWrite(slots: []Data, base: usize, reg: opcode.Register, value: Data) void {
+pub inline fn regWrite(slots: []Value, base: usize, reg: opcode.Register, value: Value) void {
     if (builtin.mode != .ReleaseFast) {
         const slot = base + reg;
         if (slot >= slots.len)
@@ -704,7 +718,7 @@ pub inline fn regWrite(slots: []Data, base: usize, reg: opcode.Register, value: 
 
 /// avoid recomputing currentFrame() repeatedly
 /// callers should cache `base = frame.base`
-pub inline fn writeRegisterFast(self: *VM, base: usize, reg: opcode.Register, value: Data) !void {
+pub inline fn writeRegisterFast(self: *VM, base: usize, reg: opcode.Register, value: Value) !void {
     const slot = base + reg;
     self.writeRegisterUnsafe(slot, value);
 }
@@ -717,46 +731,46 @@ pub fn internAtom(self: *VM, name: []const u8) !mem.AtomID {
     return id;
 }
 
-pub fn dataAtom(self: *VM, name: []const u8) !Data {
-    return Data.new.atom(try self.internAtom(name));
+pub fn atomValue(self: *VM, name: []const u8) !Value {
+    return Value.new.atom(try self.internAtom(name));
 }
 
-pub fn setGlobal(self: *VM, name: []const u8, val: Data) !void {
+pub fn setGlobal(self: *VM, name: []const u8, val: Value) !void {
     const id = try self.internAtom(name);
-    try self.globals.put(id, val);
+    try self.user_globals.put(id, val);
 }
 
 //
-// stdlib reg
+// baselib reg
 //
 
 /// install a Host fn on the heap. name fills the function's name
 /// field (stack traces, mt keys)
-pub fn installHost(self: *VM, name: []const u8, func: revo.std_lib.HostFunc) !mem.FunctionID {
+pub fn installHost(self: *VM, name: []const u8, func: revo.baselib.host.HostFunc) !mem.FunctionID {
     var f = func;
     f.name = name;
-    return self.functions.create(.{ .host = f });
+    return self.callable.create(.{ .host = f });
 }
 
-/// register a function as a global. also records in stdlib_globals so
+/// register a function as a global. also records in builtin_globals so
 /// repl reset can replay the same set
 pub fn registerGlobal(self: *VM, name: []const u8, fn_id: mem.FunctionID) !void {
     const atom = try self.internAtom(name);
-    const val = Data.new.function(fn_id);
-    try self.globals.put(atom, val);
-    try self.stdlib_globals.put(atom, val);
+    const val = Value.new.function(fn_id);
+    try self.user_globals.put(atom, val);
+    try self.builtin_globals.put(atom, val);
 }
 
 /// get or create a module table and install it as a global
 pub fn ensureModule(self: *VM, name: []const u8) !mem.TableID {
     const atom = try self.internAtom(name);
-    if (self.globals.get(atom)) |existing| {
+    if (self.user_globals.get(atom)) |existing| {
         if (existing.asTable()) |tid| return tid;
     }
     const tid = try self.tables.create();
-    const val = Data.new.table(tid);
-    try self.globals.put(atom, val);
-    try self.stdlib_globals.put(atom, val);
+    const val = Value.new.table(tid);
+    try self.user_globals.put(atom, val);
+    try self.builtin_globals.put(atom, val);
     return tid;
 }
 
@@ -768,12 +782,12 @@ pub fn putInTable(
     fn_id: mem.FunctionID,
 ) !void {
     const t = try self.tables.get(table_id);
-    try t.putRawAtom(atom, Data.new.function(fn_id), self);
+    try t.putRawAtom(atom, Value.new.function(fn_id), self);
 }
 
-pub inline fn getGlobal(self: *VM, name: []const u8) ?Data {
-    if (self.atoms.get(name)) |id| return self.globals.get(id);
-    return revo.Data.new.core(.undef);
+pub inline fn getGlobal(self: *VM, name: []const u8) ?Value {
+    if (self.atoms.get(name)) |id| return self.user_globals.get(id);
+    return revo.Value.new.core(.undef);
 }
 
 pub fn setProgramDebugInfo(
@@ -832,7 +846,7 @@ pub fn spanAtPc(self: *VM, info: *const DebugInfo, pc: ProgramCounter) ?Span {
 
 fn frameName(self: *VM, closure_id: ?mem.FunctionID) []const u8 {
     const id = closure_id orelse return "<entry>";
-    const func = self.functions.get(id) catch return "<dead>";
+    const func = self.callable.get(id) catch return "<dead>";
     return switch (func.*) {
         .closure => |closure| if (std.mem.eql(u8, closure.name, "__main")) "<module>" else closure.name,
         .host => |f| f.name,
@@ -853,7 +867,7 @@ pub fn setPanicMessageOwned(self: *VM, message: []u8) void {
 /// set the panic message + source span from an `:err` table's message
 /// item (payload, skipped when absent); `pc` points one past the instruction
 /// that produced the error
-pub fn panicFromErrPayload(self: *VM, payload: ?Data, pc: usize) error{ OutOfMemory, Panic }!void {
+pub fn panicFromErrPayload(self: *VM, payload: ?Value, pc: usize) error{ OutOfMemory, Panic }!void {
     if (payload) |p| {
         var buf = std.Io.Writer.Allocating.init(self.runtime.alloc);
         defer buf.deinit();
@@ -915,22 +929,22 @@ pub fn clearRuntimeMessage(self: *VM) void {
 }
 
 /// shorthand for TypeError with "want X, got Y"
-pub fn typeError(self: *VM, comptime expected: []const u8, got: mem.Data) EvalFailure {
+pub fn typeError(self: *VM, comptime expected: []const u8, got: mem.Value) RunFailure {
     const msg = std.fmt.allocPrint(
         self.runtime.alloc,
         "want {s}, got {s}",
         .{ expected, @tagName(got.tag()) },
-    ) catch return self.evalFailure(error.TypeError);
+    ) catch return self.runFailure(error.TypeError);
 
     self.setRuntimeMessageOwned(msg);
-    return self.evalFailure(error.TypeError);
+    return self.runFailure(error.TypeError);
 }
 
-pub fn fail(self: *VM, comptime err: EvalError, comptime fmt: []const u8, args: anytype) EvalFailure {
+pub fn fail(self: *VM, comptime err: RunError, comptime fmt: []const u8, args: anytype) RunFailure {
     const msg = std.fmt.allocPrint(self.runtime.alloc, fmt, args) catch
-        return self.evalFailure(err);
+        return self.runFailure(err);
     self.setRuntimeMessageOwned(msg);
-    return self.evalFailure(err);
+    return self.runFailure(err);
 }
 
 pub fn currentFrame(self: *VM) !*Frame {
@@ -938,14 +952,14 @@ pub fn currentFrame(self: *VM) !*Frame {
     return &self.currentFiber().frames.items[self.currentFiber().frames.items.len - 1];
 }
 
-pub inline fn currentClosure(self: *VM) !?*root.functions.Closure {
+pub inline fn currentClosure(self: *VM) !?*root.callable.Closure {
     return self.currentClosureIn(self.currentFiber());
 }
 
 /// currentClosure without re deriving the fiber
 ///
 /// dispatch already has it, and these run per upvalue access on hot paths
-pub inline fn currentClosureIn(self: *VM, fiber: *Fiber) !?*root.functions.Closure {
+pub inline fn currentClosureIn(self: *VM, fiber: *Fiber) !?*root.callable.Closure {
     if (fiber.frames.items.len == 0) return error.FrameUnderflow;
     const frame = &fiber.frames.items[fiber.frames.items.len - 1];
     const closure_id = frame.closure_id orelse return null;
@@ -958,24 +972,24 @@ pub inline fn currentClosureIn(self: *VM, fiber: *Fiber) !?*root.functions.Closu
 }
 
 /// open upvalues stay sorted by slot, closers pop from the end
-pub inline fn captureUpvalue(self: *VM, slot_index: usize) !root.functions.UpvalueID {
+pub inline fn captureUpvalue(self: *VM, slot_index: usize) !root.callable.UpvalueID {
     const fiber = self.currentFiber();
     const open = &fiber.open_upvalues;
     for (open.items, 0..) |entry, idx| {
         if (entry.slot_index == slot_index) return entry.id;
         if (entry.slot_index > slot_index) {
-            const upvalue_id = try self.functions.createUpvalue(.{
+            const upvalue_id = try self.callable.createUpvalue(.{
                 .open_index = slot_index,
-                .closed = revo.Data.new.core(.missing),
+                .closed = revo.Value.new.core(.missing),
                 .owner_fiber_id = fiber.id,
             });
             try open.insert(self.runtime.alloc, idx, .{ .slot_index = slot_index, .id = upvalue_id });
             return upvalue_id;
         }
     }
-    const upvalue_id = try self.functions.createUpvalue(.{
+    const upvalue_id = try self.callable.createUpvalue(.{
         .open_index = slot_index,
-        .closed = revo.Data.new.core(.missing),
+        .closed = revo.Value.new.core(.missing),
         .owner_fiber_id = fiber.id,
     });
     try open.append(self.runtime.alloc, .{ .slot_index = slot_index, .id = upvalue_id });
@@ -996,7 +1010,7 @@ pub fn closeUpvalueList(self: *VM, fiber: *Fiber, from_index: usize) !void {
         const entry = open.items[last_idx];
         if (entry.slot_index < from_index) break;
 
-        const upvalue = try self.functions.getUpvalue(entry.id);
+        const upvalue = try self.callable.getUpvalue(entry.id);
         if (upvalue.open_index) |slot_index| {
             upvalue.closed = fiber.registers[slot_index];
             upvalue.open_index = null;
@@ -1005,8 +1019,8 @@ pub fn closeUpvalueList(self: *VM, fiber: *Fiber, from_index: usize) !void {
     }
 }
 
-pub inline fn loadUpvalueData(self: *VM, upvalue_id: root.functions.UpvalueID) !Data {
-    const upvalue = try self.functions.getUpvalue(upvalue_id);
+pub inline fn loadUpvalueValue(self: *VM, upvalue_id: root.callable.UpvalueID) !Value {
+    const upvalue = try self.callable.getUpvalue(upvalue_id);
     if (upvalue.open_index) |slot_index| {
         const fid = upvalue.owner_fiber_id orelse return upvalue.closed;
         return self.sched.fibers.items[fid].registers[slot_index];
@@ -1014,13 +1028,13 @@ pub inline fn loadUpvalueData(self: *VM, upvalue_id: root.functions.UpvalueID) !
     return upvalue.closed;
 }
 
-pub inline fn storeUpvalueData(self: *VM, upvalue_id: root.functions.UpvalueID, value: Data) !void {
-    return self.storeUpvalueDataIn(self.currentFiber(), upvalue_id, value);
+pub inline fn storeUpvalueValue(self: *VM, upvalue_id: root.callable.UpvalueID, value: Value) !void {
+    return self.storeUpvalueValueIn(self.currentFiber(), upvalue_id, value);
 }
 
-/// storeUpvalueData without re deriving the fiber( dispatch already has it)
-pub inline fn storeUpvalueDataIn(self: *VM, fiber: *Fiber, upvalue_id: root.functions.UpvalueID, value: Data) !void {
-    const upvalue = try self.functions.getUpvalue(upvalue_id);
+/// storeUpvalueValue without re deriving the fiber( dispatch already has it)
+pub inline fn storeUpvalueValueIn(self: *VM, fiber: *Fiber, upvalue_id: root.callable.UpvalueID, value: Value) !void {
+    const upvalue = try self.callable.getUpvalue(upvalue_id);
     if (upvalue.open_index) |slot_index| {
         // open upvalues live in the owner's registers
         // ; shared closures can run cross-fiber, so that need not be us
@@ -1037,7 +1051,7 @@ pub inline fn storeUpvalueDataIn(self: *VM, fiber: *Fiber, upvalue_id: root.func
 
 /// snapshot upvalues per child, so loopscope reuse never leaks into an offspring
 fn detachClosureForFiber(self: *VM, closure_id: mem.FunctionID) !mem.FunctionID {
-    const func = try self.functions.get(closure_id);
+    const func = try self.callable.get(closure_id);
     const closure = switch (func.*) {
         .closure => |value| value,
         .host, .c_function => return closure_id,
@@ -1048,7 +1062,7 @@ fn detachClosureForFiber(self: *VM, closure_id: mem.FunctionID) !mem.FunctionID 
     //   writes to the same register slot
     //     (next loop iteration, scope reuse)
     //   leak into the child fiber
-    var detached = try std.ArrayList(root.functions.UpvalueID).initCapacity(
+    var detached = try std.ArrayList(root.callable.UpvalueID).initCapacity(
         self.runtime.alloc,
         closure.upvalues.len,
     );
@@ -1057,15 +1071,15 @@ fn detachClosureForFiber(self: *VM, closure_id: mem.FunctionID) !mem.FunctionID 
     for (closure.upvalues) |upvalue_id| {
         try detached.append(
             self.runtime.alloc,
-            try self.functions.createUpvalue(.{
+            try self.callable.createUpvalue(.{
                 .open_index = null,
-                .closed = try self.loadUpvalueData(upvalue_id),
+                .closed = try self.loadUpvalueValue(upvalue_id),
                 .owner_fiber_id = null,
             }),
         );
     }
 
-    return self.functions.createClosure(closure.prototype, detached.items);
+    return self.callable.createClosure(closure.template, detached.items);
 }
 
 /// `result_reg` is a register (relative to the caller frame's base) where a
@@ -1073,7 +1087,7 @@ fn detachClosureForFiber(self: *VM, closure_id: mem.FunctionID) !mem.FunctionID 
 /// value through dispatch instructions (index, concat, call) pass the
 /// instruction's result register so a park mid-callee resumes with the value
 /// in place; callers that discard or consume the result directly pass null.
-pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []const Data, result_reg: ?opcode.Register) EvalError!Data {
+pub fn callFunctionParts(self: *VM, callee: Value, maybe_first: ?Value, args: []const Value, result_reg: ?opcode.Register) RunError!Value {
     self.host_call_depth += 1;
     defer self.host_call_depth -= 1;
 
@@ -1138,7 +1152,7 @@ pub fn callFunctionParts(self: *VM, callee: Data, maybe_first: ?Data, args: []co
 
     fiber = self.sched.fibers.items[fiber_id];
     if (fiber.frames.items.len > caller_frame_depth) {
-        const exec_result = vm_exec.execFiberUntilDepth(self, caller_frame_depth) catch |e| {
+        const exec_result = vm_dispatch.execFiberUntilDepth(self, caller_frame_depth) catch |e| {
             fiber = self.sched.fibers.items[fiber_id];
             if (e == error.Parked) {
                 self.rerouteParked(fiber, base, caller_frame_depth, result_reg);
@@ -1185,9 +1199,9 @@ fn rerouteParked(self: *VM, fiber: *Fiber, base: usize, caller_frame_depth: usiz
     }
 }
 
-pub fn evalFailure(self: *VM, err: EvalError) EvalFailure {
-    const kind: EvalErrorKind = switch (err) {
-        inline else => |tag| @field(EvalErrorKind, @errorName(tag)),
+pub fn runFailure(self: *VM, err: RunError) RunFailure {
+    const kind: RunErrorKind = switch (err) {
+        inline else => |tag| @field(RunErrorKind, @errorName(tag)),
     };
 
     const info = self.currentDebugInfo();
@@ -1211,7 +1225,7 @@ pub fn evalFailure(self: *VM, err: EvalError) EvalFailure {
     else
         kind.message();
 
-    var failure = EvalFailure{
+    var failure = RunFailure{
         .kind = kind,
         .report = .{
             .message = message,
@@ -1223,7 +1237,7 @@ pub fn evalFailure(self: *VM, err: EvalError) EvalFailure {
     var out_idx: usize = 0;
     var i = frames.len;
     while (i > 0 and
-        out_idx < EvalFailure.max_trace_frames)
+        out_idx < RunFailure.max_trace_frames)
     {
         i -= 1;
         const frame = frames[i];
@@ -1272,9 +1286,9 @@ pub fn evalFailure(self: *VM, err: EvalError) EvalFailure {
 
 pub inline fn getMetamethodByAtom(
     self: *VM,
-    val: Data,
+    val: Value,
     atom: mem.AtomID,
-) !?Data {
+) !?Value {
     const mt_id = try self.getMetatableId(val) orelse return null;
     const mt = try self.tables.get(mt_id);
     return mt.getRawAtom(atom, self);
@@ -1282,7 +1296,7 @@ pub inline fn getMetamethodByAtom(
 
 pub fn getMetatableId(
     self: *VM,
-    val: Data,
+    val: Value,
 ) !?mem.TableID {
     return switch (val.tag()) {
         .table => blk: {
@@ -1293,7 +1307,7 @@ pub fn getMetatableId(
             } else |_| {}
             break :blk self.metatables[
                 @intFromEnum(
-                    mem.Type.table,
+                    mem.ValueTag.table,
                 )
             ];
         },
@@ -1301,7 +1315,7 @@ pub fn getMetatableId(
     };
 }
 
-pub const EvalError = error{
+pub const RunError = error{
     StackUnderflow,
     StackOverflow,
     InvalidConstant,
@@ -1318,7 +1332,7 @@ pub const EvalError = error{
     FunctionDNE,
     OutOfMemory,
     ConstantReassignment,
-} || root.functions.HostError;
+} || root.callable.RunError;
 
 pub inline fn tableFast(
     self: *VM,
@@ -1337,17 +1351,17 @@ pub inline fn tableFast(
 inline fn functionFast(
     self: *VM,
     id: mem.FunctionID,
-) !*root.functions.Function {
+) !*root.callable.Function {
     if (builtin.mode == .ReleaseFast) {
         std.debug.assert(
-            id < self.functions.functions.items.len,
+            id < self.callable.functions.items.len,
         );
         std.debug.assert(
-            self.functions.functions.items[id] != null,
+            self.callable.functions.items[id] != null,
         );
-        return self.functions.functions.items[id].?;
+        return self.callable.functions.items[id].?;
     }
-    return self.functions.get(id) catch |e| {
+    return self.callable.get(id) catch |e| {
         if (e == error.FunctionDNE) {
             try self.setPanicMessage("function does not exist");
             return error.Panic;
@@ -1358,12 +1372,12 @@ inline fn functionFast(
 
 fn callNonClosureFunction(
     self: *VM,
-    func: root.functions.Function,
+    func: root.callable.Function,
     instr: Instruction,
     base: usize,
     callee_slot: usize,
     argc: usize,
-) EvalError!void {
+) RunError!void {
     const fiber = self.currentFiber();
     switch (func) {
         .c_function => |f| {
@@ -1375,17 +1389,17 @@ fn callNonClosureFunction(
             try self.ensureAbsoluteSlot(args_end);
             const args = fiber.registers[args_start..args_end];
 
-            var c_args_buf: [16]mem.Data = @splat(.{ .bits = 0 });
+            var c_args_buf: [16]mem.Value = @splat(.{ .bits = 0 });
             const c_args = if (args.len <= 16)
                 c_args_buf[0..args.len]
             else
-                try self.runtime.alloc.alloc(mem.Data, args.len);
+                try self.runtime.alloc.alloc(mem.Value, args.len);
             defer if (args.len > 16) self.runtime.alloc.free(c_args);
 
             for (args, 0..) |arg, i|
                 c_args[i] = arg;
 
-            var c_result: mem.Data = .{ .bits = 0 };
+            var c_result: mem.Value = .{ .bits = 0 };
             self.clearRuntimeMessage();
             const rc = f.fn_ptr(
                 @ptrCast(self),
@@ -1393,12 +1407,12 @@ fn callNonClosureFunction(
                 c_args.ptr,
                 &c_result,
             );
-            if (rc != root.functions.c_ok) {
+            if (rc != root.callable.c_ok) {
                 if (self.runtime_message == null)
                     try self.setRuntimeMessage("c function failed");
                 return switch (rc) {
-                    root.functions.c_err_arity => error.WrongArity,
-                    root.functions.c_err_type => error.TypeError,
+                    root.callable.c_err_arity => error.WrongArity,
+                    root.callable.c_err_type => error.TypeError,
                     else => error.Panic,
                 };
             }
@@ -1418,14 +1432,14 @@ fn callNonClosureFunction(
             // : host funcs call back into nested calls that append
             //   to these same regs
             //   and may realloc the buffer mid-execution
-            var stack_buf: [16]Data = undefined;
-            var heap_buf: ?[]Data = null;
+            var stack_buf: [16]Value = undefined;
+            var heap_buf: ?[]Value = null;
             defer if (heap_buf) |h| self.runtime.alloc.free(h);
-            const args: []const Data = if (argc <= stack_buf.len) blk: {
+            const args: []const Value = if (argc <= stack_buf.len) blk: {
                 @memcpy(stack_buf[0..argc], fiber.registers[args_start..args_end]);
                 break :blk stack_buf[0..argc];
             } else blk: {
-                const h = try self.runtime.alloc.alloc(Data, argc);
+                const h = try self.runtime.alloc.alloc(Value, argc);
                 heap_buf = h;
                 @memcpy(h, fiber.registers[args_start..args_end]);
                 break :blk h;
@@ -1486,7 +1500,7 @@ fn callNonClosureFunction(
                         .{
                             i,
                             @tagName(spec),
-                            revo.std_lib.typeof(args[i], self),
+                            revo.baselib.typeof(args[i], self),
                         },
                     );
                     return error.TypeError;
@@ -1501,7 +1515,7 @@ fn callNonClosureFunction(
                 },
                 else => {
                     const tag = try self.internAtom(@errorName(err));
-                    const res = try self.resultTable(.err, Data.new.atom(tag));
+                    const res = try self.resultTable(.err, Value.new.atom(tag));
                     try self.ensureAbsoluteSlot(base + instr.c);
                     try self.writeRegisterFast(base, instr.c, res);
                     return;
@@ -1555,7 +1569,7 @@ fn callNonClosureFunction(
                             try self.writeRegisterFast(
                                 base,
                                 instr.c,
-                                revo.Data.new.core(.missing),
+                                revo.Value.new.core(.missing),
                             );
                             return error.Parked;
                         },
@@ -1590,11 +1604,11 @@ fn callNonClosureFunction(
 }
 
 // TODO: remove
-inline fn fillMissingSlots(regs: []Data, base: usize, total_arity: u8, register_count: u8) void {
+inline fn fillMissingSlots(regs: []Value, base: usize, total_arity: u8, register_count: u8) void {
     if (total_arity >= register_count) return;
     @memset(
         regs[base + total_arity .. base + register_count],
-        revo.Data.new.core(.missing),
+        revo.Value.new.core(.missing),
     );
 }
 
@@ -1602,7 +1616,7 @@ inline fn fillMissingSlots(regs: []Data, base: usize, total_arity: u8, register_
 pub fn callRegister(
     self: *VM,
     instr: Instruction,
-) EvalError!void {
+) RunError!void {
     var fiber = self.currentFiber();
     const base = fiber.top_base;
     const callee_slot = base + instr.a;
@@ -1611,7 +1625,7 @@ pub fn callRegister(
     const callee = if (callee_slot < fiber.registers_len)
         fiber.registers[callee_slot]
     else
-        revo.Data.new.core(.missing);
+        revo.Value.new.core(.missing);
 
     // seemingly the likeliest for both rec and non-rec
     if (callee.tag() == .function) {
@@ -1621,7 +1635,7 @@ pub fn callRegister(
         return switch (func.*) {
             .closure => |closure| {
                 if (closure.arity !=
-                    root.functions.VARIADIC and
+                    root.callable.VARIADIC and
                     (argc < closure.arity or argc > closure.total_arity))
                 {
                     @branchHint(.unlikely);
@@ -1658,7 +1672,7 @@ pub fn callRegister(
 
                         if (callee_slot != caller_fn_slot) {
                             std.mem.copyForwards(
-                                Data,
+                                Value,
                                 fiber.registers[caller_fn_slot .. caller_fn_slot + moved_len],
                                 fiber.registers[callee_slot .. callee_slot + moved_len],
                             );
@@ -1683,8 +1697,8 @@ pub fn callRegister(
                             closure.register_count,
                         );
 
-                        if (self.functions.segments.items.len > closure.segment_id) {
-                            fiber.program = self.functions.segments.items[closure.segment_id];
+                        if (self.callable.segments.items.len > closure.segment_id) {
+                            fiber.program = self.callable.segments.items[closure.segment_id];
                         }
                         fiber.pc = closure.addr;
                         return;
@@ -1717,8 +1731,8 @@ pub fn callRegister(
                     },
                 );
                 fiber.top_base = new_base;
-                if (self.functions.segments.items.len > closure.segment_id) {
-                    fiber.program = self.functions.segments.items[closure.segment_id];
+                if (self.callable.segments.items.len > closure.segment_id) {
+                    fiber.program = self.callable.segments.items[closure.segment_id];
                 }
                 fiber.pc = closure.addr;
             },
@@ -1737,7 +1751,7 @@ pub fn callRegister(
         @branchHint(.unlikely);
         if (try self.resolveField(
             callee,
-            Data.new.atom(revo.core_atoms.atomId(.__call)),
+            Value.new.atom(revo.CoreAtoms.atomId(.__call)),
             null,
         )) |field| {
             // resolveField could run __index user code
@@ -1751,15 +1765,15 @@ pub fn callRegister(
             // copy
             //   the nested call appends to these same registers and
             //   may realloc the buffer args points into mid-copy
-            var stack_buf: [16]Data = undefined;
-            var heap_buf: ?[]Data = null;
+            var stack_buf: [16]Value = undefined;
+            var heap_buf: ?[]Value = null;
             defer if (heap_buf) |h| self.runtime.alloc.free(h);
 
-            const owned_args: []const Data = if (argc <= stack_buf.len) blk: {
+            const owned_args: []const Value = if (argc <= stack_buf.len) blk: {
                 @memcpy(stack_buf[0..argc], args);
                 break :blk stack_buf[0..argc];
             } else blk: {
-                const h = try self.runtime.alloc.alloc(Data, argc);
+                const h = try self.runtime.alloc.alloc(Value, argc);
                 heap_buf = h;
                 @memcpy(h, args);
                 break :blk h;
@@ -1784,13 +1798,13 @@ pub fn callRegister(
 
     // callee must be a function
     const func = switch (callee.tag()) {
-        .function => try self.functions.get(
+        .function => try self.callable.get(
             callee.asFunction().?,
         ),
         else => {
             const got = switch (callee.tag()) {
                 .number => "number",
-                .atom => if (callee.bits == revo.Data.new.core(.missing).bits)
+                .atom => if (callee.bits == revo.Value.new.core(.missing).bits)
                     "<non-existing function>"
                 else
                     "atom",
@@ -1816,7 +1830,7 @@ pub fn callRegister(
 pub fn returnRegister(
     self: *VM,
     instr: Instruction,
-) EvalError!void {
+) RunError!void {
     const fiber = self.currentFiber();
     const read_base = fiber.top_base;
     const reg_slot = read_base + @as(usize, instr.a);
@@ -1838,7 +1852,7 @@ pub fn returnRegister(
 
     if (returning_to_exit) if (self.resultParts(result)) |parts| {
         const tag = parts.tag.asAtom() orelse null;
-        if (tag != null and tag.? == revo.core_atoms.atomId(.err)) {
+        if (tag != null and tag.? == revo.CoreAtoms.atomId(.err)) {
             try self.panicFromErrPayload(parts.payload, fiber.pc);
             return error.Panic;
         }
@@ -1873,14 +1887,14 @@ pub fn returnRegister(
 
 /// what a spawn runs: a function id plus the table itself when spawned
 /// through `__call`
-const SpawnTarget = struct { func_id: mem.FunctionID, self_arg: ?Data };
+const SpawnTarget = struct { func_id: mem.FunctionID, self_arg: ?Value };
 
 /// resolve a spawn callee to a function
 /// , `__call` tables spawn like direct calls do, with the table passed first
-fn resolveSpawnTarget(self: *VM, callee: Data) EvalError!SpawnTarget {
+fn resolveSpawnTarget(self: *VM, callee: Value) RunError!SpawnTarget {
     if (callee.asFunction()) |fid| return .{ .func_id = fid, .self_arg = null };
     if (callee.asTable()) |_| {
-        const mm = try self.resolveField(callee, Data.new.atom(revo.core_atoms.atomId(.__call)), null) orelse {
+        const mm = try self.resolveField(callee, Value.new.atom(revo.CoreAtoms.atomId(.__call)), null) orelse {
             try self.setRuntimeMessage("spawn expects function!");
             return error.NotAFunction;
         };
@@ -1905,7 +1919,7 @@ fn reuseSpawnFiber(self: *VM, parent: *Fiber, program: []const Instruction, reg_
         f.debug_info_id = parent.debug_info_id;
         f.running = false;
         f.state = .ready;
-        f.in_runq = false;
+        f.in_run_queue = false;
         f.wait = .none;
         f.parked_result_slot = null;
         f.err_atom = null;
@@ -1931,21 +1945,21 @@ fn reuseSpawnFiber(self: *VM, parent: *Fiber, program: []const Instruction, reg_
     if (reg_need > child.registers.len)
         child.registers = try self.runtime.alloc.realloc(child.registers, reg_need);
     child.registers_len = reg_need;
-    @memset(child.registers[0..reg_need], revo.Data.new.core(.missing));
+    @memset(child.registers[0..reg_need], revo.Value.new.core(.missing));
     return child_id;
 }
 
 /// copy spawn args from the parent into the child at `dst_base`
 /// , `self_arg` goes first when present
 fn copySpawnArgs(
-    parent_regs: []const Data,
+    parent_regs: []const Value,
     parent_len: usize,
     child: *Fiber,
     dst_base: usize,
     base: usize,
     callee_reg: opcode.Register,
     eff_argc: usize,
-    self_arg: ?Data,
+    self_arg: ?Value,
 ) void {
     const self_arg_count: usize = @intFromBool(self_arg != null);
     for (0..eff_argc) |idx| {
@@ -1958,7 +1972,7 @@ fn copySpawnArgs(
         child.registers[dst_base + idx] = if (src_slot < parent_len)
             parent_regs[src_slot]
         else
-            revo.Data.new.core(.missing);
+            revo.Value.new.core(.missing);
     }
 }
 
@@ -1972,10 +1986,10 @@ fn publishSpawnHandle(self: *VM, base: usize, result_reg: opcode.Register, child
         try ensureRegCapacity(cur, self.runtime.alloc, result_slot + 1);
         cur.registers_len = result_slot + 1;
     }
-    self.noteGCPressure(@sizeOf(Data) * 2 + 64);
-    cur.registers[result_slot] = try self.tableOfSlice(&[_]Data{
-        Data.new.atom(revo.core_atoms.atomId(.fiber)),
-        Data.new.num(@as(i64, @intCast(child_id))),
+    self.noteGCPressure(@sizeOf(Value) * 2 + 64);
+    cur.registers[result_slot] = try self.tableOfSlice(&[_]Value{
+        Value.new.atom(revo.CoreAtoms.atomId(.fiber)),
+        Value.new.num(@as(i64, @intCast(child_id))),
     });
 }
 
@@ -1984,7 +1998,7 @@ pub inline fn spawnRegister(
     self: *VM,
     instr: Instruction,
     base: usize,
-) EvalError!void {
+) RunError!void {
     const argc: usize = instr.b;
     const fiber = self.currentFiber();
     const callee = regRead(fiber.registers, base, instr.a);
@@ -2000,7 +2014,7 @@ pub inline fn spawnRegister(
         .host, .c_function => return try self.spawnHostRegister(instr, base, func_id, argc, self_arg),
     };
 
-    if (closure.arity != root.functions.VARIADIC and
+    if (closure.arity != root.callable.VARIADIC and
         (eff_argc < closure.arity or eff_argc > closure.total_arity))
     {
         @branchHint(.unlikely);
@@ -2011,8 +2025,8 @@ pub inline fn spawnRegister(
         return error.WrongArity;
     }
 
-    const child_program = if (self.functions.segments.items.len > closure.segment_id)
-        self.functions.segments.items[closure.segment_id]
+    const child_program = if (self.callable.segments.items.len > closure.segment_id)
+        self.callable.segments.items[closure.segment_id]
     else
         fiber.program;
 
@@ -2042,7 +2056,7 @@ pub inline fn spawnRegister(
 }
 
 /// run a host fn on a fresh fiber through pending_host
-fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.FunctionID, argc: usize, self_arg: ?Data) EvalError!void {
+fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.FunctionID, argc: usize, self_arg: ?Value) RunError!void {
     const fiber = self.currentFiber();
     const parent_regs = fiber.registers;
     const parent_regs_len = fiber.registers_len;
@@ -2051,7 +2065,7 @@ fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.Fu
 
     const child_id = try self.reuseSpawnFiber(fiber, &.{}, need);
     const child = self.sched.fibers.items[child_id];
-    child.registers[0] = Data.new.function(func_id);
+    child.registers[0] = Value.new.function(func_id);
     copySpawnArgs(parent_regs, parent_regs_len, child, 1, base, instr.a, eff_argc, self_arg);
 
     // dummy root frame so park paths have a frame to hang the result slot on
@@ -2062,7 +2076,7 @@ fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.Fu
         .program = &.{},
         .call_site_pc = null,
         .result_register = 0,
-        .register_count = @min(need, std.math.maxInt(root.functions.RegisterCount)),
+        .register_count = @min(need, std.math.maxInt(root.callable.RegisterCount)),
         .closure_id = func_id,
     });
     child.top_base = 0;
@@ -2073,21 +2087,21 @@ fn spawnHostRegister(self: *VM, instr: Instruction, base: usize, func_id: mem.Fu
 }
 
 // gc
-pub fn markData(self: *VM, data: Data) void {
-    vm_gc.markData(self, data);
+pub fn markValue(self: *VM, data: Value) void {
+    vm_gc.markValue(self, data);
 }
 
 test {
-    _ = @import("debug.zig");
-    _ = @import("functions.zig");
+    _ = @import("errors.zig");
+    _ = @import("callable.zig");
     _ = @import("interner.zig");
     _ = @import("lookup.zig");
     _ = @import("memory.zig");
-    _ = @import("module.zig");
+    _ = @import("run.zig");
     _ = @import("opcode.zig");
     _ = @import("table.zig");
     _ = @import("tests.zig");
-    _ = @import("exec.zig");
+    _ = @import("dispatch.zig");
     _ = @import("gc.zig");
     _ = @import("perf.zig");
 }
@@ -2102,16 +2116,15 @@ const Span = lang.Span;
 const compare_impl = @import("compare.zig");
 pub const compare = compare_impl.compare;
 const root = @import("root.zig");
-pub const EvalErrorKind = root.debug.EvalErrorKind;
-pub const EvalFailure = root.debug.EvalFailure;
-pub const EvalResult = root.debug.EvalResult;
-const Frame = root.functions.Frame;
-const FunctionPool = root.functions.FunctionPool;
+pub const RunErrorKind = root.errors.RunErrorKind;
+pub const RunFailure = root.errors.RunFailure;
+pub const RunResult = root.errors.RunResult;
+const FunctionPool = root.callable.FunctionPool;
 pub const lookup = root.lookup;
 pub const memory = root.memory;
 const mem = memory;
-const Data = mem.Data;
-pub const module = root.module;
+const Value = mem.Value;
+pub const run = root.run;
 pub const opcode = root.opcode;
 const Instruction = opcode.Instruction;
 pub const Interner = root.interner.Interner;
@@ -2122,8 +2135,8 @@ pub const resolveField = lookup.resolveField;
 pub const FieldLookup = lookup.FieldLookup;
 pub const setMetatable = lookup.setMetatable;
 pub const setTableMetatable = lookup.setTableMetatable;
-pub const runImportedModule = module.runImportedModule;
+pub const runImportedModule = run.runImportedModule;
 const Scheduler = @import("scheduler.zig");
-const vm_exec = @import("exec.zig");
+const vm_dispatch = @import("dispatch.zig");
 const vm_gc = @import("gc.zig");
 const vm_perf = @import("perf.zig");

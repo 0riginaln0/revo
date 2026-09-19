@@ -136,7 +136,7 @@ the key type is `WaitEntry`:
 
 ### i/o polling
 
-`pollIoWaiters()` in `src/std/net.zig` uses `std.posix.poll()` on posix. when a file descriptor is ready:
+`pollIoWaiters()` in `src/baselib/net.zig` uses `std.posix.poll()` on posix. when a file descriptor is ready:
 
 - `on_ready` callback fires
 - callback does the syscall (send/recv/accept)
@@ -158,7 +158,7 @@ fn onRecvReady(vm: *VM, waiter: *Scheduler.WaitEntry, events: i16) !Scheduler.Io
 
 all socket io is readiness-driven, we dont do worker threads anymore
 
-`pollIoWaiters()` in `src/std/net.zig` snapshots the waiter list under lock
+`pollIoWaiters()` in `src/baselib/net.zig` snapshots the waiter list under lock
 (each waiter carries a generation stamp),
 `poll()`s the snapshot with no locks held,
 then revalidates every ready fd against the live list before dispatching.
@@ -230,7 +230,7 @@ to wait on a new fd source, park with a `WaitEntry` and handle it in a readiness
 - match new completions by `(wait_id, fiber_id, intent, generation)`;
   anything else is stale (closed, recycled fd) and must be skipped
 
-see `onRecvReady` above and `src/std/net.zig`
+see `onRecvReady` above and `src/baselib/net.zig`
 
 ## performance
 

@@ -67,7 +67,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=erevo");
     // libm is linked separately by the Zig build for C consumers
-    // (see `src/c/tests.c` link line); Rust doesn't link it automatically on Linux.
+    // (see `src/capi/tests.c` link line); Rust doesn't link it automatically on Linux.
     if !cfg!(target_os = "macos") && !cfg!(target_env = "msvc") {
         println!("cargo:rustc-link-lib=m");
     }

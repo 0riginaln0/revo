@@ -8,7 +8,7 @@ const ast = @import("../ast.zig");
 const common = @import("common.zig");
 const pipeline = @import("../pipeline.zig");
 const txt = @import("text.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 const types = @import("../compiler/types.zig");
 
 const W = @import("../Workspace.zig");
@@ -121,7 +121,7 @@ pub fn documentSymbols(
 /// walk ast & collect
 ///     bindings, functions, type aliases
 ///
-/// full dotted macro names from stdlib manifests
+/// full dotted macro names from baselib manifests
 ///     (`uri.asdf!`, `ok?!`)
 ///
 /// names borrow the embedded sources (static)
@@ -129,12 +129,12 @@ pub fn documentSymbols(
 /// . callers split scope from member
 /// ; the parser caps heads at one dot.
 ///
-pub fn stdlibMacroNames(self: *Workspace, arena: std.mem.Allocator) [][]const u8 {
+pub fn baselibMacroNames(self: *Workspace, arena: std.mem.Allocator) [][]const u8 {
     var out = std.ArrayList([]const u8).empty;
-    const srcs = revo.std_lib.api.macroSources(arena) catch return out.items;
+    const srcs = revo.baselib.specs.macroSources(arena) catch return out.items;
 
     for (srcs) |src| {
-        const parsed = pipeline.parse(arena, .{ .name = "<stdlib-macros>", .text = src }, .{ .include_stdlib_macros = false }) catch continue;
+        const parsed = pipeline.parse(arena, .{ .name = "<baselib-macros>", .text = src }, .{ .include_baselib_macros = false }) catch continue;
         if (parsed != .ok) continue;
         const syms = collectSymbolsFromParsed(self, parsed.ok.root, src) catch continue;
         defer common.freeSymbols(self.alloc, @constCast(syms));
@@ -340,8 +340,8 @@ const SymbolVisitor = struct {
 
     /// condensed `{k = v}` source slices for single-line literal fields;
     /// null when nothing previewable
-    fn tableFieldPreviews(self: *@This(), entries: []const ast.TableEntry) ?[]type_serde.FieldPreview {
-        var out = std.ArrayList(type_serde.FieldPreview).initCapacity(self.alloc, entries.len) catch return null;
+    fn tableFieldPreviews(self: *@This(), entries: []const ast.TableEntry) ?[]type_syntax.FieldPreview {
+        var out = std.ArrayList(type_syntax.FieldPreview).initCapacity(self.alloc, entries.len) catch return null;
         var implicit_idx: u32 = 0;
         for (entries) |entry| {
             if (entry.key == null and entry.value.expr == .decl and
@@ -427,7 +427,7 @@ const ImportVisitor = struct {
     ws: *Workspace,
     out: *std.ArrayList(FileId),
     base: []const u8,
-    mode: pipeline.RunMode,
+    mode: pipeline.ProjectMode,
     project_root: []const u8,
     failed: bool,
 

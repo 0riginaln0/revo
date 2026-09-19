@@ -4,7 +4,7 @@
 const std = @import("std");
 
 const ast = @import("./ast.zig");
-const pretty = @import("../pretty.zig");
+const term = @import("../term.zig");
 
 /// severity bucket for a diagnostic report
 /// TODO: only err and warning can be toggled
@@ -204,15 +204,15 @@ pub fn firstWarn(report: Report) ?[]const u8 {
 ///
 fn printHeader(writer: *std.Io.Writer, severity: Severity, code: ?[]const u8, text: []const u8) !void {
     if (code) |c| switch (severity) {
-        .err => try pretty.printError(writer, "{s} [{s}]", .{ text, c }),
-        .warning => try pretty.printWarning(writer, "{s} [{s}]", .{ text, c }),
-        .note => try pretty.printNote(writer, "{s} [{s}]", .{ text, c }),
-        .help => try pretty.printHelp(writer, "{s} [{s}]", .{ text, c }),
+        .err => try term.printError(writer, "{s} [{s}]", .{ text, c }),
+        .warning => try term.printWarning(writer, "{s} [{s}]", .{ text, c }),
+        .note => try term.printNote(writer, "{s} [{s}]", .{ text, c }),
+        .help => try term.printHelp(writer, "{s} [{s}]", .{ text, c }),
     } else switch (severity) {
-        .err => try pretty.printError(writer, "{s}", .{text}),
-        .warning => try pretty.printWarning(writer, "{s}", .{text}),
-        .note => try pretty.printNote(writer, "{s}", .{text}),
-        .help => try pretty.printHelp(writer, "{s}", .{text}),
+        .err => try term.printError(writer, "{s}", .{text}),
+        .warning => try term.printWarning(writer, "{s}", .{text}),
+        .note => try term.printNote(writer, "{s}", .{text}),
+        .help => try term.printHelp(writer, "{s}", .{text}),
     }
 }
 
@@ -490,11 +490,11 @@ fn renderContextBefore(writer: *std.Io.Writer, extracted: ExtractedSpan, comptim
     while (before_idx > 0) {
         before_idx -= 1;
         const cl = extracted.ctx_before[before_idx];
-        if (dim and pretty.supports_color) try writer.writeAll(COLOR_DIM);
+        if (dim and term.supports_color) try writer.writeAll(COLOR_DIM);
         try writeLineNumber(writer, cl.num, extracted.line_width);
         try writeExpanded(writer, cl.text, 0);
         try writer.writeByte('\n');
-        if (dim and pretty.supports_color) try writer.writeAll(COLOR_RESET);
+        if (dim and term.supports_color) try writer.writeAll(COLOR_RESET);
     }
     if (extracted.ctx_before_len > 0) {
         try writeBlankPipeLine(writer, extracted.line_width, 0);
@@ -506,11 +506,11 @@ fn renderContextAfter(writer: *std.Io.Writer, extracted: ExtractedSpan, comptime
         try writeBlankPipeLine(writer, extracted.line_width, 0);
     }
     for (extracted.ctx_after[0..extracted.ctx_after_len]) |cl| {
-        if (dim and pretty.supports_color) try writer.writeAll(COLOR_DIM);
+        if (dim and term.supports_color) try writer.writeAll(COLOR_DIM);
         try writeLineNumber(writer, cl.num, extracted.line_width);
         try writeExpanded(writer, cl.text, 0);
         try writer.writeByte('\n');
-        if (dim and pretty.supports_color) try writer.writeAll(COLOR_RESET);
+        if (dim and term.supports_color) try writer.writeAll(COLOR_RESET);
     }
 }
 
@@ -697,10 +697,10 @@ fn renderBoxSpanBlock(
     const start_column = if (location.column == 0) 1 else location.column;
 
     try writer.print(" --> {s}:{d}:{d}\n", .{ source_name, start_line, start_column });
-    if (pretty.supports_color) try writer.writeAll(COLOR_DIM);
+    if (term.supports_color) try writer.writeAll(COLOR_DIM);
     try writePipePrefix(writer, 0);
     try writer.writeByte('\n');
-    if (pretty.supports_color) try writer.writeAll(COLOR_RESET);
+    if (term.supports_color) try writer.writeAll(COLOR_RESET);
 
     const extracted = try extractSpan(alloc, source, location, start_line, start_column) orelse return;
     defer extracted.deinit(alloc);
@@ -748,11 +748,11 @@ fn renderBoxSpanBlock(
     for (extracted.lines, 0..) |cl, i| {
         if (total > bookend_threshold and i >= tail_cut and i < tail_start) {
             if (!bookend_printed) {
-                if (pretty.supports_color) try writer.writeAll(COLOR_DIM);
+                if (term.supports_color) try writer.writeAll(COLOR_DIM);
                 try writeBoxPrefix(writer, extracted.line_width, 2);
                 for (0..marker_offset) |_| try writer.writeByte(' ');
                 try writer.print("... {d} lines ...\n", .{total - tail_cut - (total - tail_start)});
-                if (pretty.supports_color) try writer.writeAll(COLOR_RESET);
+                if (term.supports_color) try writer.writeAll(COLOR_RESET);
                 bookend_printed = true;
             }
             continue;

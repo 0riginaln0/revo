@@ -6,7 +6,7 @@
 ///   tables compare by value (array part in order, then keyed entries)
 ///
 const std = @import("std");
-const Data = @import("memory.zig").Data;
+const Value = @import("memory.zig").Value;
 const BOX_MASK = @import("memory.zig").BOX_MASK;
 const BOX_TAG = @import("memory.zig").BOX_TAG;
 const VM = @import("VM.zig");
@@ -33,12 +33,12 @@ fn tablesEqual(vm: *VM, lid: usize, rid: usize) bool {
     return true;
 }
 
-pub fn compare(vm: *VM, lh: Data, rh: Data) std.math.Order {
+pub fn compare(vm: *VM, lh: Value, rh: Value) std.math.Order {
     // numbers
     // ; nan is unordered so it equals nothing
     //   (not even itself here, identical bits already shortcut in fastEq,
     //     and orders as .gt, the incomparable sentinel below)
-    if (lh.asNum()) |ln| if (rh.asNum()) |rn| {
+    if (lh.asNumOpt()) |ln| if (rh.asNumOpt()) |rn| {
         if (std.math.isNan(ln) or std.math.isNan(rn)) return .gt;
         if (ln < rn) return .lt;
         if (ln > rn) return .gt;
@@ -68,12 +68,12 @@ pub fn compare(vm: *VM, lh: Data, rh: Data) std.math.Order {
 }
 
 pub inline fn evalCachedFast(
-    slots: []Data,
+    slots: []Value,
     base: usize,
     vm: *VM,
     instr: Instruction,
     comptime op: Opcode,
-) VM.EvalError!void {
+) VM.RunError!void {
     const lhs = VM.regRead(slots, base, instr.b);
     const rhs = VM.regRead(slots, base, instr.c);
 
@@ -90,11 +90,11 @@ pub inline fn evalCachedFast(
             const lf: f64 = @bitCast(lhs.bits);
             const rf: f64 = @bitCast(rhs.bits);
             if (lf != lf or rf != rf) {
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(op == .neq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(op == .neq));
                 return;
             }
             const is_eq = lf == rf;
-            VM.regWrite(slots, base, instr.a, Data.new.boolean(if (op == .eq) is_eq else !is_eq));
+            VM.regWrite(slots, base, instr.a, Value.new.boolean(if (op == .eq) is_eq else !is_eq));
             return;
         }
     } else {
@@ -110,16 +110,16 @@ pub inline fn evalCachedFast(
                 .gte => lf >= rf,
                 else => unreachable,
             };
-            VM.regWrite(slots, base, instr.a, Data.new.boolean(result));
+            VM.regWrite(slots, base, instr.a, Value.new.boolean(result));
             return;
         }
     }
 
     // per IEEE 754 nan is unordered so all comparisons with NaN are false and neq is true
-    if (lhs.asNum()) |ln| {
-        if (rhs.asNum()) |rn| {
+    if (lhs.asNumOpt()) |ln| {
+        if (rhs.asNumOpt()) |rn| {
             if (std.math.isNan(ln) or std.math.isNan(rn)) {
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(op == .neq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(op == .neq));
                 return;
             }
         }
@@ -132,7 +132,7 @@ pub inline fn evalCachedFast(
             const tag = lhs.tag();
             if (tag != .string and tag != .number and tag != .table) {
                 const is_eq = lhs.bits == rhs.bits;
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(if (op == .eq) is_eq else !is_eq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(if (op == .eq) is_eq else !is_eq));
                 return;
             }
         }
@@ -140,11 +140,11 @@ pub inline fn evalCachedFast(
         if ((rhs.bits & BOX_MASK) != BOX_TAG) {
             const SIGN_MASK: u64 = @as(u64, 1) << 63;
             if (lhs.bits == rhs.bits) {
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(op == .eq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(op == .eq));
                 return;
             }
             if ((lhs.bits | SIGN_MASK) == (rhs.bits | SIGN_MASK) and (lhs.bits & ~SIGN_MASK) == 0) {
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(op == .eq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(op == .eq));
                 return;
             }
         }
@@ -156,7 +156,7 @@ pub inline fn evalCachedFast(
     if (l_tag != r_tag) {
         switch (op) {
             .eq, .neq => {
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(op == .neq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(op == .neq));
                 return;
             },
             else => {
@@ -184,10 +184,10 @@ pub inline fn evalCachedFast(
                             rhs.asTable().?,
                         );
                     },
-                    .foreign => lhs.asForeign().? == rhs.asForeign().?,
+                    .@"opaque" => lhs.asOpaque().? == rhs.asOpaque().?,
                     else => unreachable,
                 };
-                VM.regWrite(slots, base, instr.a, Data.new.boolean(if (op == .eq) is_eq else !is_eq));
+                VM.regWrite(slots, base, instr.a, Value.new.boolean(if (op == .eq) is_eq else !is_eq));
                 return;
             },
             else => {
@@ -209,10 +209,10 @@ pub inline fn evalCachedFast(
         else => unreachable,
     };
 
-    VM.regWrite(slots, base, instr.a, Data.new.boolean(result));
+    VM.regWrite(slots, base, instr.a, Value.new.boolean(result));
 }
 
-pub fn fastEq(vm: *VM, a: Data, b: Data) bool {
+pub fn fastEq(vm: *VM, a: Value, b: Value) bool {
     if (a.bits == b.bits) return true;
     if (a.tag() != b.tag()) return false;
     return (compare(vm, a, b) == .eq);

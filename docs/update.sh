@@ -8,7 +8,7 @@ cp docs/*.md	 docs/_ign-web/content/
 cp docs/*.html docs/_ign-web/content/
 rm docs/_ign-web/content/README.md
 
-zig-out/bin/revo doc --html --splice ./src/std/iface/ < "$STDOCPATH" > ./std-output.html
+zig-out/bin/revo doc --html --splice ./src/baselib/iface/ < "$STDOCPATH" > ./std-output.html
 mv ./std-output.html $STDOCPATH
 
 cd $DOCS_PATH

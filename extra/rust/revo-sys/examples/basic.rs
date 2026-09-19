@@ -16,9 +16,9 @@
 
 use std::ffi::*;
 
-use revo_sys::{RevoBinding, RevoData};
+use revo_sys::{RevoBinding, RevoValue};
 
-extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoData, out: *mut RevoData) {
+extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoValue, out: *mut RevoValue) {
     unsafe {
         *out = revo_sys::NIL;
     }

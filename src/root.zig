@@ -25,9 +25,9 @@ pub const Runtime = struct {
     /// then nanosecond-precise; absolute epoch ns would lose the low bits)
     time_wall_base: i96 = 0,
     time_mono_base: i96 = 0,
-    /// lazily time-seeded prng for the rng stdlib; per-vm so equal-ns calls
+    /// lazily time-seeded prng for the rng baselib; per-vm so equal-ns calls
     /// advance one stream instead of re-seeding identical generators
-    rng_prng: ?std.Random.DefaultPrng = null,
+    prng: ?std.Random.DefaultPrng = null,
 
     /// ret: a new runtime with its own vm
     pub fn init(alloc: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8) !Runtime {
@@ -91,7 +91,7 @@ pub const Runtime = struct {
         }
     }
 
-    /// compile source code to a bytecode artifact
+    /// compile source code to bytecode
     pub fn compile(
         self: *Runtime,
         name: []const u8,
@@ -111,29 +111,29 @@ pub const Runtime = struct {
         };
     }
 
-    /// execute a compiled artifact, also see eval()
-    /// returns EvalResult so callers can inspect runtime errors programmatically
+    /// execute compiled bytecode, also see eval()
+    /// returns RunResult so callers can inspect runtime errors programmatically
     pub fn run(
         self: *Runtime,
         name: []const u8,
-        artifact: lang.Artifact,
-    ) !module.EvalResult {
+        compiled: lang.Bytecode,
+    ) !vm.run.RunResult {
         const vm_ptr = self.vm orelse return error.NoVM;
-        try vm_ptr.setProgramDebugInfo(artifact.spans, "", name);
-        return try module.runCompiledModuleReport(vm_ptr, name, artifact.instructions);
+        try vm_ptr.setProgramDebugInfo(compiled.spans, "", name);
+        return try vm.run.runBytecodeReport(vm_ptr, name, compiled.instructions);
     }
 
     /// compile and execute source code in one call, also see run()
-    pub fn eval(
+    pub fn evalSource(
         self: *Runtime,
         name: []const u8,
         source: []const u8,
-    ) !module.EvalResult {
+    ) !vm.run.RunResult {
         const vm_ptr = self.vm orelse return error.NoVM;
         const build_result = lang.build(vm_ptr, .{ .name = name, .text = source }, .{}) catch {
             return error.CompilationError;
         };
-        const artifact = switch (build_result) {
+        const compiled = switch (build_result) {
             .ok => |art| art,
             .err => |err| {
                 printBuildError(self.alloc, .{ .name = name, .text = source }, err);
@@ -141,10 +141,10 @@ pub const Runtime = struct {
                 return error.CompilationError;
             },
         };
-        defer self.alloc.free(artifact.instructions);
-        defer self.alloc.free(artifact.spans);
-        try vm_ptr.setProgramDebugInfo(artifact.spans, "", name);
-        return try module.runCompiledModuleReport(vm_ptr, name, artifact.instructions);
+        defer self.alloc.free(compiled.instructions);
+        defer self.alloc.free(compiled.spans);
+        try vm_ptr.setProgramDebugInfo(compiled.spans, "", name);
+        return try vm.run.runBytecodeReport(vm_ptr, name, compiled.instructions);
     }
 };
 
@@ -174,13 +174,13 @@ pub fn resolveImportFile(
     io: std.Io,
     alloc: std.mem.Allocator,
     raw_path: []const u8,
-    module_dir: ?[]const u8,
+    import_dir: ?[]const u8,
     project_root: []const u8,
     package_path: []const []const u8,
 ) !?[]const u8 {
     // relative paths (./ or ../): only the importing module's directory
     if (raw_path.len > 0 and raw_path[0] == '.') {
-        if (module_dir) |dir| {
+        if (import_dir) |dir| {
             if (try probeImportFile(io, alloc, dir, raw_path)) |p| return p;
             const with_ext = try std.fmt.allocPrint(alloc, "{s}.rv", .{raw_path});
             defer alloc.free(with_ext);
@@ -199,7 +199,7 @@ pub fn resolveImportFile(
 
     // bare module names resolve adjacent to the importing module, then the
     // project root, then package paths
-    if (module_dir) |dir| {
+    if (import_dir) |dir| {
         if (try probeImportFile(io, alloc, dir, raw_path)) |p| return p;
         const with_ext = try std.fmt.allocPrint(alloc, "{s}.rv", .{raw_path});
         defer alloc.free(with_ext);
@@ -311,7 +311,7 @@ test "extensionManifestFor finds a sibling manifest" {
 }
 
 /// guaranteed IDs
-pub const core_atoms = vm.core_atoms;
+pub const CoreAtoms = vm.CoreAtoms;
 
 /// (:f or :false or :nil or 0 or 0.0 or :undef or :missing) == :false
 pub const isFalse = vm.isFalse;
@@ -334,7 +334,7 @@ pub fn printBuildWarning(gpa: std.mem.Allocator, source_info: lang.Source, repor
     std.debug.print("{s}", .{buf.written()});
 }
 
-pub fn printEvalError(gpa: std.mem.Allocator, source: []const u8, failure: EvalFailure) void {
+pub fn printRunError(gpa: std.mem.Allocator, source: []const u8, failure: RunFailure) void {
     // todo
     if (comptime is_freestanding) return;
     var buf = std.Io.Writer.Allocating.init(gpa);
@@ -380,8 +380,8 @@ pub fn stderr() std.Io.File {
 }
 
 test {
-    _ = @import("./lang/tests.zig");
-    _ = @import("./ext.zig");
+    _ = @import("./lang/lang_tests.zig");
+    _ = @import("./extension.zig");
 }
 
 const builtin = @import("builtin");
@@ -389,16 +389,16 @@ const std = @import("std");
 
 pub const vm = @import("vm");
 pub const memory = vm.memory;
-pub const ffi = @import("c").ffi;
+pub const ffi = @import("capi").ffi;
 pub const table = vm.table;
-pub const functions = vm.functions;
-pub const HostBinding = functions.HostBinding;
-pub const host_binding_size = @sizeOf(functions.HostBinding);
+pub const callable = vm.callable;
+pub const HostBinding = callable.HostBinding;
+pub const host_binding_size = @sizeOf(callable.HostBinding);
 pub const parseSourceReport = lang.parseSourceReport;
-pub const module = vm.module;
+pub const run = vm.run;
 pub const opcode = vm.opcode;
 pub const bytecode = vm.bytecode;
-pub const Data = memory.Data;
+pub const Value = memory.Value;
 pub const StringID = memory.StringID;
 pub const AtomID = memory.AtomID;
 pub const FunctionID = memory.FunctionID;
@@ -406,19 +406,19 @@ pub const TableID = memory.TableID;
 pub const ProgramCounter = vm.ProgramCounter;
 pub const ConstantID = vm.ConstantID;
 pub const GlobalID = vm.GlobalID;
-pub const LocalSlot = functions.LocalSlot;
-pub const PrototypeID = functions.PrototypeID;
-pub const UpvalueID = functions.UpvalueID;
+pub const LocalSlot = callable.LocalSlot;
+pub const TemplateID = callable.TemplateID;
+pub const UpvalueID = callable.UpvalueID;
 pub const Operand = opcode.Operand;
 pub const Instruction = opcode.Instruction;
 pub const VM = vm.VM;
-pub const EvalErrorKind = vm.EvalErrorKind;
-pub const EvalFailure = vm.EvalFailure;
-pub const EvalResult = vm.EvalResult;
+pub const RunErrorKind = vm.RunErrorKind;
+pub const RunFailure = vm.RunFailure;
+pub const RunResult = vm.RunResult;
 
 pub const argparse = @import("./argparse.zig");
-pub const ext = @import("./ext.zig");
+pub const baselib = @import("./baselib/root.zig");
+pub const baselib_net = @import("./baselib/net.zig");
+pub const extension = @import("./extension.zig");
 pub const lang = @import("./lang/root.zig");
-pub const pretty = @import("./pretty.zig");
-pub const std_lib = @import("./std/root.zig");
-pub const std_net = @import("./std/net.zig");
+pub const term = @import("./term.zig");

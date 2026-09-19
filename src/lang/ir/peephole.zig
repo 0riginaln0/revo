@@ -98,7 +98,7 @@ fn threadJumps(insts: []*ir.IrInst, inst: *ir.IrInst) void {
 /// read register cannot shift a register block that later instructions rely on
 fn isPureReader(op: Opcode) bool {
     return switch (op) {
-        .store_local, .bind_local, .store_global, .store_global_const, .store_upval, .ret, .halt, .jump_if_false, .jump_if_true, .jump_err => true,
+        .store_local, .bind_local, .store_user_global, .store_user_global_const, .store_upval, .ret, .halt, .jump_if_false, .jump_if_true, .jump_err => true,
         else => false,
     };
 }
@@ -487,7 +487,7 @@ fn invertBranch(i: usize, insts: []*ir.IrInst, live: []bool) bool {
 }
 
 const pipeline = @import("../pipeline.zig");
-const testing = @import("../testing.zig");
+const testing = @import("../test_helpers.zig");
 const t = testing;
 const VM = revo.VM;
 

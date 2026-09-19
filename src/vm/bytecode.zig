@@ -4,18 +4,18 @@ const Allocator = std.mem.Allocator;
 const opcode = @import("opcode.zig");
 const Instruction = opcode.Instruction;
 
-const functions = @import("functions.zig");
+const functions = @import("callable.zig");
 const memory = @import("memory.zig");
 
 const revo = @import("revo");
 const lang = revo.lang;
 const Span = lang.Span;
-const Artifact = lang.Artifact;
+const Bytecode = lang.Bytecode;
 
 pub const Error = error{
     InvalidMagic,
     VersionMismatch,
-    TruncatedData,
+    TruncatedValue,
 };
 
 pub const MAGIC = [4]u8{ 'R', 'E', 'V', 'O' };
@@ -31,7 +31,7 @@ pub const Header = extern struct {
     constants_count: u32,
     instructions_count: u32,
     spans_count: u32,
-    prototypes_count: u32,
+    templates_count: u32,
 };
 
 /// unblobbified
@@ -58,10 +58,10 @@ fn writeIntLE(buffer: *std.ArrayList(u8), allocator: Allocator, comptime IntType
     try buffer.appendSlice(allocator, &bytes);
 }
 
-fn serializeData(buffer: *std.ArrayList(u8), allocator: Allocator, vm: *VM, item: memory.Data) anyerror!void {
+fn serializeValue(buffer: *std.ArrayList(u8), allocator: Allocator, vm: *VM, item: memory.Value) anyerror!void {
     try writeIntLE(buffer, allocator, u8, @intFromEnum(item.tag()));
     switch (item.tag()) {
-        .number => try writeIntLE(buffer, allocator, u64, @bitCast(item.asNum().?)),
+        .number => try writeIntLE(buffer, allocator, u64, @bitCast(item.asNumOpt().?)),
         .string => {
             const sid = item.asString().?;
             const str = try vm.strings.get(sid);
@@ -76,7 +76,7 @@ fn serializeData(buffer: *std.ArrayList(u8), allocator: Allocator, vm: *VM, item
         },
         .function => try writeIntLE(buffer, allocator, u64, item.asFunction().?),
         .table => try writeIntLE(buffer, allocator, u64, item.asTable().?),
-        .foreign => unreachable,
+        .@"opaque" => unreachable,
     }
 }
 
@@ -84,8 +84,8 @@ fn serializeData(buffer: *std.ArrayList(u8), allocator: Allocator, vm: *VM, item
 // serialization
 //
 
-/// write a compiled artifact + vm constants/prototypes into a byte array
-pub fn serialize(vm: *VM, artifact: Artifact, allocator: Allocator) ![]u8 {
+/// write compiled bytecode + vm constants/templates into a byte array
+pub fn serialize(vm: *VM, bytecode: Bytecode, allocator: Allocator) ![]u8 {
     var buffer = try std.ArrayList(u8).initCapacity(allocator, 256);
     defer buffer.deinit(allocator);
 
@@ -95,9 +95,9 @@ pub fn serialize(vm: *VM, artifact: Artifact, allocator: Allocator) ![]u8 {
         .version_minor = VERSION_MINOR,
         .flags = 0,
         .constants_count = @intCast(vm.constants.items.len),
-        .instructions_count = @intCast(artifact.instructions.len),
-        .spans_count = @intCast(artifact.spans.len),
-        .prototypes_count = @intCast(vm.functions.prototypes.items.len),
+        .instructions_count = @intCast(bytecode.instructions.len),
+        .spans_count = @intCast(bytecode.spans.len),
+        .templates_count = @intCast(vm.callable.templates.items.len),
     };
 
     // header fields
@@ -108,41 +108,41 @@ pub fn serialize(vm: *VM, artifact: Artifact, allocator: Allocator) ![]u8 {
     try writeIntLE(&buffer, allocator, u32, header.constants_count);
     try writeIntLE(&buffer, allocator, u32, header.instructions_count);
     try writeIntLE(&buffer, allocator, u32, header.spans_count);
-    try writeIntLE(&buffer, allocator, u32, header.prototypes_count);
+    try writeIntLE(&buffer, allocator, u32, header.templates_count);
 
-    try buffer.appendSlice(allocator, std.mem.sliceAsBytes(artifact.instructions));
+    try buffer.appendSlice(allocator, std.mem.sliceAsBytes(bytecode.instructions));
 
-    for (artifact.spans) |span| {
+    for (bytecode.spans) |span| {
         try writeIntLE(&buffer, allocator, u32, @intCast(span.start));
         try writeIntLE(&buffer, allocator, u32, @intCast(span.end));
         try writeIntLE(&buffer, allocator, u32, span.line);
         try writeIntLE(&buffer, allocator, u32, span.column);
     }
 
-    for (vm.constants.items) |constant| try serializeData(&buffer, allocator, vm, constant);
+    for (vm.constants.items) |constant| try serializeValue(&buffer, allocator, vm, constant);
 
-    for (vm.functions.prototypes.items) |proto| {
-        try writeIntLE(&buffer, allocator, u32, @intCast(proto.addr));
-        try writeIntLE(&buffer, allocator, u8, proto.arity);
-        try writeIntLE(&buffer, allocator, u8, @intCast(proto.register_count));
-        try writeIntLE(&buffer, allocator, u32, @intCast(proto.name.len));
-        try writeIntLE(&buffer, allocator, u32, @intCast(proto.upvalue_specs.len));
-        try writeIntLE(&buffer, allocator, u32, @intCast(proto.const_locals.len));
-        try buffer.appendSlice(allocator, proto.name);
+    for (vm.callable.templates.items) |template| {
+        try writeIntLE(&buffer, allocator, u32, @intCast(template.addr));
+        try writeIntLE(&buffer, allocator, u8, template.arity);
+        try writeIntLE(&buffer, allocator, u8, @intCast(template.register_count));
+        try writeIntLE(&buffer, allocator, u32, @intCast(template.name.len));
+        try writeIntLE(&buffer, allocator, u32, @intCast(template.upvalue_specs.len));
+        try writeIntLE(&buffer, allocator, u32, @intCast(template.const_locals.len));
+        try buffer.appendSlice(allocator, template.name);
 
-        for (proto.upvalue_specs) |spec| {
+        for (template.upvalue_specs) |spec| {
             try writeIntLE(&buffer, allocator, u8, if (spec.is_local) 1 else 0);
             try writeIntLE(&buffer, allocator, u8, @intCast(spec.index));
             try writeIntLE(&buffer, allocator, u8, if (spec.mutable) 1 else 0);
         }
 
-        for (proto.const_locals) |local| {
+        for (template.const_locals) |local| {
             try writeIntLE(&buffer, allocator, u8, @intCast(local));
         }
 
-        const bits_len = proto.const_local_bits.len;
+        const bits_len = template.const_local_bits.len;
         try writeIntLE(&buffer, allocator, u32, @intCast(bits_len));
-        try buffer.appendSlice(allocator, proto.const_local_bits[0..bits_len]);
+        try buffer.appendSlice(allocator, template.const_local_bits[0..bits_len]);
     }
 
     return buffer.toOwnedSlice(allocator);
@@ -152,41 +152,41 @@ pub fn serialize(vm: *VM, artifact: Artifact, allocator: Allocator) ![]u8 {
 // deserialization
 //
 
-/// read a single Data value from the byte stream
-fn readDataValue(vm: *VM, reader: *std.Io.Reader) anyerror!memory.Data {
+/// read a single Value value from the byte stream
+fn readValue(vm: *VM, reader: *std.Io.Reader) anyerror!memory.Value {
     const tag = (try reader.takeArray(1))[0];
     return switch (tag) {
-        @intFromEnum(memory.Type.number) => blk: {
+        @intFromEnum(memory.ValueTag.number) => blk: {
             const bits = std.mem.readInt(u64, try reader.takeArray(8), .little);
-            break :blk memory.Data.new.num(@as(f64, @bitCast(bits)));
+            break :blk memory.Value.new.num(@as(f64, @bitCast(bits)));
         },
-        @intFromEnum(memory.Type.string) => blk: {
+        @intFromEnum(memory.ValueTag.string) => blk: {
             const len = std.mem.readInt(u64, try reader.takeArray(8), .little);
             const str = try reader.take(@intCast(len));
-            break :blk try vm.ownDataString(str);
+            break :blk try vm.ownValueString(str);
         },
-        @intFromEnum(memory.Type.atom) => blk: {
+        @intFromEnum(memory.ValueTag.atom) => blk: {
             const len = std.mem.readInt(u64, try reader.takeArray(8), .little);
             const str = try reader.take(@intCast(len));
             const id = try vm.internAtom(str);
-            break :blk memory.Data.new.atom(id);
+            break :blk memory.Value.new.atom(id);
         },
-        @intFromEnum(memory.Type.function) => blk: {
+        @intFromEnum(memory.ValueTag.function) => blk: {
             const fid = std.mem.readInt(u64, try reader.takeArray(8), .little);
-            break :blk memory.Data.new.function(@intCast(fid));
+            break :blk memory.Value.new.function(@intCast(fid));
         },
-        @intFromEnum(memory.Type.table) => blk: {
+        @intFromEnum(memory.ValueTag.table) => blk: {
             const tid = std.mem.readInt(u64, try reader.takeArray(8), .little);
-            break :blk memory.Data.new.table(@intCast(tid));
+            break :blk memory.Value.new.table(@intCast(tid));
         },
         else => blk: {
             _ = try reader.takeArray(8); // skip u64 payload
-            break :blk memory.Data.new.nil();
+            break :blk memory.Value.new.nil();
         },
     };
 }
 
-// load bytecode from a binary blob, populating vm constants and prototypes
+// load bytecode from a binary blob, populating vm constants and templates
 pub fn deserialize(vm: *VM, data: []const u8, allocator: Allocator) !DeserializedBytecode {
     var reader: std.Io.Reader = .fixed(data);
 
@@ -200,7 +200,7 @@ pub fn deserialize(vm: *VM, data: []const u8, allocator: Allocator) !Deserialize
     const constants_count = std.mem.readInt(u32, try reader.takeArray(4), .little);
     const instructions_count = std.mem.readInt(u32, try reader.takeArray(4), .little);
     const spans_count = std.mem.readInt(u32, try reader.takeArray(4), .little);
-    const prototypes_count = std.mem.readInt(u32, try reader.takeArray(4), .little);
+    const templates_count = std.mem.readInt(u32, try reader.takeArray(4), .little);
 
     // inst
     const instructions = try allocator.alloc(Instruction, instructions_count);
@@ -223,11 +223,11 @@ pub fn deserialize(vm: *VM, data: []const u8, allocator: Allocator) !Deserialize
 
     // consts
     for (0..constants_count) |_| {
-        try vm.constants.append(allocator, try readDataValue(vm, &reader));
+        try vm.constants.append(allocator, try readValue(vm, &reader));
     }
 
-    // prototypes
-    for (0..prototypes_count) |_| {
+    // templates
+    for (0..templates_count) |_| {
         const addr = std.mem.readInt(u32, try reader.takeArray(4), .little);
         const arity = (try reader.takeArray(1))[0];
         const register_count: u8 = (try reader.takeArray(1))[0];
@@ -260,8 +260,8 @@ pub fn deserialize(vm: *VM, data: []const u8, allocator: Allocator) !Deserialize
         defer allocator.free(const_local_bits);
         if (const_bits_len > 0) try reader.readSliceAll(const_local_bits);
 
-        // createPrototype takes ownership do NOT free these slices after pls
-        _ = try vm.functions.createPrototype(.{
+        // createTemplate takes ownership do NOT free these slices after pls
+        _ = try vm.callable.createTemplate(.{
             .addr = addr,
             .arity = arity,
             .total_arity = arity,
@@ -287,7 +287,7 @@ pub fn deserialize(vm: *VM, data: []const u8, allocator: Allocator) !Deserialize
 const expectEqual = std.testing.expectEqual;
 
 test "serialize and deserialize round trip" {
-    const runtime = revo.lang.testing.runtime();
+    const runtime = revo.lang.test_helpers.runtime();
     var vm = try VM.init(runtime);
     defer vm.deinit();
 
@@ -299,9 +299,9 @@ test "serialize and deserialize round trip" {
         .{ .start = 0, .end = 1, .line = 1, .column = 1 },
         .{ .start = 1, .end = 2, .line = 1, .column = 2 },
     };
-    const artifact = Artifact{ .instructions = &instrs, .spans = &spans };
+    const input = Bytecode{ .instructions = &instrs, .spans = &spans };
 
-    const bytecode = try serialize(&vm, artifact, runtime.alloc);
+    const bytecode = try serialize(&vm, input, runtime.alloc);
     defer runtime.alloc.free(bytecode);
 
     try expectEqual('R', bytecode[0]);
@@ -322,7 +322,7 @@ test "serialize and deserialize round trip" {
 }
 
 test "deserialize detects invalid magic" {
-    const runtime = revo.lang.testing.runtime();
+    const runtime = revo.lang.test_helpers.runtime();
     var vm = try VM.init(runtime);
     defer vm.deinit();
 
@@ -332,12 +332,12 @@ test "deserialize detects invalid magic" {
 }
 
 test "serialize writes valid file header" {
-    const runtime = revo.lang.testing.runtime();
+    const runtime = revo.lang.test_helpers.runtime();
     var vm = try VM.init(runtime);
     defer vm.deinit();
 
-    const artifact = Artifact{ .instructions = &.{}, .spans = &.{} };
-    const bytecode = try serialize(&vm, artifact, runtime.alloc);
+    const input = Bytecode{ .instructions = &.{}, .spans = &.{} };
+    const bytecode = try serialize(&vm, input, runtime.alloc);
     defer runtime.alloc.free(bytecode);
 
     try expectEqual('R', bytecode[0]);

@@ -30,7 +30,7 @@ top-level
 ## writing a native zig extension
 
 native extensions export functions that match the `HostFn` signature:
-`(args: []const Data, vm: *VM) anyerror!HostResult`
+`(args: []const Value, vm: *VM) anyerror!HostResult`
 
 in it, are:
 
@@ -45,14 +45,14 @@ in it, are:
 const revo = @import("revo");
 const HostBinding = revo.HostBinding;
 const HostResult = revo.std_lib.HostResult;
-const Data = revo.Data;
+const Value = revo.Value;
 const VM = revo.VM;
 
-fn add(args: []const Data, _: *VM) anyerror!HostResult {
+fn add(args: []const Value, _: *VM) anyerror!HostResult {
     if (args.len < 2) return HostResult.errArity(args.len, 2);
     const a = args[0].asNum() orelse return HostResult.errType(0, "number", "other");
     const b = args[1].asNum() orelse return HostResult.errType(1, "number", "other");
-    return HostResult.data(Data.new.num(a + b));
+    return HostResult.data(Value.new.num(a + b));
 }
 
 pub export const revo_native_bindings = [_]HostBinding{
@@ -67,8 +67,8 @@ pub export const revo_native_bindings = [_]HostBinding{
 
 ```zig
 // success
-return HostResult.data(Data.new.num(42));
-return HostResult.data(Data.new.str(string_id));
+return HostResult.data(Value.new.num(42));
+return HostResult.data(Value.new.str(string_id));
 return HostResult._bool(true);
 
 // error with arity info
@@ -86,12 +86,12 @@ return HostResult.other("something went wrong");
 ### accessing the vm
 
 ```zig
-fn echo(args: []const Data, vm: *VM) anyerror!HostResult {
+fn echo(args: []const Value, vm: *VM) anyerror!HostResult {
     const id = args[0].asString() orelse return HostResult.errType(0, "string", "other");
     const bytes = vm.stringValue(id);
     // intern a new string
     const new_id = revo.ffi.revo_intern(@ptrCast(vm), @intFromPtr(bytes.ptr), bytes.len);
-    return HostResult.data(Data.new.str(new_id));
+    return HostResult.data(Value.new.str(new_id));
 }
 ```
 

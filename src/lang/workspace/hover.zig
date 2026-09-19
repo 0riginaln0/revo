@@ -7,7 +7,7 @@ const revo = @import("revo");
 const common = @import("common.zig");
 const pipeline = @import("../pipeline.zig");
 const txt = @import("text.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 
 const W = @import("../Workspace.zig");
 const Workspace = W.Workspace;
@@ -30,13 +30,13 @@ pub fn hover(
     const snap = analysis.snapshot;
     const name = txt.wordAtPosition(snap.text, pos) orelse return null;
 
-    // stdlib fallback; when name not bound in the ast
+    // baselib fallback; when name not bound in the ast
     if (try self.definition(alloc, id, pos, opts) == null) {
-        if (revo.std_lib.api.find(name)) |spec| {
+        if (revo.baselib.specs.find(name)) |spec| {
             var buf = std.Io.Writer.Allocating.init(alloc);
             defer buf.deinit();
             try buf.writer.writeAll("```revo\n");
-            try revo.std_lib.api.renderSignature(&buf.writer, spec.*);
+            try revo.baselib.specs.renderSignature(&buf.writer, spec.*);
             try buf.writer.writeAll("\n```");
             if (spec.doc.len > 0) {
                 try buf.writer.print("\n\n{s}", .{spec.doc});
@@ -62,7 +62,7 @@ pub fn hover(
                 defer common.freeSymbols(alloc, @constCast(ms));
                 for (ms) |s| {
                     if (!std.mem.eql(u8, s.name, name)) continue;
-                    const sym_tn = if (s.type_name) |ti| try type_serde.formatTypeOpts(alloc, ti, .{}) else "";
+                    const sym_tn = if (s.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                     defer if (sym_tn.len > 0) alloc.free(sym_tn);
 
                     const display = try renderDefinition(alloc, name, sym_tn, self, fid);
@@ -96,7 +96,7 @@ pub fn hover(
             if (std.mem.eql(u8, sym.name, name) and
                 sym.range.start.line == def.range.start.line)
             {
-                type_name = if (sym.type_name) |ti| try type_serde.formatTypeOpts(alloc, ti, .{}) else "";
+                type_name = if (sym.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                 record_display = try renderRecordDisplay(alloc, sym);
                 break;
             }
@@ -106,7 +106,7 @@ pub fn hover(
         defer def_analysis.deinit(alloc);
         for (def_analysis.symbols) |sym| {
             if (std.mem.eql(u8, sym.name, name)) {
-                type_name = if (sym.type_name) |ti| try type_serde.formatTypeOpts(alloc, ti, .{}) else "";
+                type_name = if (sym.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                 record_display = try renderRecordDisplay(alloc, sym);
                 break;
             }
@@ -128,7 +128,7 @@ pub fn hover(
 
                 for (ms) |s| {
                     if (try self.fnSig(alloc, dep_id, s.name) != null) {
-                        const sym_tn = if (s.type_name) |ti| try type_serde.formatTypeOpts(alloc, ti, .{}) else "";
+                        const sym_tn = if (s.type_name) |ti| try type_syntax.formatTypeOpts(alloc, ti, .{}) else "";
                         defer if (sym_tn.len > 0) alloc.free(sym_tn);
 
                         const display = try renderDefinition(alloc, s.name, sym_tn, self, dep_id);
@@ -208,7 +208,7 @@ pub fn hoverByName(
         sym_range = sym.range; // last binding wins
         if (sym.type_name) |ti| {
             if (type_name.len > 0) alloc.free(type_name);
-            type_name = try type_serde.formatTypeOpts(alloc, ti, .{});
+            type_name = try type_syntax.formatTypeOpts(alloc, ti, .{});
         }
     }
     if (doc == null and sig == null and sym_range == null) return null;
@@ -247,7 +247,7 @@ fn renderRecordDisplay(alloc: std.mem.Allocator, sym: Symbol) ![]const u8 {
 
     var buf = std.Io.Writer.Allocating.init(alloc);
     errdefer buf.deinit();
-    try type_serde.printType(ti, &buf.writer, .{ .values = previews });
+    try type_syntax.printType(ti, &buf.writer, .{ .values = previews });
     const record = try buf.toOwnedSlice();
     defer alloc.free(record);
 
@@ -292,7 +292,7 @@ pub fn renderDefinition(
             try buf.writer.writeAll(p.name);
             if (p.optional) try buf.writer.writeByte('?');
             if (p.type_name) |ti| {
-                const pt = try type_serde.formatTypeOpts(alloc, ti, .{});
+                const pt = try type_syntax.formatTypeOpts(alloc, ti, .{});
                 defer alloc.free(pt);
                 try buf.writer.print(": {s}", .{pt});
             }
@@ -300,7 +300,7 @@ pub fn renderDefinition(
 
         try buf.writer.writeByte(')');
         if (sig.return_type) |rt| {
-            const rt_str = try type_serde.formatTypeOpts(alloc, rt, .{});
+            const rt_str = try type_syntax.formatTypeOpts(alloc, rt, .{});
             try buf.writer.print(" -> {s}", .{rt_str});
         }
 
@@ -330,7 +330,7 @@ test "workspace hover shows record field values" {
     ;
     const id = try ws.open("<test>", source, .{});
     const query_opts: pipeline.BuildOptions = .{
-        .include_stdlib_macros = false,
+        .include_baselib_macros = false,
         .install_debug_info = false,
         .test_mode = false,
     };
@@ -346,7 +346,7 @@ test "workspace hover over lib import manifest" {
     defer arena.deinit();
     const alloc = arena.allocator();
     const query_opts: pipeline.BuildOptions = .{
-        .include_stdlib_macros = false,
+        .include_baselib_macros = false,
         .install_debug_info = false,
         .test_mode = true,
     };
@@ -399,7 +399,7 @@ test "workspace hover over bare fn definition" {
     defer arena.deinit();
     const alloc = arena.allocator();
     const query_opts: pipeline.BuildOptions = .{
-        .include_stdlib_macros = false,
+        .include_baselib_macros = false,
         .install_debug_info = false,
         .test_mode = true,
     };

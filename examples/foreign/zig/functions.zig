@@ -1,31 +1,31 @@
 const revo = @import("revo");
 const std = @import("std");
 
-const ext = revo.ext;
-const T = ext.T;
-const VM = ext.VM;
-const Data = ext.Data;
-const HostResult = ext.HostResult;
+const extension = revo.extension;
+const Args = extension.ArgTypes;
+const VM = extension.VM;
+const Value = extension.Value;
+const HostResult = extension.HostResult;
 
 const Impl = struct {
-    pub fn zadd(vm: *VM, a: T.number, b: T.number) !HostResult {
+    pub fn zadd(vm: *VM, a: Args.number, b: Args.number) !HostResult {
         _ = vm;
-        return .data(Data.new.num(a + b));
+        return .data(Value.new.num(a + b));
     }
 
-    pub fn zecho(vm: *VM, s: T.string) !HostResult {
+    pub fn zecho(vm: *VM, s: Args.string) !HostResult {
         _ = vm;
         // ids pass through as-is, no re-intern needed
-        return .data(Data.new.str(@intFromEnum(s)));
+        return .data(Value.new.str(@intFromEnum(s)));
     }
 
-    pub fn zsetglobal(vm: *VM, name: T.string, value: T.any) !HostResult {
-        try vm.setGlobal(ext.str(vm, name), value);
-        return .data(Data.new.num(1));
+    pub fn zsetglobal(vm: *VM, name: Args.string, value: Args.any) !HostResult {
+        try vm.setGlobal(extension.str(vm, name), value);
+        return .data(Value.new.num(1));
     }
 
-    pub fn zconcat(vm: *VM, parts: T.table, sep: T.string) !HostResult {
-        const separator = ext.str(vm, sep);
+    pub fn zconcat(vm: *VM, parts: Args.table, sep: Args.string) !HostResult {
+        const separator = extension.str(vm, sep);
         const tab = try vm.tables.get(@intFromEnum(parts));
 
         var buf = try std.ArrayList(u8).initCapacity(vm.runtime.alloc, 32);
@@ -35,8 +35,8 @@ const Impl = struct {
             const s_id = item.asString() orelse return .errType(0, "table of strings", "other");
             try buf.appendSlice(vm.runtime.alloc, vm.stringValue(s_id));
         }
-        return .data(try vm.adoptDataStringNoDedup(try buf.toOwnedSlice(vm.runtime.alloc)));
+        return .data(try vm.adoptValueStringNoDedup(try buf.toOwnedSlice(vm.runtime.alloc)));
     }
 };
 
-pub export const revo_native_bindings_ex = ext.bindingsFor(Impl);
+pub export const revo_native_bindings_ex = extension.bindingsFor(Impl);

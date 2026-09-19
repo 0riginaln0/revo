@@ -1,4 +1,4 @@
-const bindings = @import("src/c/bindings.zig");
+const bindings = @import("src/capi/header_gen.zig");
 const builtin = @import("builtin");
 const std = @import("std");
 
@@ -227,8 +227,8 @@ pub fn build(b: *Build) !void {
         .optimize = effective_optimize,
         .link_libc = !is_freestanding,
     });
-    const c_mod = b.addModule("c", .{
-        .root_source_file = b.path("src/c/root.zig"),
+    const c_mod = b.addModule("capi", .{
+        .root_source_file = b.path("src/capi/root.zig"),
         .target = target,
         .optimize = effective_optimize,
         .link_libc = !is_freestanding,
@@ -243,7 +243,7 @@ pub fn build(b: *Build) !void {
         .root_source_file = if (features.lsp)
             b.path("src/lsp/server.zig")
         else
-            b.path("src/lsp/noop.zig"),
+            b.path("src/lsp/disabled.zig"),
         .target = target,
         .optimize = effective_optimize,
         .link_libc = !is_freestanding,
@@ -251,10 +251,10 @@ pub fn build(b: *Build) !void {
             .{ .name = "lsp", .module = lsp_kit_dep.module("lsp") },
         } else &.{},
     });
-    // wasi-cli uses main.zig (wasi syscalls), web uses main_wasm.zig (js imports)
+    // wasi-cli uses cli.zig (wasi syscalls), web uses wasm_entry.zig (js imports)
     const is_wasi_cli = wasi_cli and is_wasm;
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path(if (is_wasi_cli) "src/main.zig" else if (is_wasm) "src/main_wasm.zig" else "src/main.zig"),
+        .root_source_file = b.path(if (is_wasi_cli) "src/cli.zig" else if (is_wasm) "src/wasm_entry.zig" else "src/cli.zig"),
         .target = target,
         .optimize = effective_optimize,
         .link_libc = !is_freestanding,
@@ -263,8 +263,8 @@ pub fn build(b: *Build) !void {
         },
     });
     const erevo_mod = if (!is_freestanding)
-        b.addModule("erevo", .{
-            .root_source_file = b.path("src/c/erevo.zig"),
+        b.addModule("embed", .{
+            .root_source_file = b.path("src/capi/embed.zig"),
             .target = target,
             .optimize = effective_optimize,
             .link_libc = !is_freestanding,
@@ -285,7 +285,7 @@ pub fn build(b: *Build) !void {
     defer import_list.deinit(b.allocator);
     try import_list.append(b.allocator, .{ .name = "revo", .module = revo_mod });
     try import_list.append(b.allocator, .{ .name = "vm", .module = vm_mod });
-    try import_list.append(b.allocator, .{ .name = "c", .module = c_mod });
+    try import_list.append(b.allocator, .{ .name = "capi", .module = c_mod });
     // shouldn't get compiled in if regex flag unspecified
     try import_list.append(b.allocator, .{
         .name = "mvzr",
@@ -449,7 +449,7 @@ pub fn build(b: *Build) !void {
             });
             c_test_exe.rdynamic = true;
             c_test_exe.root_module.addCSourceFile(.{
-                .file = b.path("src/c/tests.c"),
+                .file = b.path("src/capi/tests.c"),
                 .flags = &.{
                     "-std=c99", "-Wall", "-Wextra",
                 },
@@ -520,7 +520,7 @@ pub fn build(b: *Build) !void {
                 .link_libc = !release_is_fs,
             });
             const rel_c_mod = b.createModule(.{
-                .root_source_file = b.path("src/c/root.zig"),
+                .root_source_file = b.path("src/capi/root.zig"),
                 .target = release_target,
                 .optimize = release_optimize,
                 .link_libc = !release_is_fs,
@@ -537,7 +537,7 @@ pub fn build(b: *Build) !void {
             for (rel_core_mods) |mod| {
                 mod.addImport("revo", rel_revo_mod);
                 mod.addImport("vm", rel_vm_mod);
-                mod.addImport("c", rel_c_mod);
+                mod.addImport("capi", rel_c_mod);
                 mod.addImport("mvzr", rel_mvzr_mod);
                 mod.addImport("build_options", rel_options_mod);
             }
@@ -554,26 +554,26 @@ pub fn build(b: *Build) !void {
                 .root_source_file = if (release_lsp_enabled)
                     b.path("src/lsp/server.zig")
                 else
-                    b.path("src/lsp/noop.zig"),
+                    b.path("src/lsp/disabled.zig"),
                 .target = release_target,
                 .optimize = release_optimize,
                 .link_libc = !release_is_fs,
                 .imports = if (release_lsp_enabled) &[_]Module.Import{
                     .{ .name = "revo", .module = rel_revo_mod },
                     .{ .name = "vm", .module = rel_vm_mod },
-                    .{ .name = "c", .module = rel_c_mod },
+                    .{ .name = "capi", .module = rel_c_mod },
                     .{ .name = "build_options", .module = rel_options_mod },
                     .{ .name = "lsp", .module = lsp_kit_dep.module("lsp") },
                 } else &.{},
             });
 
-            // wasi-cli uses main.zig (wasi syscalls), web uses main_wasm.zig (js imports)
+            // wasi-cli uses cli.zig (wasi syscalls), web uses wasm_entry.zig (js imports)
             const release_main_file = if (release_is_wasi_cli)
-                "src/main.zig"
+                "src/cli.zig"
             else if (release_is_wasm)
-                "src/main_wasm.zig"
+                "src/wasm_entry.zig"
             else
-                "src/main.zig";
+                "src/cli.zig";
 
             const release_mod = b.createModule(.{
                 .root_source_file = b.path(release_main_file),
@@ -583,7 +583,7 @@ pub fn build(b: *Build) !void {
                 .imports = &[_]Module.Import{
                     .{ .name = "revo", .module = rel_revo_mod },
                     .{ .name = "vm", .module = rel_vm_mod },
-                    .{ .name = "c", .module = rel_c_mod },
+                    .{ .name = "capi", .module = rel_c_mod },
                     .{ .name = "build_options", .module = rel_options_mod },
                     .{ .name = "isocline", .module = rel_isocline_mod },
                     .{ .name = "mimalloc", .module = rel_mimalloc_mod },

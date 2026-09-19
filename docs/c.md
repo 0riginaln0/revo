@@ -49,8 +49,8 @@ title: two-way c interop
 despite being written in zig, revo gives you a real c api for embedding
 and extensions. the header is auto-generated from zig `callconv(.c)`
 functions, always in sync with what the library actually exports.
-{{< ref "src/c/ffi.zig" >}}
-{{< ref "src/c/bindings.zig" >}}
+{{< ref "src/capi/exports.zig" >}}
+{{< ref "src/capi/header_gen.zig" >}}
 
 ### build
 
@@ -63,7 +63,7 @@ you get a static library and an auto-generated header:
 ~ `zig-out/lib/liberevo.a`
 ~ `zig-out/include/revo.h`
 
-{{< ref "src/c/erevo.zig" >}}
+{{< ref "src/capi/embed.zig" >}}
 
 the `extern struct`s in `erevo.zig` dictate are the ones you get in your C code
 
@@ -91,7 +91,7 @@ if (!prog) {
     return 1;
 }
 
-RevoData result;
+RevoValue result;
 if (!erevo_run(vm, prog, &result)) {
     puts(erevo_vm_last_error(vm));
 }
@@ -124,12 +124,12 @@ same vm
 all values are a single nanboxed `uint64_t`:
 
 ```c
-typedef uint64_t RevoData;
+typedef uint64_t RevoValue;
 ```
 
 numbers are the raw f64 bits; boxed values pack the type nibble (bits
 51-48) and a payload (low 48 bits) behind a box tag. the payload is an
-intern id,, except `foreign`, whose payload is the low 48 bits of the
+intern id,, except `opaque`, whose payload is the low 48 bits of the
 wrapped pointer:
 
 ```c
@@ -139,45 +139,45 @@ typedef enum {
     revo_atom = 9,
     revo_function = 10,
     revo_table = 11,
-    revo_foreign = 13,
+    revo_opaque = 13,
 } RevoType;
 ```
 
 **constructors**
 
 ```c
-RevoData v = revo_nil();              // :nil
-RevoData v = revo_bool(1);            // :true / :false
-RevoData v = revo_string(string_id);  // from interned id
-RevoData v = revo_num(3.14);          // number
-RevoData v = revo_atom_val(atom_id);  // atom by raw id
-RevoData v = revo_table(table_id);    // from table id
-RevoData v = revo_function(func_id);  // from function id
+RevoValue v = revo_nil();              // :nil
+RevoValue v = revo_bool(1);            // :true / :false
+RevoValue v = revo_string(string_id);  // from interned id
+RevoValue v = revo_num(3.14);          // number
+RevoValue v = revo_atom_val(atom_id);  // atom by raw id
+RevoValue v = revo_table(table_id);    // from table id
+RevoValue v = revo_function(func_id);  // from function id
 ```
 
 **extractors**
 
 ```c
-double   revo_num_value(RevoData);
-uint64_t revo_string_id(RevoData);
-uint64_t revo_atom_id(RevoData);
-uint64_t revo_table_id(RevoData);
-void    *revo_foreign_ptr(RevoData);  // null if not foreign (see below)
-int      revo_bool_val(RevoData);   // 0 or 1, 0 if not bool
-int      revo_type(RevoData);       // the RevoType of the value
+double   revo_num_value(RevoValue);
+uint64_t revo_string_id(RevoValue);
+uint64_t revo_atom_id(RevoValue);
+uint64_t revo_table_id(RevoValue);
+void    *revo_opaque_ptr(RevoValue);  // null if not opaque (see below)
+int      revo_bool_val(RevoValue);   // 0 or 1, 0 if not bool
+int      revo_type(RevoValue);       // the RevoType of the value
 ```
 
 **type checks**
 
 ```c
-int revo_is_nil(RevoData);
-int revo_is_number(RevoData);
-int revo_is_string(RevoData);
-int revo_is_atom(RevoData);
-int revo_is_function(RevoData);
-int revo_is_table(RevoData);
-int revo_is_foreign(RevoData);
-int revo_is_bool(RevoData);
+int revo_is_nil(RevoValue);
+int revo_is_number(RevoValue);
+int revo_is_string(RevoValue);
+int revo_is_atom(RevoValue);
+int revo_is_function(RevoValue);
+int revo_is_table(RevoValue);
+int revo_is_opaque(RevoValue);
+int revo_is_bool(RevoValue);
 ```
 
 built-in atoms have guaranteed and consistent values in the `RevoAtom` enum, such as
@@ -189,28 +189,28 @@ this means you don't have to intern them manually
 
 {{< ref "pub const RevoAtom" >}}
 
-### foreign
+### opaque
 
-opaque handles. a foreign wraps a raw `void*` revo never touches.
+opaque handles. an opaque wraps a raw `void*` revo never touches.
 caller owns the memory
 
 ```c
-RevoData v = revo_foreign_new(ptr);    // wrap
-void *p = revo_foreign_ptr(v);         // unwrap
-int is_f = revo_is_foreign(v);         // check
+RevoValue v = revo_opaque_new(ptr);    // wrap
+void *p = revo_opaque_ptr(v);         // unwrap
+int is_f = revo_is_opaque(v);         // check
 ```
 
-{{< ref "pub fn revo_foreign_new(" >}}
-{{< ref "pub fn revo_foreign_ptr(" >}}
+{{< ref "pub fn revo_opaque_new(" >}}
+{{< ref "pub fn revo_opaque_ptr(" >}}
 
-**null is ambiguous.** `revo_foreign_ptr` is null for non-foreign
+**null is ambiguous.** `revo_opaque_ptr` is null for non-opaque
 values and null ptrs:
 
 ```c
-if (!revo_is_foreign(v)) {
-    // not foreign at all
+if (!revo_is_opaque(v)) {
+    // not opaque at all
 } else {
-    void *p = revo_foreign_ptr(v);  // null here means a genuine null ptr
+    void *p = revo_opaque_ptr(v);  // null here means a genuine null ptr
 }
 ```
 
@@ -223,29 +223,29 @@ explicit `free`; revo is never the owner:
 ```c
 typedef struct { double total; } Total;
 
-void total_new(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+void total_new(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
     (void)argc; (void)argv;
     Total *t = malloc(sizeof(Total));
     if (!t) { *out = revo_nil(); return; }
     t->total = 0;
-    *out = revo_foreign_new(t);
+    *out = revo_opaque_new(t);
 }
 
-void total_add(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+void total_add(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
     (void)vm;
-    if (argc < 2 || !revo_is_foreign(argv[0]) || !revo_is_number(argv[1])) {
+    if (argc < 2 || !revo_is_opaque(argv[0]) || !revo_is_number(argv[1])) {
         *out = revo_nil();
         return;
     }
-    Total *t = revo_foreign_ptr(argv[0]);
+    Total *t = revo_opaque_ptr(argv[0]);
     if (!t) { *out = revo_nil(); return; }
     t->total += revo_num_value(argv[1]);
     *out = revo_num(t->total);
 }
 
-void total_free(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+void total_free(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
     (void)vm; (void)argc;
-    if (argc >= 1 && revo_is_foreign(argv[0])) free(revo_foreign_ptr(argv[0]));
+    if (argc >= 1 && revo_is_opaque(argv[0])) free(revo_opaque_ptr(argv[0]));
     *out = revo_nil();
 }
 ```
@@ -253,22 +253,22 @@ void total_free(void *vm, size_t argc, RevoData *argv, RevoData *out) {
 **transport.** ordinary values: globals, table fields, call args, `*out`
 
 ```revo
-type(ptr)    # :foreign
-foreign?(ptr) # :true
+typeof(ptr)    # :opaque
+opaque?(ptr) # :true
 ```
 
-ptr identity, opaque render (`<foreign *>`)
+ptr identity, opaque render (`<opaque *>`)
 
 ### rooting
 
-a `RevoData` in a c local roots nothing. values reachable only from c
+a `RevoValue` in a c local roots nothing. values reachable only from c
 can be swept (ids reused) by the next collection. pin what you hold
 across calls:
 
 ```c
 uint64_t r = revo_ref(vm, val);  // 0 on failure
 // eval / call freely; revo_getref(vm, r) stays valid
-RevoData same = revo_getref(vm, r);
+RevoValue same = revo_getref(vm, r);
 revo_unref(vm, r);               // release exactly once
 ```
 
@@ -304,7 +304,7 @@ strings are interned! every unique string has a stable `uint64_t` id
 
 ```c
 uint64_t sid = revo_intern(vm, (uint64_t)(uintptr_t)"hello", 5);
-RevoData val = revo_string(sid);
+RevoValue val = revo_string(sid);
 ```
 
 the pointer must stay valid for the duration of the call
@@ -325,9 +325,9 @@ uint64_t len = revo_string_length(vm, sid);
 ### calling revo functions from c
 
 ```c
-RevoData fn_val;             // get from eval, global, etc.
-RevoData args[2] = { revo_num(10.0), revo_num(20.0) };
-RevoData result;
+RevoValue fn_val;             // get from eval, global, etc.
+RevoValue args[2] = { revo_num(10.0), revo_num(20.0) };
+RevoValue result;
 
 int ok = revo_call(vm, fn_val, 2, args, &result);
 ```
@@ -339,11 +339,11 @@ returns 0 if the value wasn't callable or the call threw. max 16 args.
 
 ```c
 revo_setglobal(vm, (uint64_t)(uintptr_t)"name", 4, revo_num(42.0));
-RevoData v = revo_getglobal(vm, (uint64_t)(uintptr_t)"name", 4);
+RevoValue v = revo_getglobal(vm, (uint64_t)(uintptr_t)"name", 4);
 
 // or via c-string wrappers (call strlen internally)
 revo_setglobal_cstr(vm, "name", revo_num(42.0));
-RevoData v = revo_getglobal_cstr(vm, "name");
+RevoValue v = revo_getglobal_cstr(vm, "name");
 ```
 
 missing keys return `:nil`
@@ -356,19 +356,19 @@ functions take the table value itself, lookups report presence
 through the return value so missing keys are distinct from nil values:
 
 ```c
-RevoData t = revo_table_create(vm);
+RevoValue t = revo_table_create(vm);
 
 // named fields
 revo_table_set_name(vm, t, (uint64_t)"x", 1, revo_num(42.0));
-RevoData v;
+RevoValue v;
 bool found = revo_table_get_name(vm, t, (uint64_t)"x", 1, &v);  // true
 
 // generic keys (metatable-aware, like t[k])
-RevoData key = revo_atom_val(revo_intern_atom(vm, ...));
+RevoValue key = revo_atom_val(revo_intern_atom(vm, ...));
 revo_table_set(vm, t, key, revo_num(42.0));
 
 // array part
-RevoData arr = revo_table_from_items(vm, 2, (RevoData[]){ revo_num(1.0), revo_num(2.0) });
+RevoValue arr = revo_table_from_items(vm, 2, (RevoValue[]){ revo_num(1.0), revo_num(2.0) });
 revo_table_push(vm, arr, revo_num(3.0));
 revo_table_get_idx(vm, arr, 1, &v);   // 2.0, false when out of range
 
@@ -392,7 +392,7 @@ if (bad) {
 }
 // ... later, on the receiving side:
 if (revo_is_ok(vm, val)) {
-    RevoData payload;
+    RevoValue payload;
     revo_ok_value(vm, val, &payload);
 }
 ```
@@ -406,7 +406,7 @@ extensions are shared libraries that export a `revo_bindings` array.
 every c function follows this signature:
 
 ```c
-typedef int (*RevoFn)(void *vm, size_t argc, RevoData *argv, RevoData *out);
+typedef int (*RevoFn)(void *vm, size_t argc, RevoValue *argv, RevoValue *out);
 ```
 
 return `REVO_OK` (0), anything else raises (`*out` ignored on err):
@@ -423,7 +423,7 @@ a minimal extension:
 ```c
 #include "revo.h"
 
-int greet(void *vm, size_t argc, RevoData *argv, RevoData *out) {
+int greet(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
     (void)vm; (void)argc; (void)argv;
     *out = revo_num(42.0);
     return REVO_OK;
@@ -447,7 +447,7 @@ if (!ok) return revo_c_err_other(vm, "boom");
 
 ```c
 int revo_c_err_arity(void *vm, uint64_t got, uint64_t expected);
-int revo_c_err_type(void *vm, uint64_t arg, const char *expected, RevoData got);
+int revo_c_err_type(void *vm, uint64_t arg, const char *expected, RevoValue got);
 int revo_c_err_other(void *vm, const char *msg);
 ```
 
@@ -468,9 +468,9 @@ a worked-through example is at {{< ref "examples/c/extension.c" >}}, rebuild the
 
 **data conversion**
 
-`RevoData` is nanboxed: numbers are the raw f64 bits, everything else
+`RevoValue` is nanboxed: numbers are the raw f64 bits, everything else
 is the type nibble plus a payload packed into the low 48 bits (an intern
-id, except foreign, which stores the low 48 bits of the pointer).
+id, except opaque, which stores the low 48 bits of the pointer).
 the type helpers read a c value out of the same word:
 
 ```ruby
@@ -482,7 +482,7 @@ the type helpers read a c value out of the same word:
 fn()           - revo_is_function - revo_function_id
 {} (table)     - revo_is_table    - revo_table_id
 {1, 2} (table) - revo_is_table    - revo_table_id
-foreign ptr    - revo_is_foreign      - revo_foreign_ptr
+opaque ptr    - revo_is_opaque      - revo_opaque_ptr
 ```
 
 a value can be moved through any of the constructors in its row
@@ -545,7 +545,7 @@ cc -shared -fPIC -o extension.dylib extension.c -I/path/to/zig-out/include
 - on success set `*out` (even nil) + `return REVO_OK`; `*out`
   ignored on err paths
 - `-fPIC` for shared libraries
-- don't store `RevoData` values past the call; intern or copy what
+- don't store `RevoValue` values past the call; intern or copy what
   you need
-- persistent native state is a `revo_foreign_new` ptr passed as context;
+- persistent native state is a `revo_opaque_new` ptr passed as context;
   otherwise a revo table

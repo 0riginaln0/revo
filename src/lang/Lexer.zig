@@ -30,7 +30,7 @@ pub const TokenType = enum {
     string,
     multiline_string,
     backtick_string,
-    hash,
+    atom,
     ident,
     kw_const,
     kw_let,
@@ -75,7 +75,7 @@ pub const TokenType = enum {
     minus,
     star,
     slash,
-    slash_slash,
+    floor_div,
     percent,
     caret,
     caret_assign,
@@ -100,7 +100,7 @@ pub const TokenType = enum {
     colon,
     comma,
     semicolon,
-    pipe,
+    bar,
     pipe_forward,
     huh,
     bang,
@@ -120,9 +120,9 @@ pub const TokenType = enum {
         return switch (self) {
             .number => .number,
             .string, .multiline_string, .backtick_string => .string,
-            .hash => .enum_member,
+            .atom => .enum_member,
             .kw_const, .kw_let, .kw_macro, .kw_test, .kw_suite, .kw_skip, .kw_type, .kw_fn, .kw_if, .kw_unless, .kw_else, .kw_match, .kw_when, .kw_do, .kw_end, .kw_loop, .kw_for, .kw_while, .kw_global, .kw_in, .kw_break, .kw_continue, .kw_return, .kw_import, .kw_spawn, .kw_yield, .kw_and, .kw_or, .kw_not, .kw_band, .kw_bor, .kw_bxor, .kw_shl, .kw_shr, .kw_comp, .kw_proc, .kw_orelse, .kw_pub, .kw_declare => .keyword,
-            .plus, .minus, .star, .slash, .slash_slash, .percent, .caret, .caret_assign, .eq, .neq, .lt, .gt, .lte, .gte, .assign, .plus_assign, .minus_assign, .star_assign, .slash_assign, .percent_assign, .concat, .concat_assign, .arrow, .fat_arrow, .dot, .dotdot, .colon, .comma, .semicolon, .pipe, .pipe_forward, .huh, .bang, .lparen, .rparen, .lbracket, .rbracket, .lsquiggly, .rsquiggly, .attribute => .operator,
+            .plus, .minus, .star, .slash, .floor_div, .percent, .caret, .caret_assign, .eq, .neq, .lt, .gt, .lte, .gte, .assign, .plus_assign, .minus_assign, .star_assign, .slash_assign, .percent_assign, .concat, .concat_assign, .arrow, .fat_arrow, .dot, .dotdot, .colon, .comma, .semicolon, .bar, .pipe_forward, .huh, .bang, .lparen, .rparen, .lbracket, .rbracket, .lsquiggly, .rsquiggly, .attribute => .operator,
             .comment => .comment,
             .doc_comment => .comment,
             .module_doc => .module_doc,
@@ -373,7 +373,7 @@ fn next(self: *Lexer) !Token {
         '|' => if (self.matchChar('>'))
             self.makeToken(.pipe_forward, start, self.pos, line, column)
         else
-            self.makeToken(.pipe, start, self.pos, line, column),
+            self.makeToken(.bar, start, self.pos, line, column),
         '+' => if (self.matchChar('='))
             self.makeToken(.plus_assign, start, self.pos, line, column)
         else
@@ -391,7 +391,7 @@ fn next(self: *Lexer) !Token {
         '/' => if (self.matchChar('='))
             self.makeToken(.slash_assign, start, self.pos, line, column)
         else if (self.matchChar('/'))
-            self.makeToken(.slash_slash, start, self.pos, line, column)
+            self.makeToken(.floor_div, start, self.pos, line, column)
         else
             self.makeToken(.slash, start, self.pos, line, column),
         '%' => if (self.matchChar('='))
@@ -403,7 +403,7 @@ fn next(self: *Lexer) !Token {
         else
             self.makeToken(.caret, start, self.pos, line, column),
         ':' => if (isIdentStart(self.peek()) or isSymbolAtomStart(self.peek()))
-            self.lexHash(start, line, column)
+            self.lexAtom(start, line, column)
         else
             self.makeToken(.colon, start, self.pos, line, column),
         '=' => if (self.matchChar('='))
@@ -589,9 +589,9 @@ fn lexComment(self: *Lexer) !Token {
     return self.makeToken(.comment, start, self.pos, line, column);
 }
 
-fn lexHash(self: *Lexer, start: usize, line: u32, column: u32) !Token {
+fn lexAtom(self: *Lexer, start: usize, line: u32, column: u32) !Token {
     while (isAtomContinue(self.peek())) _ = self.advance();
-    return self.makeToken(.hash, start, self.pos, line, column);
+    return self.makeToken(.atom, start, self.pos, line, column);
 }
 
 fn lexNumber(self: *Lexer, start: usize, line: u32, column: u32) Token {
@@ -1044,7 +1044,7 @@ pub fn isAtomContinue(c: u8) bool {
     return isIdentContinue(c) or isSymbolAtomStart(c);
 }
 
-test "lexes calls with sigils and hash literals" {
+test "lexes calls with sigils and atom literals" {
     try testing.expectTokens("if foo(0) == :WriteDenied bar(1)", &.{
         .{ .t = .kw_if, .v = "if" },
         .{ .t = .ident, .v = "foo" },
@@ -1052,7 +1052,7 @@ test "lexes calls with sigils and hash literals" {
         .{ .t = .number, .v = "0" },
         .{ .t = .rparen, .v = ")" },
         .{ .t = .eq, .v = "==" },
-        .{ .t = .hash, .v = ":WriteDenied" },
+        .{ .t = .atom, .v = ":WriteDenied" },
         .{ .t = .ident, .v = "bar" },
         .{ .t = .lparen, .v = "(" },
         .{ .t = .number, .v = "1" },
@@ -1148,7 +1148,7 @@ test "lexes float numbers and range without conflict" {
 test "lexes floor division and bitwise keywords" {
     try testing.expectTokens("5 // 2 band bor bxor shl shr", &.{
         .{ .t = .number, .v = "5" },
-        .{ .t = .slash_slash, .v = "//" },
+        .{ .t = .floor_div, .v = "//" },
         .{ .t = .number, .v = "2" },
         .{ .t = .kw_band, .v = "band" },
         .{ .t = .kw_bor, .v = "bor" },
@@ -1171,14 +1171,14 @@ test "lexes caret and caret assign" {
     });
 }
 
-const t = @import("testing.zig");
+const t = @import("test_helpers.zig");
 test "lexes match type and text" {
     const source = "match :true | (1 + 1) / (2 * 2) == 4 :good | 1 + 8 == 2 :bad";
-    try t.expectTypes(source, &.{ .kw_match, .hash, .pipe, .lparen, .number, .plus, .number, .rparen, .slash, .lparen, .number, .star, .number, .rparen, .eq, .number, .hash, .pipe, .number, .plus, .number, .eq, .number, .hash, .eof });
+    try t.expectTypes(source, &.{ .kw_match, .atom, .bar, .lparen, .number, .plus, .number, .rparen, .slash, .lparen, .number, .star, .number, .rparen, .eq, .number, .atom, .bar, .number, .plus, .number, .eq, .number, .atom, .eof });
     try t.expectTokens(source, &.{
         .{ .t = .kw_match, .v = "match" },
-        .{ .t = .hash, .v = ":true" },
-        .{ .t = .pipe, .v = "|" },
+        .{ .t = .atom, .v = ":true" },
+        .{ .t = .bar, .v = "|" },
         .{ .t = .lparen, .v = "(" },
         .{ .t = .number, .v = "1" },
         .{ .t = .plus, .v = "+" },
@@ -1192,14 +1192,14 @@ test "lexes match type and text" {
         .{ .t = .rparen, .v = ")" },
         .{ .t = .eq, .v = "==" },
         .{ .t = .number, .v = "4" },
-        .{ .t = .hash, .v = ":good" },
-        .{ .t = .pipe, .v = "|" },
+        .{ .t = .atom, .v = ":good" },
+        .{ .t = .bar, .v = "|" },
         .{ .t = .number, .v = "1" },
         .{ .t = .plus, .v = "+" },
         .{ .t = .number, .v = "8" },
         .{ .t = .eq, .v = "==" },
         .{ .t = .number, .v = "2" },
-        .{ .t = .hash, .v = ":bad" },
+        .{ .t = .atom, .v = ":bad" },
         .{ .t = .eof, .v = "" },
     });
 }
@@ -1222,10 +1222,10 @@ test "lexes multiline block syntax" {
         .ident,
         .rparen,
         .eq,
-        .hash,
-        .hash,
+        .atom,
+        .atom,
         .kw_else,
-        .hash,
+        .atom,
         .kw_end,
         .eof,
     });
@@ -1351,7 +1351,7 @@ test "lexes function block with multiline string and table" {
         .{ .t = .comma, .v = "," },
         .{ .t = .ident, .v = "status" },
         .{ .t = .assign, .v = "=" },
-        .{ .t = .hash, .v = ":ok" },
+        .{ .t = .atom, .v = ":ok" },
         .{ .t = .rsquiggly, .v = "}" },
         .{ .t = .kw_end, .v = "end" },
         .{ .t = .eof, .v = "" },

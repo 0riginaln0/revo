@@ -197,7 +197,7 @@ test "workspace query surface" {
     ;
     const id = try ws.open("<test>", source, .{});
     const query_opts: pipeline.BuildOptions = .{
-        .include_stdlib_macros = false,
+        .include_baselib_macros = false,
         .install_debug_info = false,
         .test_mode = false,
     };

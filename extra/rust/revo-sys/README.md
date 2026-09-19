@@ -27,13 +27,13 @@ full runnable version in `examples/high-level.rs`
 (`cargo run --example high-level`), edge cases in `tests/api.rs`.
 
 ```rust
-use revo_sys::{Data, Program, Table, VM};
+use revo_sys::{Value, Program, Table, VM};
 
 let mut vm = VM::new();
 
 // oneshot
 let v = vm.eval("40 + 2", None)?;
-assert_eq!(v, Data::Num(42.0));
+assert_eq!(v, Value::Num(42.0));
 
 // compile once, run as often as you like
 // > `Program` borrows the vm, so it can't outlive it
@@ -43,22 +43,22 @@ drop(prog);
 
 // share state across evals through globals
 //   missing names read back as `:nil`
-vm.set_global("x", &Data::Num(21.0))?;
+vm.set_global("x", &Value::Num(21.0))?;
 let v = vm.eval("x * 2", None)?;
 
 // call a revo function value from rust
 let f = vm.eval("fn(a, b) a + b", None)?;
-let v = vm.call(&f, &[Data::Num(20.0), Data::Num(22.0)])?;
+let v = vm.call(&f, &[Value::Num(20.0), Value::Num(22.0)])?;
 
 // tables both ways
 // : build one here, hand it over, read it back
 let mut t = Table::new(&vm);
-t.set_name("answer", &Data::Num(42.0))?;
+t.set_name("answer", &Value::Num(42.0))?;
 
-let data = t.to_data(); // `t`'s borrow ends here, so `vm` is usable again
+let data = t.to_value(); // `t`'s borrow ends here, so `vm` is usable again
 vm.set_global("t", &data)?;
 
-let back = Table::from_data(&vm, &vm.get_global("t")?)?;
+let back = Table::from_value(&vm, &vm.get_global("t")?)?;
 let answer = back.get_name("answer")?;
 ```
 
@@ -76,7 +76,7 @@ this still needs much more work, especially by someone who can work proc macros
 use std::ffi::*;
 use revo_sys::ffi::*;
 
-extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoData, out: *mut RevoData) {
+extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoValue, out: *mut RevoValue) {
     unsafe {
         *out = 0; // `0u64` is `0.0`; numbers are raw f64 bits
     }

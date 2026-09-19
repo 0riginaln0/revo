@@ -278,7 +278,7 @@ pub const Session = struct {
         revo.lang.deinitError(self.gpa, err);
     }
 
-    fn printRuntimeFailure(self: *Session, out: *std.Io.Writer, source: []const u8, failure: revo.EvalFailure) !void {
+    fn printRuntimeFailure(self: *Session, out: *std.Io.Writer, source: []const u8, failure: revo.RunFailure) !void {
         var buf = std.Io.Writer.Allocating.init(self.gpa);
         defer buf.deinit();
         try failure.render(self.gpa, &buf.writer, source);
@@ -315,7 +315,7 @@ pub const Session = struct {
     }
 
     /// :h <name>
-    /// session decls first, then stdlib
+    /// session decls first, then baselib
     fn helpTopic(self: *Session, out: *std.Io.Writer, name: []const u8) !bool {
         if (self.last_file) |fid| {
             if (try self.workspace.hoverByName(self.gpa, fid, name)) |text| {
@@ -325,8 +325,8 @@ pub const Session = struct {
                 return true;
             }
         }
-        if (revo.std_lib.api.findQualified(name)) |spec| {
-            try revo.lang.docs.renderFn(self.gpa, out, spec, .{ .leading_newline = false, .qualified_type = true });
+        if (revo.baselib.specs.findQualified(name)) |spec| {
+            try revo.lang.docgen.renderFn(self.gpa, out, spec, .{ .leading_newline = false, .qualified_type = true });
             return true;
         }
         if (std.mem.findScalar(u8, name, '.') == null and std.mem.findScalar(u8, name, ':') == null) {
@@ -339,24 +339,24 @@ pub const Session = struct {
     /// group doc plus one signature per member
     fn helpModule(self: *Session, out: *std.Io.Writer, name: []const u8) !bool {
         var found = false;
-        for (revo.std_lib.api.full_specs) |group| for (group) |*spec| {
+        for (revo.baselib.specs.full_specs) |group| for (group) |*spec| {
             const is_mod = switch (spec.head.kind) {
-                .module => spec.head.module != null and std.mem.eql(u8, spec.head.module.?, name),
+                .namespaced => spec.head.module != null and std.mem.eql(u8, spec.head.module.?, name),
                 .method => spec.head.target_name != null and std.mem.eql(u8, spec.head.target_name.?, name),
                 .global => false,
             };
             if (!is_mod) continue;
             if (!found) {
                 found = true;
-                const doc = revo.std_lib.api.moduleDoc(name);
+                const doc = revo.baselib.specs.moduleDoc(name);
                 if (doc.len > 0) {
-                    try revo.pretty.style(out, "\x1b[2m");
+                    try revo.term.style(out, "\x1b[2m");
                     try out.writeAll(doc);
-                    try revo.pretty.style(out, "\x1b[0m");
+                    try revo.term.style(out, "\x1b[0m");
                     try out.writeAll("\n\n");
                 }
             }
-            try revo.lang.docs.renderFn(self.gpa, out, spec, .{
+            try revo.lang.docgen.renderFn(self.gpa, out, spec, .{
                 .leading_newline = false,
                 .qualified_type = true,
                 .show_doc = false,
@@ -365,7 +365,7 @@ pub const Session = struct {
         return found;
     }
 
-    pub fn step(self: *Session, out: *std.Io.Writer, raw_line: []const u8) !bool {
+    pub fn evalLine(self: *Session, out: *std.Io.Writer, raw_line: []const u8) !bool {
         const line = std.mem.trim(u8, raw_line, " \t\r\n");
         defer self.vm.runtime.resetDiagArena();
 
@@ -452,17 +452,17 @@ pub const Session = struct {
             try out.writeAll(buf.written());
         }
 
-        const artifact = analysis.artifact.?;
-        analysis.artifact = null;
-        defer self.gpa.free(artifact.instructions);
-        defer self.gpa.free(artifact.spans);
+        const bytecode = analysis.bytecode.?;
+        analysis.bytecode = null;
+        defer self.gpa.free(bytecode.instructions);
+        defer self.gpa.free(bytecode.spans);
 
-        self.vm.setProgramDebugInfo(artifact.spans, source, "<repl>") catch {};
+        self.vm.setProgramDebugInfo(bytecode.spans, source, "<repl>") catch {};
 
-        const run_result = revo.module.runCompiledModuleReport(
+        const run_result = revo.run.runBytecodeReport(
             self.vm,
             ".",
-            artifact.instructions,
+            bytecode.instructions,
         ) catch |err| {
             try out.print("runtime error: {}\n", .{err});
             self.clearSnippet();
@@ -530,7 +530,7 @@ pub fn run(vm: *VM, gpa: Allocator, init: std.process.Init) !void {
         isocline_c.ic_set_default_highlighter(@ptrCast(&isoclineHighlighter), null);
 
         for (&[_][]const u8{ "keyword", "string", "number", "function", "hash" }) |s| {
-            const def = revo.pretty.replStyleDef(s);
+            const def = revo.term.replStyleDef(s);
             var name_buf: [32]u8 = undefined;
             const s_c = try std.fmt.bufPrintSentinel(&name_buf, "{s}", .{s}, 0);
             _ = isocline_c.ic_style_def(s_c.ptr, def.ptr);
@@ -549,7 +549,7 @@ pub fn run(vm: *VM, gpa: Allocator, init: std.process.Init) !void {
 
         const raw = readLine(init) catch break;
         defer init.gpa.free(raw);
-        if (!try session.step(writer, raw)) break;
+        if (!try session.evalLine(writer, raw)) break;
         try writer.flush();
     }
 
@@ -569,7 +569,7 @@ fn initTestEnv(alloc: std.mem.Allocator) !TestEnv {
     vm.* = try revo.VM.init(.{ .alloc = alloc, .io = std.testing.io, .diag_alloc = alloc });
     const session = try Session.init(vm, alloc, std.testing.io);
     const out = std.Io.Writer.Allocating.init(alloc);
-    revo.pretty.supports_color = false;
+    revo.term.supports_color = false;
     return TestEnv{ .vm = vm, .session = session, .out = out };
 }
 
@@ -582,7 +582,7 @@ test "repl parked metamethod resumes with correct result" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer,
+    try std.testing.expect(try env.session.evalLine(&env.out.writer,
         \\ const ch = chan()
         \\ spawn (fn() send(ch, 42))()
         \\ const t = set_meta({}, { __index = fn(_self, k) recv(ch) })
@@ -600,7 +600,7 @@ test "repl closing a socket wakes a parked recv with SocketClosed" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer,
+    try std.testing.expect(try env.session.evalLine(&env.out.writer,
         \\ const srv = (net.listen(0))?
         \\ const port = srv.port
         \\ const client = (net.connect("127.0.0.1", port))?
@@ -623,7 +623,7 @@ test "repl spawned host connect completes" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer,
+    try std.testing.expect(try env.session.evalLine(&env.out.writer,
         \\ const srv = (net.listen(0))?
         \\ const port = srv.port
         \\ const h = spawn net.connect("127.0.0.1", port)
@@ -644,7 +644,7 @@ test "repl prints results" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer, "1 + 1"));
+    try std.testing.expect(try env.session.evalLine(&env.out.writer, "1 + 1"));
     try std.testing.expectEqualStrings("2\n", env.out.written());
 }
 
@@ -654,13 +654,13 @@ test "repl handles commands" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer, ":features"));
+    try std.testing.expect(try env.session.evalLine(&env.out.writer, ":features"));
     try std.testing.expect(std.mem.find(u8, env.out.written(), "isocline=") != null);
     env.out.clearRetainingCapacity();
 
-    try std.testing.expect(try env.session.step(&env.out.writer, ":h"));
+    try std.testing.expect(try env.session.evalLine(&env.out.writer, ":h"));
     try std.testing.expect(std.mem.find(u8, env.out.written(), "usage: :h <name>") != null);
-    try std.testing.expect(!(try env.session.step(&env.out.writer, ":q")));
+    try std.testing.expect(!(try env.session.evalLine(&env.out.writer, ":q")));
 }
 
 test "repl :h shows docs like hover" {
@@ -669,25 +669,25 @@ test "repl :h shows docs like hover" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    _ = try env.session.step(&env.out.writer,
+    _ = try env.session.evalLine(&env.out.writer,
         \\ #* asdf *#
         \\ global hi = fn() 5
     );
     env.out.clearRetainingCapacity();
 
-    _ = try env.session.step(&env.out.writer, ":h hi");
+    _ = try env.session.evalLine(&env.out.writer, ":h hi");
     const hi_help = env.out.written();
     try std.testing.expect(std.mem.find(u8, hi_help, "fn hi()") != null);
     try std.testing.expect(std.mem.find(u8, hi_help, "asdf") != null);
 }
 
-test "repl :h falls back to stdlib docs" {
+test "repl :h falls back to baselib docs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    _ = try env.session.step(&env.out.writer, ":h print");
+    _ = try env.session.evalLine(&env.out.writer, ":h print");
     const help = env.out.written();
     try std.testing.expect(std.mem.find(u8, help, "print(") != null);
     try std.testing.expect(std.mem.find(u8, help, "prints values to stdout") != null);
@@ -699,12 +699,12 @@ test "repl keeps globals after runtime failure" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    try std.testing.expect(try env.session.step(&env.out.writer,
+    try std.testing.expect(try env.session.evalLine(&env.out.writer,
         \\ global a = fn(x: int, y: string) "asdf"
     ));
 
     const before_call = env.out.written().len;
-    try std.testing.expect(try env.session.step(&env.out.writer, "a(5, \"hi\")"));
+    try std.testing.expect(try env.session.evalLine(&env.out.writer, "a(5, \"hi\")"));
     try std.testing.expect(std.mem.findPos(u8, env.out.written(), before_call, "asdf") != null);
 }
 
@@ -714,10 +714,10 @@ test "repl can call a global function later" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    const ok1 = try env.session.step(&env.out.writer, "global f = fn(a, b) a + b");
+    const ok1 = try env.session.evalLine(&env.out.writer, "global f = fn(a, b) a + b");
     try std.testing.expect(ok1);
     const before_call = env.out.written().len;
-    const ok2 = try env.session.step(&env.out.writer, "f(1, 3)");
+    const ok2 = try env.session.evalLine(&env.out.writer, "f(1, 3)");
     try std.testing.expect(ok2);
     try std.testing.expect(std.mem.findPos(u8, env.out.written(), before_call, "4\n") != null);
 }
@@ -730,11 +730,11 @@ test "repl string methods work on multiple string literals" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    const ok1 = try env.session.step(&env.out.writer, "\"abc\":trim()");
+    const ok1 = try env.session.evalLine(&env.out.writer, "\"abc\":trim()");
     try std.testing.expect(ok1);
 
     const before = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "\"abc\":sub(1,1)");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":sub(1,1)");
     // second step should succeed but may error with wrong method name
     try std.testing.expect(std.mem.find(u8, env.out.written()[before..], "error:") == null);
 }
@@ -746,10 +746,10 @@ test {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    _ = try env.session.step(&env.out.writer, "\"abc\":sub(1,1)");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":sub(1,1)");
 
     const before = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "\"abc\":trim()");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":trim()");
     try std.testing.expect(std.mem.find(u8, env.out.written()[before..], "error:") == null);
 }
 
@@ -759,17 +759,17 @@ test "repl multiple string methods in sequence" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    _ = try env.session.step(&env.out.writer, "\"abc\":trim()");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":trim()");
     const before = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "\"abc\":split(\"b\")");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":split(\"b\")");
     try std.testing.expect(std.mem.find(u8, env.out.written()[before..], "error:") == null);
 
     const before2 = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "\"abc\":replace(\"b\", \"d\")");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":replace(\"b\", \"d\")");
     try std.testing.expect(std.mem.find(u8, env.out.written()[before2..], "error:") == null);
 
     const before3 = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "\"abc\":starts_with?(\"a\")");
+    _ = try env.session.evalLine(&env.out.writer, "\"abc\":starts_with?(\"a\")");
     try std.testing.expect(std.mem.find(u8, env.out.written()[before3..], "error:") == null);
 }
 
@@ -779,9 +779,9 @@ test "global declared in one compilation can be reassigned in another" {
     const alloc = arena.allocator();
     var env = try initTestEnv(alloc);
 
-    _ = try env.session.step(&env.out.writer, "global test1 = 123");
+    _ = try env.session.evalLine(&env.out.writer, "global test1 = 123");
 
     const before = env.out.written().len;
-    _ = try env.session.step(&env.out.writer, "test1 = 789");
+    _ = try env.session.evalLine(&env.out.writer, "test1 = 789");
     try std.testing.expect(std.mem.find(u8, env.out.written()[before..], "error:") == null);
 }

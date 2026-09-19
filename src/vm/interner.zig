@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const lang = revo.lang;
-const lang_testing = revo.lang.testing;
+const lang_testing = revo.lang.test_helpers;
 const revo = @import("revo");
 
 const VM = revo.VM;
@@ -17,10 +17,10 @@ dead: std.ArrayList(memory.StringID),
 by_name: std.StringHashMap(memory.StringID),
 
 pub fn init(alloc: std.mem.Allocator) !Interner {
-    const core_atoms_fields = @typeInfo(revo.core_atoms).@"enum".fields;
+    const CoreAtoms_fields = @typeInfo(revo.CoreAtoms).@"enum".fields;
     var self = Interner{
         .alloc = alloc,
-        .slots = try std.ArrayList(?[]u8).initCapacity(alloc, core_atoms_fields.len),
+        .slots = try std.ArrayList(?[]u8).initCapacity(alloc, CoreAtoms_fields.len),
         .marks = try std.DynamicBitSet.initEmpty(alloc, 64),
         .dead = .empty,
         .by_name = std.StringHashMap(memory.StringID).init(alloc),
@@ -28,7 +28,7 @@ pub fn init(alloc: std.mem.Allocator) !Interner {
     errdefer self.slots.deinit(alloc);
     errdefer self.marks.deinit();
 
-    inline for (core_atoms_fields) |field| {
+    inline for (CoreAtoms_fields) |field| {
         _ = try self.own(field.name);
     }
     return self;
@@ -144,7 +144,7 @@ test "string literals survive source free" {
 
     const alloc = lang_testing.runtime().alloc;
     const source = try alloc.dupe(u8, "\"hello\"");
-    const artifact = switch (try lang.build(&vm, .{ .text = source }, .{})) {
+    const bytecode = switch (try lang.build(&vm, .{ .text = source }, .{})) {
         .ok => |ok| ok,
         .err => |err| {
             defer lang.deinitError(alloc, err);
@@ -152,12 +152,12 @@ test "string literals survive source free" {
         },
     };
     alloc.free(source);
-    defer alloc.free(artifact.instructions);
-    defer alloc.free(artifact.spans);
+    defer alloc.free(bytecode.instructions);
+    defer alloc.free(bytecode.spans);
 
-    vm.mainFiber().program = artifact.instructions;
+    vm.mainFiber().program = bytecode.instructions;
 
-    switch (try revo.vm.exec.runReport(&vm)) {
+    switch (try revo.vm.dispatch.runReport(&vm)) {
         .err => return error.Failed,
         .ok => {},
     }

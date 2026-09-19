@@ -32,7 +32,7 @@ title: 'docs'
   - [structural types](#structural-types)
   - [table methods](#table-methods)
   - [? suffix convention](#suffix-convention)
-  - [foreign](#foreign)
+  - [opaque](#opaque)
 - [operators](#operators)
 - [control flow](#control-flow)
   - [if/else](#ifelse)
@@ -46,7 +46,7 @@ title: 'docs'
 - [test blocks](#test-blocks)
 - [builtins](#builtins)
 - [fibers and channels](#fibers-and-channels)
-- [stdlib modules](#stdlib-modules)
+- [baselib modules](#baselib-modules)
 - [modules](#modules)
 - [doc comments](#doc-comments)
 - [advanced](#advanced)
@@ -306,7 +306,6 @@ the fundamental types are:
     "  hi  ":trim()           # "hi"
     "hello":sub(1, 3)         # "ell"
     "a,b,c":split(",")        # {"a", "b", "c"}
-    "hello":find("ll")        # 2, or :missing
     "hello":replace("l", "r") # "herro"
     "hello":starts_with?("he") # :true
     "hello":ends_with?("lo")   # :true
@@ -315,7 +314,7 @@ the fundamental types are:
     "hello":reverse()         # "olleh"
     ("abc"):with(1, "X")      # "aXc" (0-indexed, returns new string)
     string_join({"a", "b"}, ",") # "a,b"
-    string.join({"a", "b"}, ",") # "a,b"  (module method)
+    string.join({"a", "b"}, ",") # "a,b"  (namespaced function)
     "hello" ~ " world"        # concatenation
     "ha" * 3                  # "hahaha"
     ```
@@ -489,7 +488,7 @@ core `Target:key` heads are rejected on `pub type`; metatable slots are values, 
 "extension.so"` looks up a sibling `extension.d.rv` by stem and types every
 call against those `pub declare`s
 
-and the standard library itself is driven by them - `src/std/iface/*.d.rv`
+and the standard library itself is driven by them - `src/baselib/iface/*.d.rv`
 are the single source of truth that the runtime registration, compile-time
 typing, and the [generated reference](./std) all read from
 
@@ -538,7 +537,7 @@ else
     x
 ```
 
-supported predicates: `number?`, `string?`, `table?`, `atom?`, `function?`, `foreign?`
+supported predicates: `number?`, `string?`, `table?`, `atom?`, `function?`, `opaque?`
 
 ### runtime type predicates
 
@@ -553,15 +552,15 @@ function?(fn() 42) # :true
 table?({1, 2})    # :true
 ```
 
-`type(x)` returns the runtime type as an atom:
+`typeof(x)` returns the runtime type as an atom:
 
 ```revo
-type(42)       # :number
-type("hi")     # :string
-type(:ok)      # :atom
-type(fn() :nil) # :function
-type({{}})       # :table
-type({1, 2})   # :table
+typeof(42)       # :number
+typeof("hi")     # :string
+typeof(:ok)      # :atom
+typeof(fn() :nil) # :function
+typeof({{}})       # :table
+typeof({1, 2})   # :table
 ```
 
 ### structural types
@@ -587,7 +586,7 @@ p.y = 12
 
 methods are closures stored in the table and receive `self` as the first
 argument. method fields go in the type too, so colon calls resolve to
-them instead of stdlib methods with the same name:
+them instead of baselib methods with the same name:
 
 ```revo
 type Counter = { n: number, inc: function }
@@ -614,16 +613,16 @@ fn is_ok?() do :ok end
 fn is_ok?() -> bool do :true end
 ```
 
-### foreign
+### opaque
 
-`foreign` wraps a raw pointer as a value:
+`opaque` wraps a raw pointer as a value:
 
 ```revo
-type(:some_pointer)  # => :foreign
-foreign?(42)         # check at runtime
+typeof(:some_pointer)  # => :opaque
+opaque?(42)         # check at runtime
 ```
 
-foreign values compare by pointer identity and have no destructor; the caller manages the pointer's lifetime
+opaque values compare by pointer identity and have no destructor; the caller manages the pointer's lifetime
 
 ## operators
 
@@ -1186,7 +1185,7 @@ print(cwd())
 print("hello", :world, 42)
 ```
 
-`type(x)` - returns the runtime type as an atom (see [types](#runtime-type-predicates))
+`typeof(x)` - returns the runtime type as an atom (see [types](#runtime-type-predicates))
 
 `revo.eval(code)` - evaluate a string as revo code at runtime:
 
@@ -1209,12 +1208,12 @@ const h = spawn add(39, 3)
 join(h) # 42
 ```
 
-channels coordinate fibers. unbuffered channels (`chan(0)`) block the sender until a receiver
+channels coordinate fibers. unbuffered channels (`chan()`) block the sender until a receiver
 is ready. buffered channels block only when full:
 
 ```revo
 # unbuffered
-const ch = chan(0)
+const ch = chan()
 const sender = fn() send(ch, 42)
 const s = spawn sender()
 recv(ch) # 42
@@ -1235,7 +1234,7 @@ do yield end
 sleep(100)
 ```
 
-## stdlib modules
+## baselib modules
 
 revo ships a small set of helpful globals without imports: essentials like `print`, `read`, `cwd`,
 and `revo.eval`, plus a few module-style namespaces
@@ -1350,10 +1349,10 @@ fmt("hello %d", "world")  # hello "world"
 fmt("hello %p", :world)   # hello "world" (this one has colors)
 ```
 
-`debug` - inspect the current vm state:
+`debug_info` - inspect the current vm state:
 
 ```revo
-debug()  # table with fiber_id, pc, stack, frames, and register info
+debug_info()  # table with fiber_id, pc, stack, frames, and register info
 ```
 
 ## modules
@@ -1506,7 +1505,7 @@ extract docs with `revo doc script.rv`:
   adds two numbers
 ```
 
-the stdlib runs on the same comments: `src/std/iface/*.d.rv` is the single
+the baselib runs on the same comments: `src/baselib/iface/*.d.rv` is the single
 source of truth behind runtime registration, compile-time typing, and the
 [generated reference]({{< ref "std" >}})
 
@@ -1516,7 +1515,7 @@ source of truth behind runtime registration, compile-time typing, and the
 
 `comp` evaluates an expression at compile time and replaces it with the constant result in the
 bytecode. compile time happens both when executing a script directly and when running
-`revo build in.rv out.rvo`:
+`revo compile in.rv out.rvo`:
 
 ```revo
 const LIMIT = comp (1024 * 1024)
@@ -1654,7 +1653,7 @@ let r = `42`
 r == {:number, 42} # :true
 
 let r = `:hello`
-r == {:hash, "hello"} # :true
+r == {:atom, "hello"} # :true
 ```
 
 tables nest:
@@ -1711,8 +1710,8 @@ print(x, y) # 2, 1
 
 #### preloaded macros
 
-these live in `src/std/iface/root.d.rv` and merge into every build;
-  stdlib groups can add more (`pub macro uri.shout! ...`), called qualified:
+these live in `src/baselib/iface/root.d.rv` and merge into every build;
+  baselib groups can add more (`pub macro uri.shout! ...`), called qualified:
 
 ```revo
 ok?!({:ok, 42})            # :true

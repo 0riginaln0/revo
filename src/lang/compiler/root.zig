@@ -2,7 +2,7 @@
 const std = @import("std");
 
 const revo = @import("revo");
-const Data = revo.Data;
+const Value = revo.Value;
 const Instruction = revo.Instruction;
 const Opcode = revo.opcode.Opcode;
 const Operand = revo.Operand;
@@ -14,22 +14,22 @@ const ProgramCounter = revo.ProgramCounter;
 const ast = @import("../ast.zig");
 const Node = ast.Node;
 const Binding = ast.Binding;
+const control = @import("control.zig");
 const dce = @import("../ir/dce.zig");
-const expander = @import("../expander.zig");
-const flow = @import("flow.zig");
 const fold = @import("../ir/fold.zig");
 const ir = @import("../ir/root.zig");
+const macro_pattern = @import("../macro_pattern.zig");
 const peephole = @import("../ir/peephole.zig");
-const state_mod = @import("state.zig");
+const state_mod = @import("locals.zig");
 
+const bindings = @import("bindings.zig");
 const diagnostic = @import("../diagnostic.zig");
-const type_serde = @import("../type_serde.zig");
+const type_syntax = @import("../type_syntax.zig");
 pub const types = @import("types.zig");
-const values = @import("values.zig");
 
 const toRegister = state_mod.toRegister;
 
-pub const LowerErrorKind = enum {
+pub const CompileErrorKind = enum {
     ParseError,
     CompileError,
     UnsupportedSyntax,
@@ -37,38 +37,38 @@ pub const LowerErrorKind = enum {
     IntegerOutOfRange,
 };
 
-pub const LowerResult = union(enum) {
+pub const CompileResult = union(enum) {
     ok: []Instruction,
-    err: LowerFailure,
+    err: CompileFailure,
 };
 
-pub const Artifact = struct {
+pub const Bytecode = struct {
     instructions: []Instruction,
     spans: []ast.Span,
 };
 
-pub const ArtifactResult = union(enum) {
-    ok: Artifact,
-    err: LowerFailure,
+pub const BytecodeResult = union(enum) {
+    ok: Bytecode,
+    err: CompileFailure,
 };
 
-pub const LowerError = error{
+pub const CompileError = error{
     ParseError,
     UnsupportedSyntax,
     InvalidAssignmentTarget,
     IntegerOutOfRange,
-} || std.mem.Allocator.Error || expander.ExpandError;
+} || std.mem.Allocator.Error || macro_pattern.ExpandError;
 
-const InternalLowerError = LowerError || error{LoweringFailed};
+const InternalCompileError = CompileError || error{CompileFailed};
 
-pub const LowerFailure = diagnostic.Diagnostic(LowerErrorKind);
+pub const CompileFailure = diagnostic.Diagnostic(CompileErrorKind);
 
-pub fn lowerExprArtifactReport(
+pub fn compileExprReport(
     vm: *VM,
     expr: *const Node,
     test_mode: bool,
     type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeInfo),
-) !ArtifactResult {
+) !BytecodeResult {
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
 
@@ -82,8 +82,8 @@ pub fn lowerExprArtifactReport(
     defer compiler.deinit();
 
     compiler.compileRoot(expr) catch |err| switch (err) {
-        error.LoweringFailed => {
-            const failure = try compiler.finishFailure() orelse return error.LoweringFailed;
+        error.CompileFailed => {
+            const failure = try compiler.finishFailure() orelse return error.CompileFailed;
             const report = try failure.report.copy(vm.runtime.diag_alloc);
             return .{ .err = .{
                 .kind = failure.kind,
@@ -93,7 +93,7 @@ pub fn lowerExprArtifactReport(
         else => return err,
     };
 
-    return .{ .ok = try compiler.finishArtifact() };
+    return .{ .ok = try compiler.finishBytecode() };
 }
 
 pub const Compiler = struct {
@@ -110,7 +110,7 @@ pub const Compiler = struct {
     loop_stack: std.ArrayList(state_mod.LoopFrame),
     test_suite_names: std.ArrayList([]const u8),
     in_loop_depth: usize = 0,
-    failure_reports: std.ArrayList(LowerFailure),
+    failure_reports: std.ArrayList(CompileFailure),
     spans: std.ArrayList(ast.Span),
     active_span: ast.Span = .{
         .start = 0,
@@ -126,9 +126,9 @@ pub const Compiler = struct {
     upvalue_cache: std.AutoHashMap(usize, usize),
     type_aliases: std.StringHashMap(types.TypeInfo),
     type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeInfo) = null,
-    pending_prototypes: std.ArrayList(revo.PrototypeID),
+    pending_templates: std.ArrayList(revo.TemplateID),
     declared_globals: std.StringHashMap(void),
-    current_proto: revo.PrototypeID = 0,
+    current_template: revo.TemplateID = 0,
     fn_depth: usize = 0,
     // names whose locals are currently being initialized; branch-local slots are
     // hidden from name resolution so initializers see the outer binding
@@ -148,7 +148,7 @@ pub const Compiler = struct {
             .test_mode = test_mode,
             .functions = try std.ArrayList(FunctionState).initCapacity(arena, 4),
             .slot_allocators = try std.ArrayList(LocalSlot).initCapacity(arena, 4),
-            .failure_reports = try std.ArrayList(LowerFailure).initCapacity(arena, 4),
+            .failure_reports = try std.ArrayList(CompileFailure).initCapacity(arena, 4),
             .spans = try std.ArrayList(ast.Span).initCapacity(arena, 32),
             .loop_stack = try std.ArrayList(state_mod.LoopFrame).initCapacity(arena, 8),
             .test_suite_names = try std.ArrayList([]const u8).initCapacity(arena, 4),
@@ -157,7 +157,7 @@ pub const Compiler = struct {
             .upvalue_cache = std.AutoHashMap(usize, usize).init(arena),
             .type_aliases = std.StringHashMap(types.TypeInfo).init(arena),
             .declared_globals = std.StringHashMap(void).init(arena),
-            .pending_prototypes = try std.ArrayList(revo.PrototypeID).initCapacity(arena, 4),
+            .pending_templates = try std.ArrayList(revo.TemplateID).initCapacity(arena, 4),
             .masking_stack = try std.ArrayList([]const u8).initCapacity(arena, 4),
         };
     }
@@ -174,7 +174,7 @@ pub const Compiler = struct {
         }
         self.loop_stack.deinit(self.alloc);
         self.test_suite_names.deinit(self.alloc);
-        self.pending_prototypes.deinit(self.alloc);
+        self.pending_templates.deinit(self.alloc);
         self.masking_stack.deinit(self.alloc);
         self.ir_builder.deinit();
         self.value_stack.deinit(self.alloc);
@@ -302,7 +302,7 @@ pub const Compiler = struct {
         return false;
     }
 
-    pub fn finishArtifact(self: *Compiler) !Artifact {
+    pub fn finishBytecode(self: *Compiler) !Bytecode {
         // if (self.ir_builder.instructions.items.len < 40) {
         //     std.debug.print("[RAWFN]\n", .{});
         //     for (self.ir_builder.instructions.items) |inst| {
@@ -312,17 +312,17 @@ pub const Compiler = struct {
         try fold.foldIr(self);
         try dce.dceIr(self);
         try peephole.peepholeIr(self);
-        const lowered = try self.lowerToVerifyBytecode();
-        const instr_copy = try self.runtime_alloc.dupe(Instruction, lowered);
-        defer self.alloc.free(lowered);
+        const bytecode = try self.toBytecode();
+        const instr_copy = try self.runtime_alloc.dupe(Instruction, bytecode);
+        defer self.alloc.free(bytecode);
 
-        if (self.pending_prototypes.items.len > 0) {
-            const segment_copy = try self.runtime_alloc.dupe(Instruction, lowered);
-            const segment_id = try self.vm.functions.addBytecodeSegment(segment_copy);
-            for (self.pending_prototypes.items) |proto_id| {
-                self.vm.functions.prototypes.items[proto_id].segment_id = segment_id;
+        if (self.pending_templates.items.len > 0) {
+            const segment_copy = try self.runtime_alloc.dupe(Instruction, bytecode);
+            const segment_id = try self.vm.callable.addBytecodeSegment(segment_copy);
+            for (self.pending_templates.items) |template_id| {
+                self.vm.callable.templates.items[template_id].segment_id = segment_id;
             }
-            self.pending_prototypes.items.len = 0;
+            self.pending_templates.items.len = 0;
         }
 
         const spans_copy = try self.runtime_alloc.dupe(ast.Span, self.spans.items);
@@ -391,7 +391,7 @@ pub const Compiler = struct {
         _ = try self.record(.move, &.{.{ .inst = src }}, true, result_reg, 0);
     }
 
-    pub fn lowerToVerifyBytecode(self: *Compiler) ![]Instruction {
+    pub fn toBytecode(self: *Compiler) ![]Instruction {
         var out = try std.ArrayList(Instruction)
             .initCapacity(self.alloc, self.ir_builder.instructions.items.len);
         defer out.deinit(self.alloc);
@@ -433,21 +433,21 @@ pub const Compiler = struct {
         state_mod.popRegister(self);
     }
 
-    pub fn validateName(self: *Compiler, name: []const u8, span: ast.Span) InternalLowerError!void {
+    pub fn validateName(self: *Compiler, name: []const u8, span: ast.Span) InternalCompileError!void {
         if (ast.isDiscardName(name) or std.mem.eql(u8, name, "<fn>")) return;
         if (std.mem.findAny(u8, name[0..name.len -| 1], "!?") != null) {
             try self.appendFailureReport(.ParseError, &.{
                 .{ .@"error" = "! and ? are only allowed at the end of names" },
                 .{ .span = .{ .span = span, .role = .primary, .message = name } },
             });
-            return error.LoweringFailed;
+            return error.CompileFailed;
         }
         if (std.mem.endsWith(u8, name, "!")) {
             try self.appendFailureReport(.ParseError, &.{
                 .{ .@"error" = "name with ! is reserved for macros" },
                 .{ .span = .{ .span = span, .role = .primary, .message = name } },
             });
-            return error.LoweringFailed;
+            return error.CompileFailed;
         }
     }
 
@@ -457,8 +457,8 @@ pub const Compiler = struct {
         try self.recordLoad(.load_nil, dst, 0);
     }
 
-    pub fn @"const"(self: *Compiler, v: Data) !void {
-        if (v.asNum()) |n| {
+    pub fn @"const"(self: *Compiler, v: Value) !void {
+        if (v.asNumOpt()) |n| {
             if (n >= 0 and n <= 65535 and @trunc(n) == n) {
                 const dst = try state_mod.pushRegister(self);
                 try self.spans.append(self.alloc, self.active_span);
@@ -504,7 +504,7 @@ pub const Compiler = struct {
                 result_reg = try toRegister(d - 1);
                 try self.recordStackOp(op, 1, 1, result_reg, op_arg);
             },
-            .load_global, .load_stdlib_global, .load_local, .load_upval, .closure, .table_new, .load_nil, .load_small_int, .load_const => {
+            .load_user_global, .load_builtin_global, .load_local, .load_upval, .make_closure, .table_new, .load_nil, .load_small_int, .load_const => {
                 result_reg = try toRegister(d);
                 d += 1;
                 try self.recordStackOp(op, 0, 1, result_reg, op_arg);
@@ -523,7 +523,7 @@ pub const Compiler = struct {
                 d -= 1;
                 try self.recordStackOp(op, 1, 0, result_reg, op_arg);
             },
-            .store_global, .store_global_const, .store_upval => {
+            .store_user_global, .store_user_global_const, .store_upval => {
                 std.debug.assert(d > 0);
                 result_reg = try toRegister(d - 1);
                 d -= 1;
@@ -608,7 +608,7 @@ pub const Compiler = struct {
         if (d > self.max_registers) self.max_registers = d;
     }
 
-    pub fn compile(self: *Compiler, expr: *const Node, keep: bool) InternalLowerError!void {
+    pub fn compile(self: *Compiler, expr: *const Node, keep: bool) InternalCompileError!void {
         const prev_span = self.active_span;
         self.active_span = expr.span;
         defer self.active_span = prev_span;
@@ -617,9 +617,9 @@ pub const Compiler = struct {
         if (!keep) try self.regRelease();
     }
 
-    pub fn compileRoot(self: *Compiler, expr: *const Node) InternalLowerError!void {
+    pub fn compileRoot(self: *Compiler, expr: *const Node) InternalCompileError!void {
         try self.compileFn(&.{}, null, expr, "__main", null, &.{});
-        if (self.failure_reports.items.len != 0) return error.LoweringFailed;
+        if (self.failure_reports.items.len != 0) return error.CompileFailed;
         try self.emit(.call, 0);
         try self.emit(.halt, 0);
     }
@@ -631,7 +631,7 @@ pub const Compiler = struct {
         return std.fmt.allocPrint(self.alloc, "{s}::{s}", .{ prefix, test_name });
     }
 
-    pub fn compileValue(self: *Compiler, expr: *const Node) InternalLowerError!void {
+    pub fn compileValue(self: *Compiler, expr: *const Node) InternalCompileError!void {
         switch (expr.expr) {
             .binding => unreachable, // all bindings arrive wrapped in .decl
             .number => |n| {
@@ -644,14 +644,14 @@ pub const Compiler = struct {
                     !n.is_float)
                 {
                     try self.@"const"(
-                        Data.new.num(@as(i64, @intFromFloat(value))),
+                        Value.new.num(@as(i64, @intFromFloat(value))),
                     );
-                } else try self.@"const"(Data.new.num(value));
+                } else try self.@"const"(Value.new.num(value));
             },
-            .string => |s| try self.@"const"(try self.vm.ownDataString(s)),
-            .multiline_string => |s| try self.@"const"(try self.vm.ownDataString(s)),
-            .hash => |name| try self.@"const"(Data.new.atom(try self.vm.internAtom(name))),
-            .nil => try self.@"const"(Data.new.atom(revo.core_atoms.nil.atomId())),
+            .string => |s| try self.@"const"(try self.vm.ownValueString(s)),
+            .multiline_string => |s| try self.@"const"(try self.vm.ownValueString(s)),
+            .atom => |name| try self.@"const"(Value.new.atom(try self.vm.internAtom(name))),
+            .nil => try self.@"const"(Value.new.atom(revo.CoreAtoms.nil.atomId())),
             .ident => |name| {
                 if (state_mod.resolveLocal(self, name)) |slot| {
                     try self.emit(.load_local, slot);
@@ -684,7 +684,7 @@ pub const Compiler = struct {
                         .{name},
                     );
                     return self.fail(.ParseError, expr, msg);
-                } else try self.emit(.load_global, try self.vm.internAtom(name));
+                } else try self.emit(.load_user_global, try self.vm.internAtom(name));
             },
             .unary => |u| switch (u.op) {
                 .negate => {
@@ -803,8 +803,8 @@ pub const Compiler = struct {
                 try self.compile(b.right, true);
                 try self.emit(specialized_op, 0);
             },
-            .and_expr => |v| try flow.compileAnd(self, v.left, v.right),
-            .or_expr => |v| try flow.compileOr(self, v.left, v.right),
+            .and_expr => |v| try control.compileAnd(self, v.left, v.right),
+            .or_expr => |v| try control.compileOr(self, v.left, v.right),
             .call => |call| try self.compileCall(call),
             .field => |field| {
                 try self.compile(field.object, true);
@@ -824,23 +824,23 @@ pub const Compiler = struct {
                     if (slice.step) |n| try self.compile(n, true) else try self.emit(.load_nil, 0);
                     if (slice.end) |n| try self.compile(n, true) else try self.emit(.load_nil, 0);
                     try self.emit(.slice, 0);
-                } else if (index.key.expr == .hash) try self.emit(
+                } else if (index.key.expr == .atom) try self.emit(
                     .table_get_atom,
-                    try self.vm.internAtom(index.key.expr.hash),
+                    try self.vm.internAtom(index.key.expr.atom),
                 ) else {
                     try self.compile(index.key, true);
                     try self.emit(.table_get, 0);
                 }
             },
-            .if_expr => |v| try flow.compileIf(self, v.condition, v.then_expr, v.else_expr),
-            .unless_expr => |v| try flow.compileUnless(self, v.condition, v.then_expr, v.else_expr),
+            .if_expr => |v| try control.compileIf(self, v.condition, v.then_expr, v.else_expr),
+            .unless_expr => |v| try control.compileUnless(self, v.condition, v.then_expr, v.else_expr),
             .decl => |d| {
                 switch (d.inner.expr) {
                     .binding => |*b| {
                         if (b.value.expr == .import_stmt and b.target.expr == .ident) {
                             // imports must be const, no type annotations
                             const user_name = b.target.expr.ident;
-                            if (d.kind != .con) {
+                            if (d.kind != .@"const") {
                                 return self.fail(.ParseError, expr, "import binding must be const");
                             }
                             // compile import_stmt directly so it handles its own slot
@@ -854,11 +854,11 @@ pub const Compiler = struct {
                             }
                             return;
                         }
-                        const kind: values.BindingKind = switch (d.kind) {
-                            .con => .con,
+                        const kind: bindings.BindingKind = switch (d.kind) {
+                            .@"const" => .@"const",
                             .let => .let,
                             .global => .global,
-                            else => .con,
+                            else => .@"const",
                         };
                         return try self.compileBinding(b.*, kind);
                     },
@@ -873,10 +873,10 @@ pub const Compiler = struct {
                 }
                 return self.compile(d.inner, true);
             },
-            .assign_expr => |assign| try values.compileAssign(self, assign.target, assign.value),
-            .compound_assign => |assign| try values.compileCompound(self, assign.target, assign.op, assign.value),
+            .assign_expr => |assign| try bindings.compileAssign(self, assign.target, assign.value),
+            .compound_assign => |assign| try bindings.compileCompound(self, assign.target, assign.op, assign.value),
             .block => |exprs| try self.compileBlock(exprs),
-            .table => |entries| try values.compileTable(self, entries),
+            .table => |entries| try bindings.compileTable(self, entries),
             .return_expr => |val| {
                 if (val) |v| {
                     try self.compile(v, true);
@@ -909,8 +909,8 @@ pub const Compiler = struct {
 
                 state_mod.reserveLocalSlots(self);
 
-                try self.emit(.load_global, revo.core_atoms.import.atomId());
-                try self.@"const"(try self.vm.ownDataString(is.path));
+                try self.emit(.load_user_global, revo.CoreAtoms.import.atomId());
+                try self.@"const"(try self.vm.ownValueString(is.path));
 
                 try self.emit(.call, 1);
                 try self.regDupe();
@@ -918,14 +918,14 @@ pub const Compiler = struct {
                 try self.emit(.bind_local, slot);
             },
             .comp_block => |cb| try self.compileComp(cb.expr),
-            .loop_expr => |v| try flow.compileLoop(self, v.body, v.label),
-            .for_loop => |v| try flow.compileFor(self, v.params, v.body, v.iter, v.label),
-            .while_loop => |v| try flow.compileWhile(self, v.predicate, v.body, v.label),
-            .break_expr => |b| try flow.compileBreak(self, expr, b.value, b.label),
-            .continue_expr => |c| try flow.compileContinue(self, expr, c.value, c.label),
-            .labeled_block => |lb| try flow.compileLabeledBlock(self, lb.label, lb.body),
+            .loop_expr => |v| try control.compileLoop(self, v.body, v.label),
+            .for_loop => |v| try control.compileFor(self, v.params, v.body, v.iter, v.label),
+            .while_loop => |v| try control.compileWhile(self, v.predicate, v.body, v.label),
+            .break_expr => |b| try control.compileBreak(self, expr, b.value, b.label),
+            .continue_expr => |c| try control.compileContinue(self, expr, c.value, c.label),
+            .labeled_block => |lb| try control.compileLabeledBlock(self, lb.label, lb.body),
             .fn_expr => |fn_expr| try self.compileFn(fn_expr.params, fn_expr.return_type, fn_expr.body, "<fn>", null, fn_expr.type_params),
-            .match_expr => |v| try flow.compileMatch(self, v.subject, v.arms),
+            .match_expr => |v| try control.compileMatch(self, v.subject, v.arms),
             .table_pattern => return self.fail(
                 .UnsupportedSyntax,
                 expr,
@@ -962,11 +962,11 @@ pub const Compiler = struct {
                     const test_label = try self.formatSuiteTestName(block.name);
                     defer self.alloc.free(test_label);
                     try self.emit(
-                        .load_global,
+                        .load_user_global,
                         try self.vm.internAtom("__internal_dotest"),
                     );
                     try self.@"const"(
-                        try self.vm.ownDataString(test_label),
+                        try self.vm.ownValueString(test_label),
                     );
                     try self.compile(block.body, true);
                     try self.emit(.call, 2);
@@ -979,11 +979,11 @@ pub const Compiler = struct {
                     const suite_label = try self.formatSuiteTestName(suite.name);
                     defer self.alloc.free(suite_label);
                     try self.emit(
-                        .load_global,
+                        .load_user_global,
                         try self.vm.internAtom("__internal_dosuite"),
                     );
                     try self.@"const"(
-                        try self.vm.ownDataString(suite_label),
+                        try self.vm.ownValueString(suite_label),
                     );
                     try self.test_suite_names.append(self.alloc, suite.name);
                     defer _ = self.test_suite_names.pop();
@@ -1021,7 +1021,7 @@ pub const Compiler = struct {
     pub fn compileCall(
         self: *Compiler,
         call: anytype,
-    ) InternalLowerError!void {
+    ) InternalCompileError!void {
         switch (call.callee.expr) {
             .field => |field| {
                 // method call desugar: obj:method(args)
@@ -1044,7 +1044,7 @@ pub const Compiler = struct {
                     )) return;
                     try self.compile(field.object, true);
                     try self.@"const"(
-                        Data.new.atom(try self.vm.internAtom(field.name)),
+                        Value.new.atom(try self.vm.internAtom(field.name)),
                     );
                     for (call.args) |arg| try self.compile(arg, true);
                     const argc = call.args.len |
@@ -1127,7 +1127,7 @@ pub const Compiler = struct {
         field: anytype,
         args: []const *Node,
         implicit_self: bool,
-    ) InternalLowerError!bool {
+    ) InternalCompileError!bool {
         const object_type = self.inferExprType(field.object);
         const module_name = switch (object_type.tag) {
             .string => "string",
@@ -1138,7 +1138,7 @@ pub const Compiler = struct {
         if (std.mem.eql(u8, module_name, "table") and
             std.mem.eql(u8, field.name, "add")) return false;
 
-        // a known field shadows the stdlib method of the same name;
+        // a known field shadows the baselib method of the same name;
         // works for any table expression with a known shape, not just locals
         if (object_type.tag == .table) {
             if (object_type.tag.table.fields) |fs| {
@@ -1147,7 +1147,7 @@ pub const Compiler = struct {
         }
 
         const module_atom = try self.vm.internAtom(module_name);
-        const module = self.vm.stdlib_globals.get(module_atom) orelse return false;
+        const module = self.vm.builtin_globals.get(module_atom) orelse return false;
         const module_table_id = module.asTable() orelse return false;
         const module_table = self.vm.tables.get(module_table_id) catch return false;
 
@@ -1155,7 +1155,7 @@ pub const Compiler = struct {
         const method = module_table.getRawAtom(method_atom, self.vm) orelse return false;
         if (!method.isFunction()) return false;
 
-        try self.emit(.load_stdlib_global, module_atom);
+        try self.emit(.load_builtin_global, module_atom);
         try self.emit(.table_get_atom, method_atom);
         if (implicit_self)
             try self.compile(field.object, true);
@@ -1282,7 +1282,7 @@ pub const Compiler = struct {
             }
         }
 
-        if (had_error) return error.LoweringFailed;
+        if (had_error) return error.CompileFailed;
         return reordered;
     }
 
@@ -1290,7 +1290,7 @@ pub const Compiler = struct {
         self: *Compiler,
         fn_name: []const u8,
         args: []const *Node,
-    ) InternalLowerError![]const *Node {
+    ) InternalCompileError![]const *Node {
         const fn_state = state_mod.currentFunctionState(self) orelse return args;
         const sig = fn_state.fn_signatures.get(fn_name) orelse return args;
         const reordered_args = try tryReorderNamedParams(self, args, sig);
@@ -1339,8 +1339,8 @@ pub const Compiler = struct {
                 actual_type,
             ) catch |err| switch (err) {
                 error.TypeError => {
-                    const expected_str = try type_serde.formatTypeOpts(self.alloc, expected_type, .{});
-                    const actual_str = try type_serde.formatTypeOpts(self.alloc, actual_type, .{});
+                    const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected_type, .{});
+                    const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual_type, .{});
                     const label = if (sig.param_names[i].len == 0)
                         try std.fmt.allocPrint(
                             self.alloc,
@@ -1391,7 +1391,7 @@ pub const Compiler = struct {
                     // bare `?a` without explicit default defaults to :none
                     const span = if (reordered_args.len > 0) reordered_args[0].span else if (args.len > 0) args[0].span else ast.Span{ .start = 0, .end = 0, .line = 1, .column = 1 };
                     const none_node = try self.alloc.create(ast.Node);
-                    none_node.* = .{ .span = span, .expr = .{ .hash = "none" } };
+                    none_node.* = .{ .span = span, .expr = .{ .atom = "none" } };
                     full_args[idx] = none_node;
                 }
             }
@@ -1402,8 +1402,8 @@ pub const Compiler = struct {
                 const actual_type = self.inferExprType(full_args[idx]);
                 types.ensureCoercible(expected_type, actual_type) catch |err| switch (err) {
                     error.TypeError => {
-                        const expected_str = try type_serde.formatTypeOpts(self.alloc, expected_type, .{});
-                        const actual_str = try type_serde.formatTypeOpts(self.alloc, actual_type, .{});
+                        const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected_type, .{});
+                        const actual_str = try type_syntax.formatTypeOpts(self.alloc, actual_type, .{});
                         try self.appendFailureReport(.ParseError, &.{
                             .{ .@"error" = try std.fmt.allocPrint(self.alloc, "default for `{s}` wants {s}, got {s}", .{ sig.param_names[idx], expected_str, actual_str }) },
                         });
@@ -1412,12 +1412,12 @@ pub const Compiler = struct {
                     else => |e| return e,
                 };
             }
-            if (had_error) return error.LoweringFailed;
+            if (had_error) return error.CompileFailed;
             // leak the original reordered slice if it was allocated
             if (reordered_args.ptr != args.ptr) self.alloc.free(reordered_args);
             return full_args;
         }
-        if (had_error) return error.LoweringFailed;
+        if (had_error) return error.CompileFailed;
         return reordered_args;
     }
 
@@ -1425,7 +1425,7 @@ pub const Compiler = struct {
         self: *Compiler,
         params: []const ast.FnParam,
         args: []const *Node,
-    ) InternalLowerError![]const *Node {
+    ) InternalCompileError![]const *Node {
         if (args.len >= params.len) return args;
         var required: usize = 0;
         for (params) |p| {
@@ -1447,14 +1447,14 @@ pub const Compiler = struct {
                     ast.Span{ .start = 0, .end = 0, .line = 1, .column = 1 };
 
                 const n = try self.alloc.create(ast.Node);
-                n.* = .{ .span = span, .expr = .{ .hash = "none" } };
+                n.* = .{ .span = span, .expr = .{ .atom = "none" } };
                 full[i] = n;
             }
         }
         return full;
     }
 
-    pub fn compileComp(self: *Compiler, expr: *Node) InternalLowerError!void {
+    pub fn compileComp(self: *Compiler, expr: *Node) InternalCompileError!void {
         var temp_compiler = try Compiler.init(
             self.vm,
             self.test_mode,
@@ -1463,20 +1463,20 @@ pub const Compiler = struct {
         );
         defer temp_compiler.deinit();
         temp_compiler.compileRoot(expr) catch |err| switch (err) {
-            error.LoweringFailed => {
+            error.CompileFailed => {
                 const nested_failure = try temp_compiler.finishFailure() orelse unreachable;
                 try self.appendFailureReport(nested_failure.kind, nested_failure.report.parts);
-                return error.LoweringFailed;
+                return error.CompileFailed;
             },
             else => return err,
         };
-        const artifact = try temp_compiler.finishArtifact();
-        defer self.vm.runtime.alloc.free(artifact.instructions);
-        defer self.vm.runtime.alloc.free(artifact.spans);
-        const result = try VM.module.runCompiledModuleReport(
+        const bytecode = try temp_compiler.finishBytecode();
+        defer self.vm.runtime.alloc.free(bytecode.instructions);
+        defer self.vm.runtime.alloc.free(bytecode.spans);
+        const result = try VM.run.runBytecodeReport(
             self.vm,
             "<comp>",
-            artifact.instructions,
+            bytecode.instructions,
         );
         if (result == .err) {
             const eval_failure = result.err;
@@ -1495,12 +1495,12 @@ pub const Compiler = struct {
                 }
             }
             try self.appendFailureReport(.ParseError, parts);
-            return error.LoweringFailed;
+            return error.CompileFailed;
         }
         try self.@"const"(self.vm.mainResult());
     }
 
-    pub fn compileBlock(self: *Compiler, exprs: []const *Node) InternalLowerError!void {
+    pub fn compileBlock(self: *Compiler, exprs: []const *Node) InternalCompileError!void {
         if (exprs.len == 0) return self.pushNil();
         // local slots must not overlap with live temporaries (callee/args of an
         // enclosing call) when this block is compiled inline as an argument
@@ -1521,7 +1521,7 @@ pub const Compiler = struct {
         for (exprs, 0..) |expr, idx| {
             const before = self.active_registers;
             self.compile(expr, true) catch |err| switch (err) {
-                error.LoweringFailed => {
+                error.CompileFailed => {
                     self.active_registers = before;
                     continue;
                 },
@@ -1532,19 +1532,19 @@ pub const Compiler = struct {
         if (pushed_scope) state_mod.popScope(self);
     }
 
-    const BindingKind = values.BindingKind;
+    const BindingKind = bindings.BindingKind;
 
     pub fn compileBinding(
         self: *Compiler,
         binding: Binding,
         kind: BindingKind,
-    ) InternalLowerError!void {
+    ) InternalCompileError!void {
         if (binding.target.expr == .ident and kind != .global) {
-            return values.compileLocalBinding(
+            return bindings.compileLocalBinding(
                 self,
                 binding.target.expr.ident,
                 binding.value,
-                kind != .con,
+                kind != .@"const",
                 binding.type_name,
             );
         }
@@ -1573,7 +1573,7 @@ pub const Compiler = struct {
             try self.regDupe();
             try self.declared_globals.put(name, {});
             try self.emit(
-                if (kind != .con) .store_global else .store_global_const,
+                if (kind != .@"const") .store_user_global else .store_user_global_const,
                 try self.vm.internAtom(name),
             );
             return;
@@ -1581,7 +1581,7 @@ pub const Compiler = struct {
 
         if (binding.target.expr == .table_pattern) {
             switch (binding.target.expr) {
-                .table_pattern => |items| try values.validateTablePatternShape(
+                .table_pattern => |items| try bindings.validateTablePatternShape(
                     self,
                     items,
                     binding.value,
@@ -1590,12 +1590,12 @@ pub const Compiler = struct {
                 else => {},
             }
             if (kind == .global) {
-                try values.declareGlobalPattern(self, binding.target);
+                try bindings.declareGlobalPattern(self, binding.target);
             } else {
-                try values.declarePatternLocals(
+                try bindings.declarePatternLocals(
                     self,
                     binding.target,
-                    kind != .con,
+                    kind != .@"const",
                 );
             }
         } else if (binding.target.expr == .table) {
@@ -1611,7 +1611,7 @@ pub const Compiler = struct {
         // uninitialized shadows (same as single `let x = x + 1`)
         const mask_start = self.masking_stack.items.len;
         if (kind != .global and binding.target.expr == .table_pattern) {
-            try values.collectPatternNames(binding.target, &self.masking_stack, self.alloc);
+            try bindings.collectPatternNames(binding.target, &self.masking_stack, self.alloc);
         }
 
         errdefer self.masking_stack.items.len = mask_start;
@@ -1620,9 +1620,9 @@ pub const Compiler = struct {
         const src_idx = self.active_registers - 1;
 
         if (kind == .global) {
-            try values.bindPattern(self, binding.target, src_idx, kind);
+            try bindings.bindPattern(self, binding.target, src_idx, kind);
         } else {
-            try values.bindDeclaredPattern(self, binding.target, src_idx, kind);
+            try bindings.bindDeclaredPattern(self, binding.target, src_idx, kind);
         }
     }
 
@@ -1634,7 +1634,7 @@ pub const Compiler = struct {
         name: []const u8,
         loop_sym: ?revo.AtomID,
         type_params: []const []const u8,
-    ) InternalLowerError!void {
+    ) InternalCompileError!void {
         try self.validateName(name, body.span);
 
         self.fn_depth += 1;
@@ -1731,9 +1731,9 @@ pub const Compiler = struct {
                 }
             }
         }
-        if (self.failure_reports.items.len != 0) return error.LoweringFailed;
+        if (self.failure_reports.items.len != 0) return error.CompileFailed;
         if (self.active_registers == 0) try self.pushNil();
-        if (loop_sym) |sym| try flow.emitLoopRecurse(self, params.len, sym) else try self.emit(.ret, 1);
+        if (loop_sym) |sym| try control.emitLoopRecurse(self, params.len, sym) else try self.emit(.ret, 1);
 
         const fn_register_count = self.max_registers;
         self.fn_depth -= 1;
@@ -1758,7 +1758,7 @@ pub const Compiler = struct {
         defer self.alloc.free(const_locals);
 
         self.patchJump(jump_over);
-        const proto_id = try self.vm.functions.createPrototype(.{
+        const template_id = try self.vm.callable.createTemplate(.{
             .addr = body_addr,
             .arity = required_count,
             .total_arity = @intCast(params.len),
@@ -1768,9 +1768,9 @@ pub const Compiler = struct {
             .const_locals = const_locals,
             .const_local_bits = &.{},
         });
-        try self.pending_prototypes.append(self.alloc, proto_id);
-        self.current_proto = proto_id;
-        try self.emit(.closure, proto_id);
+        try self.pending_templates.append(self.alloc, template_id);
+        self.current_template = template_id;
+        try self.emit(.make_closure, template_id);
 
         if (!own_sig) {
             self.alloc.free(sig.params);
@@ -1803,7 +1803,7 @@ pub const Compiler = struct {
 
     pub fn appendFailureReport(
         self: *Compiler,
-        kind: LowerErrorKind,
+        kind: CompileErrorKind,
         parts: []const diagnostic.Part,
     ) !void {
         const copied_parts = try self.alloc.dupe(diagnostic.Part, parts);
@@ -1819,7 +1819,7 @@ pub const Compiler = struct {
         });
     }
 
-    pub fn finishFailure(self: *Compiler) !?LowerFailure {
+    pub fn finishFailure(self: *Compiler) !?CompileFailure {
         if (self.failure_reports.items.len == 0) return null;
         if (self.failure_reports.items.len == 1) return self.failure_reports.items[0];
 
@@ -1844,15 +1844,15 @@ pub const Compiler = struct {
 
     pub fn fail(
         self: *Compiler,
-        kind: LowerErrorKind,
+        kind: CompileErrorKind,
         expr: *const Node,
         message: []const u8,
-    ) error{LoweringFailed} {
+    ) error{CompileFailed} {
         self.appendFailureReport(kind, &.{
             .{ .@"error" = message },
             .{ .span = .{ .span = expr.span, .role = .primary } },
         }) catch {};
-        return error.LoweringFailed;
+        return error.CompileFailed;
     }
 };
 

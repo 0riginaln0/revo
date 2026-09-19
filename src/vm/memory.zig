@@ -2,14 +2,14 @@ const std = @import("std");
 const VM = @import("VM.zig").VM;
 const print_mod = @import("print.zig");
 
-pub const core_atoms = @import("core.zig").core_atoms;
+pub const CoreAtoms = @import("CoreAtoms.zig").CoreAtoms;
 
 pub const StringID = usize;
 pub const AtomID = usize;
 pub const FunctionID = usize;
 pub const TableID = usize;
 
-pub const Type = enum(u4) {
+pub const ValueTag = enum(u4) {
     // stored tag nibble is bits 51-48; real values must have bit 51 set
     // (quiet bit), so boxed types occupy tags 8-15. number = 0 is never
     // stored in the nibble
@@ -18,7 +18,7 @@ pub const Type = enum(u4) {
     atom = 9,
     function = 10,
     table = 11,
-    foreign = 13,
+    @"opaque" = 13,
     // latter numbers reserved for subtyping/opt
     //   (lua likes for threads to be their own types
     //   , i might want simple distinct bigint instead of js smi opt, etc.)
@@ -38,114 +38,114 @@ const CANONICAL_NAN: u64 = 0xFFF8_0000_0000_0000;
 /// (sign 0, exponent all-ones, quiet bit set), so real doubles ---- finite
 /// numbers, +-inf (quiet bit clear), signaling NaNs, and the canonical NaN
 /// (sign 1) ---- never match the boxed check
-pub const Data = extern struct {
+pub const Value = extern struct {
     bits: u64,
 
     pub const new = struct {
-        pub inline fn num(val: anytype) Data {
+        pub inline fn num(val: anytype) Value {
             const n: f64 = switch (@typeInfo(@TypeOf(val))) {
                 .comptime_int, .int => @as(f64, @floatFromInt(val)),
                 .comptime_float, .float => val,
                 else => @compileError("new.num expects int or float"),
             };
-            return Data.numberRaw(n);
+            return Value.numberRaw(n);
         }
-        pub inline fn core(comptime a: core_atoms) Data {
-            return Data.new.atom(a.atomId());
+        pub inline fn core(comptime a: CoreAtoms) Value {
+            return Value.new.atom(a.atomId());
         }
 
-        pub inline fn nil() Data {
-            return Data.new.core(.nil);
+        pub inline fn nil() Value {
+            return Value.new.core(.nil);
         }
-        pub inline fn str(id: StringID) Data {
-            return Data.boxed(.string, id);
+        pub inline fn str(id: StringID) Value {
+            return Value.boxed(.string, id);
         }
-        pub inline fn atom(id: AtomID) Data {
-            return Data.boxed(.atom, id);
+        pub inline fn atom(id: AtomID) Value {
+            return Value.boxed(.atom, id);
         }
-        pub inline fn function(id: FunctionID) Data {
-            return Data.boxed(.function, id);
+        pub inline fn function(id: FunctionID) Value {
+            return Value.boxed(.function, id);
         }
-        pub inline fn boolean(val: bool) Data {
-            return if (val) Data.new.core(.true) else Data.new.core(.false);
+        pub inline fn boolean(val: bool) Value {
+            return if (val) Value.new.core(.true) else Value.new.core(.false);
         }
-        pub inline fn table(id: TableID) Data {
-            return Data.boxed(.table, id);
+        pub inline fn table(id: TableID) Value {
+            return Value.boxed(.table, id);
         }
-        pub inline fn foreign(ptr: ?*anyopaque) Data {
-            return Data.boxed(.foreign, @intFromPtr(ptr));
+        pub inline fn @"opaque"(ptr: ?*anyopaque) Value {
+            return Value.boxed(.@"opaque", @intFromPtr(ptr));
         }
     };
 
-    pub const RenderMode = enum(u2) { display, debug, pretty };
+    pub const PrintMode = enum(u2) { plain, debug, pretty };
 
     // canonicalize NaN to a stable quiet-NaN bit pattern
-    pub inline fn numberRaw(n: f64) Data {
+    pub inline fn numberRaw(n: f64) Value {
         var bits: u64 = @bitCast(n);
         if (std.math.isNan(n)) bits = CANONICAL_NAN;
         return .{ .bits = bits };
     }
 
     // pack type+payload into nanbox. debug-assert payload fits PAYLOAD_MASK
-    pub inline fn boxed(t: Type, val: usize) Data {
+    pub inline fn boxed(t: ValueTag, val: usize) Value {
         if (val != std.math.maxInt(usize)) std.debug.assert(val <= PAYLOAD_MASK);
         const pl = @as(u64, @intCast(val)) & PAYLOAD_MASK;
         return .{ .bits = BOX_TAG | (@as(u64, @intFromEnum(t)) << TAG_SHIFT) | pl };
     }
 
-    pub inline fn tag(self: Data) Type {
+    pub inline fn tag(self: Value) ValueTag {
         if ((self.bits & BOX_MASK) != BOX_TAG) return .number;
         return @enumFromInt((self.bits >> TAG_SHIFT) & TAG_MASK);
     }
 
-    pub inline fn is(self: Data, t: Type) bool {
+    pub inline fn is(self: Value, t: ValueTag) bool {
         return self.tag() == t;
     }
-    pub inline fn isNumber(self: Data) bool {
+    pub inline fn isNumber(self: Value) bool {
         return self.tag() == .number;
     }
-    pub inline fn isString(self: Data) bool {
+    pub inline fn isString(self: Value) bool {
         return self.tag() == .string;
     }
-    pub inline fn isAtom(self: Data) bool {
+    pub inline fn isAtom(self: Value) bool {
         return self.tag() == .atom;
     }
-    pub inline fn isFunction(self: Data) bool {
+    pub inline fn isFunction(self: Value) bool {
         return self.tag() == .function;
     }
-    pub inline fn isTable(self: Data) bool {
+    pub inline fn isTable(self: Value) bool {
         return self.tag() == .table;
     }
-    pub inline fn isForeign(self: Data) bool {
-        return self.tag() == .foreign;
+    pub inline fn isOpaque(self: Value) bool {
+        return self.tag() == .@"opaque";
     }
 
-    pub inline fn asStr(self: Data) ?StringID {
-        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(Type.string))
+    pub inline fn asStr(self: Value) ?StringID {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.string))
             return @intCast(self.bits & PAYLOAD_MASK);
         return null;
     }
 
     // -- [inline numeric accessors used in hot paths] ------------------------
-    // asNum -> ?f64, asNumber -> error-union
+    // asNumOpt -> ?f64, asNum -> error-union
 
     /// fast path: unboxed bits (ordinary f64s, including +/-inf, the
     /// canonical NaN, and signaling NaNs) never match the boxed marker, so
     /// one compare separates them from every boxed value
-    pub inline fn asNum(self: Data) ?f64 {
+    pub inline fn asNumOpt(self: Value) ?f64 {
         if ((self.bits & BOX_MASK) == BOX_TAG) return null;
         return @bitCast(self.bits);
     }
 
-    pub inline fn asNumber(self: Data) !f64 {
+    pub inline fn asNum(self: Value) !f64 {
         if (!self.isNumber()) return error.TypeError;
         return @bitCast(self.bits);
     }
 
-    pub inline fn unboxed(self: Data) u64 {
+    pub inline fn unboxed(self: Value) u64 {
         return @intCast(self.bits & PAYLOAD_MASK);
     }
-    pub fn asString(self: Data) ?StringID {
+    pub fn asString(self: Value) ?StringID {
         return if (self.isString()) @intCast(self.bits & PAYLOAD_MASK) else null;
     }
 
@@ -153,38 +153,38 @@ pub const Data = extern struct {
     // matching asStr so the hot accessors don't pay for
     // tag()'s dispatch; equivalent by construction: `tag() == X` holds
     // exactly when the marker matches and the tag nibble is X
-    pub inline fn asAtom(self: Data) ?AtomID {
-        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(Type.atom))
+    pub inline fn asAtom(self: Value) ?AtomID {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.atom))
             return @intCast(self.bits & PAYLOAD_MASK);
         return null;
     }
-    pub inline fn asFunction(self: Data) ?FunctionID {
-        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(Type.function))
+    pub inline fn asFunction(self: Value) ?FunctionID {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.function))
             return @intCast(self.bits & PAYLOAD_MASK);
         return null;
     }
-    pub inline fn asTable(self: Data) ?TableID {
-        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(Type.table))
+    pub inline fn asTable(self: Value) ?TableID {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.table))
             return @intCast(self.bits & PAYLOAD_MASK);
         return null;
     }
 
-    pub fn asForeign(self: Data) ?*anyopaque {
-        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(Type.foreign))
+    pub fn asOpaque(self: Value) ?*anyopaque {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.@"opaque"))
             return @ptrFromInt(@as(usize, @intCast(self.bits & PAYLOAD_MASK)));
         return null;
     }
 
-    pub inline fn rawBits(self: Data) u64 {
+    pub inline fn rawBits(self: Value) u64 {
         return self.bits;
     }
 
-    pub fn write(self: Data, writer: *std.Io.Writer, v: *VM, mode: RenderMode) anyerror!void {
-        return print_mod.writeData(self, writer, v, mode);
+    pub fn write(self: Value, writer: *std.Io.Writer, v: *VM, mode: PrintMode) anyerror!void {
+        return print_mod.writeValue(self, writer, v, mode);
     }
 
     // -- [misc] --------------------------------------------------------------
-    pub fn print(self: Data, vm: *VM) void {
+    pub fn print(self: Value, vm: *VM) void {
         var buf: [16]u8 = undefined;
         var stdout = vm.runtime.stdout.writer(vm.runtime.io, &buf);
         self.write(&stdout.interface, vm, .debug) catch {
@@ -203,7 +203,7 @@ pub const Data = extern struct {
     ///   , otherwise equal keys land in different probe chains and lookup
     ///   misses even though keyEq would match
     ///
-    pub fn hash(self: Data, vm: *VM) u64 {
+    pub fn hash(self: Value, vm: *VM) u64 {
         switch (self.tag()) {
             .number, .atom => return self.bits,
             .string => {
@@ -254,10 +254,10 @@ pub fn ipow(base: i64, exponent: i64) i64 {
     return acc;
 }
 
-pub inline fn isFalse(val: Data) bool {
+pub inline fn isFalse(val: Value) bool {
     return ( //
-        (val.bits >= Data.new.atom(0).bits //
-        and val.bits <= Data.new.atom(core_atoms.lastFalse).bits) //
-        or val.bits == Data.new.num(0).bits //
+        (val.bits >= Value.new.atom(0).bits //
+        and val.bits <= Value.new.atom(CoreAtoms.lastFalse).bits) //
+        or val.bits == Value.new.num(0).bits //
     );
 }

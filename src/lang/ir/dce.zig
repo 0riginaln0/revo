@@ -33,8 +33,8 @@ pub fn readRegs(inst: *const ir.IrInst, out: []Register) usize {
     switch (inst.opcode) {
         // zig fmt: off
         .jump, .yield,
-        .load_global, .load_stdlib_global, .load_local, .load_upval,
-        .closure, .table_new, .load_nil, .load_small_int,
+        .load_user_global, .load_builtin_global, .load_local, .load_upval,
+        .make_closure, .table_new, .load_nil, .load_small_int,
         .load_const => return 0,
 
         .move => {
@@ -63,7 +63,7 @@ pub fn readRegs(inst: *const ir.IrInst, out: []Register) usize {
         },
 
         .halt, .ret, .jump_if_false, .jump_if_true, .jump_err,
-        .store_global, .store_global_const, .store_upval,
+        .store_user_global, .store_user_global_const, .store_upval,
         .store_local, .bind_local, .negate, .not,
         .add_imm, .sub_imm, .mul_imm,
         .band_imm, .lt_int_imm, .unwrap_result => {
@@ -117,7 +117,7 @@ pub fn writeRegs(inst: *const ir.IrInst, out: *[3]Register) usize {
         // zig fmt: off
         .ret, .halt, .jump, .jump_if_false, .jump_if_true,
         .jump_err,
-        .store_global, .store_global_const, .store_upval,
+        .store_user_global, .store_user_global_const, .store_upval,
         .store_local, .bind_local, .yield => return 0,
 
         .range_init => {
@@ -174,7 +174,7 @@ const ir = @import("root.zig");
 fn isSideEffect(op: Opcode) bool {
     return switch (op) {
         // zig fmt: off
-        .store_global, .store_global_const, .store_local, .bind_local,
+        .store_user_global, .store_user_global_const, .store_local, .bind_local,
         .store_upval, .table_set, .table_set_atom, .call, .call_field, .spawn,
         .yield, .ret, .halt,
         .range_init, .unwrap_result
@@ -408,14 +408,14 @@ pub fn dceIr(self: *Compiler) !void {
     // compact
     //
     // keep live instructions, destroy dead ones; spans stay in 1:1
-    // correspondence with instructions, and jump targets / prototype addrs
+    // correspondence with instructions, and jump targets / template addrs
     // (instruction indices) are remapped. for dead positions the remap points
     // at the next live slot so stale addresses still land on real code.
     try ir.compactIr(self, n, live);
 }
 
 const pipeline = @import("../pipeline.zig");
-const testing = @import("../testing.zig");
+const testing = @import("../test_helpers.zig");
 const t = testing;
 const VM = revo.VM;
 
@@ -549,7 +549,7 @@ test "dce regression tests" {
     , 100);
 
     // the function's first statement is a discarded expression, so the
-    // prototype addr points at a now-dead instruction, it has2 be remapped
+    // template addr points at a now-dead instruction, it has2 be remapped
     // or the call lands on the wrong bytecode
     try t.topNumber(
         \\fn f() do

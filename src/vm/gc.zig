@@ -31,7 +31,7 @@ pub fn maybeCollectGarbage(self: *VM) void {
     const finalizer_pending = collectFinalizers(self);
 
     self.tables.sweep();
-    self.functions.sweep();
+    self.callable.sweep();
     self.strings.sweep();
 
     if (finalizer_pending) |pending| {
@@ -40,7 +40,7 @@ pub fn maybeCollectGarbage(self: *VM) void {
         var pending_list = pending;
         for (pending_list.items) |id| {
             const entry = self.gc_finalizers.fetchRemove(id) orelse continue;
-            const table_val = revo.Data.new.table(id);
+            const table_val = revo.Value.new.table(id);
             _ = self.callFunctionParts(entry.value, null, &.{table_val}, null) catch {};
         }
         pending_list.deinit(self.runtime.alloc);
@@ -48,7 +48,7 @@ pub fn maybeCollectGarbage(self: *VM) void {
 
     self.gc_pending = false;
     const live_bytes = self.tables.bytes() +
-        self.functions.bytes() +
+        self.callable.bytes() +
         self.strings.bytes();
 
     self.gc_threshold = @max(512 * 1024, live_bytes * self.gc_pause_factor);
@@ -87,7 +87,7 @@ fn collectFinalizers(self: *VM) ?std.ArrayList(revo.memory.TableID) {
 pub fn processMarkStack(self: *VM) void {
     while (self.gc_mark_stack.pop()) |item| {
         switch (item) {
-            .data => |data| self.markData(data),
+            .data => |data| self.markValue(data),
             .table => |id| {
                 if (id >= self.tables.tables.items.len) continue;
 
@@ -101,21 +101,21 @@ pub fn processMarkStack(self: *VM) void {
                     self.tables.mark(mt, self);
             },
             .function => |id| {
-                if (id >= self.functions.functions.items.len) continue;
+                if (id >= self.callable.functions.items.len) continue;
 
-                const func = self.functions.functions.items[id] orelse continue;
+                const func = self.callable.functions.items[id] orelse continue;
                 switch (func.*) {
                     .closure => |closure| {
                         for (closure.upvalues) |upvalue_id|
-                            self.functions.markUpvalue(upvalue_id, self);
+                            self.callable.markUpvalue(upvalue_id, self);
                     },
                     .host, .c_function => {},
                 }
             },
             .upvalue => |id| {
-                if (id >= self.functions.upvalues.items.len)
+                if (id >= self.callable.upvalues.items.len)
                     continue;
-                const upvalue = self.functions.upvalues.items[id] orelse continue;
+                const upvalue = self.callable.upvalues.items[id] orelse continue;
                 if (upvalue.open_index == null)
                     pushMark(self, upvalue.closed);
             },
@@ -129,13 +129,13 @@ pub inline fn markRoots(self: *VM) void {
             pushMark(self, data);
         for (fiber.frames.items) |frame| {
             if (frame.closure_id) |id|
-                self.functions.mark(id, self);
+                self.callable.mark(id, self);
         }
         for (fiber.open_upvalues.items) |entry|
-            self.functions.markUpvalue(entry.id, self);
+            self.callable.markUpvalue(entry.id, self);
     }
 
-    var globals_it = self.globals.iterator();
+    var globals_it = self.user_globals.iterator();
     while (globals_it.next()) |global|
         pushMark(self, global.value_ptr.*);
 
@@ -152,14 +152,14 @@ pub inline fn markRoots(self: *VM) void {
         self.strings.mark(entry.value_ptr.*);
     }
 
-    inline for (@typeInfo(revo.core_atoms).@"enum".fields) |field| {
+    inline for (@typeInfo(revo.CoreAtoms).@"enum".fields) |field| {
         const atom_id: revo.AtomID = @intFromEnum(
-            @field(revo.core_atoms, field.name),
+            @field(revo.CoreAtoms, field.name),
         );
         self.strings.mark(atom_id);
     }
 
-    var cache_it = self.module_cache.iterator();
+    var cache_it = self.import_cache.iterator();
     while (cache_it.next()) |v| pushMark(self, v.value_ptr.*.result);
 
     var channel_it = self.sched.channels.iterator();
@@ -182,7 +182,7 @@ pub inline fn markRoots(self: *VM) void {
     }
 }
 
-pub inline fn pushMark(self: *VM, data: revo.Data) void {
+pub inline fn pushMark(self: *VM, data: revo.Value) void {
     switch (data.tag()) {
         .string, .table, .function => {
             self.gc_mark_stack.append(self.runtime.alloc, .{ .data = data }) catch @panic("OOM in GC marking");
@@ -203,14 +203,14 @@ pub inline fn pushMarkUpvalue(self: *VM, id: anytype) void {
     self.gc_mark_stack.append(self.runtime.alloc, .{ .upvalue = id }) catch @panic("OOM in GC marking");
 }
 
-pub fn markData(self: *VM, data: revo.Data) void {
+pub fn markValue(self: *VM, data: revo.Value) void {
     switch (data.tag()) {
         .string => self.strings.mark(data.asString().?),
         .table => self.tables.mark(
             data.asTable().?,
             self,
         ),
-        .function => self.functions.mark(
+        .function => self.callable.mark(
             data.asFunction().?,
             self,
         ),

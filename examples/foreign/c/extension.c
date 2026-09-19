@@ -4,12 +4,12 @@
 //
 // the shared lib exports revo_bindings which import(".so") picks up
 //
-// boundary :nanboxed RevoData (u64)
+// boundary :nanboxed RevoValue (u64)
 // . numbers are raw f64 bits
 // . boxed carry tag + payload: intern id,
-//   ptr bits for foreign
+//   ptr bits for opaque
 // strings- data/length to read, intern + string to make
-// native state: foreign_new/ptr, caller owns
+// native state: opaque_new/ptr, caller owns
 //
 
 #include "revo.h"
@@ -17,8 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int greet_fn(void *vm, size_t argc, RevoData *argv,
-                    RevoData *out_result) {
+static int greet_fn(void *vm, size_t argc, RevoValue *argv,
+                    RevoValue *out_result) {
   if (argc < 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_string(argv[0]))
@@ -39,7 +39,7 @@ static int greet_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-static int add_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
+static int add_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_result) {
   if (argc < 2)
     return revo_c_err_arity(vm, argc, 2);
   if (!revo_is_number(argv[0]))
@@ -50,8 +50,8 @@ static int add_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
   return REVO_OK;
 }
 
-static int echo_fn(void *vm, size_t argc, RevoData *argv,
-                   RevoData *out_result) {
+static int echo_fn(void *vm, size_t argc, RevoValue *argv,
+                   RevoValue *out_result) {
   if (argc < 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_string(argv[0]))
@@ -61,8 +61,8 @@ static int echo_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-static int strlen_fn(void *vm, size_t argc, RevoData *argv,
-                     RevoData *out_result) {
+static int strlen_fn(void *vm, size_t argc, RevoValue *argv,
+                     RevoValue *out_result) {
   if (argc < 1)
     return revo_c_err_arity(vm, argc, 1);
   if (!revo_is_string(argv[0]))
@@ -72,8 +72,8 @@ static int strlen_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-static int concat_fn(void *vm, size_t argc, RevoData *argv,
-                     RevoData *out_result) {
+static int concat_fn(void *vm, size_t argc, RevoValue *argv,
+                     RevoValue *out_result) {
   if (argc < 2)
     return revo_c_err_arity(vm, argc, 2);
   if (!revo_is_table(argv[0]))
@@ -87,7 +87,7 @@ static int concat_fn(void *vm, size_t argc, RevoData *argv,
   // two passes: first sum the lengths (also validates elements), then fill
   size_t total = 1;
   for (size_t i = 0; i < n; i++) {
-    RevoData el;
+    RevoValue el;
     if (!revo_table_get_idx(vm, argv[0], i, &el) || !revo_is_string(el)) {
       return revo_c_err_other(vm, "parts must be strings");
     }
@@ -109,7 +109,7 @@ static int concat_fn(void *vm, size_t argc, RevoData *argv,
       memcpy(buf + off, sep, seplen);
       off += seplen;
     }
-    RevoData el;
+    RevoValue el;
     revo_table_get_idx(vm, argv[0], i, &el);
     size_t elen = revo_string_length(vm, revo_string_id(el));
     memcpy(buf + off, revo_string_data(vm, revo_string_id(el)), elen);
@@ -124,7 +124,7 @@ static int concat_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-static int typ_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
+static int typ_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_result) {
   (void)vm;
   if (argc < 1)
     return revo_c_err_arity(vm, argc, 1);
@@ -132,8 +132,8 @@ static int typ_fn(void *vm, size_t argc, RevoData *argv, RevoData *out_result) {
   return REVO_OK;
 }
 
-static int regex_fn(void *vm, size_t argc, RevoData *argv,
-                    RevoData *out_result) {
+static int regex_fn(void *vm, size_t argc, RevoValue *argv,
+                    RevoValue *out_result) {
   if (argc < 2)
     return revo_c_err_arity(vm, argc, 2);
   if (!revo_is_string(argv[0]))
@@ -175,15 +175,15 @@ static int regex_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-// foreign demo ::: an opaque native counter
-// . revo holds the malloc'd struct as a foreign value and
+// opaque demo ::: an opaque native counter
+// . revo holds the malloc'd struct as a opaque value and
 // hands it back on each call; free it explicitly
 typedef struct {
   double total;
 } total_t;
 
-static int total_new_fn(void *vm, size_t argc, RevoData *argv,
-                        RevoData *out_result) {
+static int total_new_fn(void *vm, size_t argc, RevoValue *argv,
+                        RevoValue *out_result) {
   (void)argc;
   (void)argv;
   total_t *t = (total_t *)malloc(sizeof(total_t));
@@ -191,19 +191,19 @@ static int total_new_fn(void *vm, size_t argc, RevoData *argv,
     return revo_c_err_other(vm, "out of memory");
   }
   t->total = 0;
-  *out_result = revo_foreign_new(t);
+  *out_result = revo_opaque_new(t);
   return REVO_OK;
 }
 
-static int total_add_fn(void *vm, size_t argc, RevoData *argv,
-                        RevoData *out_result) {
+static int total_add_fn(void *vm, size_t argc, RevoValue *argv,
+                        RevoValue *out_result) {
   if (argc < 2)
     return revo_c_err_arity(vm, argc, 2);
-  if (!revo_is_foreign(argv[0]))
-    return revo_c_err_type(vm, 0, "foreign", argv[0]);
+  if (!revo_is_opaque(argv[0]))
+    return revo_c_err_type(vm, 0, "opaque", argv[0]);
   if (!revo_is_number(argv[1]))
     return revo_c_err_type(vm, 1, "number", argv[1]);
-  total_t *t = (total_t *)revo_foreign_ptr(argv[0]);
+  total_t *t = (total_t *)revo_opaque_ptr(argv[0]);
   if (!t) {
     return revo_c_err_other(vm, "null handle");
   }
@@ -212,11 +212,11 @@ static int total_add_fn(void *vm, size_t argc, RevoData *argv,
   return REVO_OK;
 }
 
-static int total_free_fn(void *vm, size_t argc, RevoData *argv,
-                         RevoData *out_result) {
+static int total_free_fn(void *vm, size_t argc, RevoValue *argv,
+                         RevoValue *out_result) {
   (void)vm;
-  if (argc >= 1 && revo_is_foreign(argv[0])) {
-    free(revo_foreign_ptr(argv[0]));
+  if (argc >= 1 && revo_is_opaque(argv[0])) {
+    free(revo_opaque_ptr(argv[0]));
   }
   *out_result = revo_nil();
   return REVO_OK;
