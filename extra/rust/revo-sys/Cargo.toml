@@ -1,0 +1,17 @@
+[package]
+name = "revo-sys"
+version = "0.1.0"
+edition = "2024"
+description = "good and evil bindings for embedding the revo and writing extensions"
+license = "MIT"
+repository = "https://github.com/if-not-nil/revo"
+readme = "README.md"
+keywords = ["bindings", "ffi", "scripting", "embedding", "revo"]
+
+[build-dependencies]
+bindgen = "0.73.2"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+crate-type = ["dylib"]

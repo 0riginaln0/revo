@@ -27,6 +27,7 @@ fn main() {
     let repo_root = manifest_dir
         .parent()
         .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
         .expect("crate has to be <repo>/extra/rust");
 
     let lib_dir = repo_root.join("zig-out").join("lib");
@@ -51,6 +52,7 @@ fn main() {
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .raw_line("unsafe impl Sync for RevoBinding {}")
+        .raw_line("unsafe impl Send for RevoBinding {}")
         .allowlist_item(".?(?i-u:revo).*")
         .generate()
         .expect("Unable to generate bindings");
