@@ -416,6 +416,7 @@ type expression syntax:
 | `table<int>` | table with value type `int` |
 | `table<string, int>` | table with key `string`, value `int` |
 | `{ name: string }` | table with field `name: string` (extra fields ok) |
+| `{ ?name: string }` | table where `name: string` may be absent (`name: string?` instead means the key is required but may hold `:nil`) |
 | `{ number, number }` | table with two array entries (extra fields ok) |
 | `{ number, name: string }` | mixed array and named fields |
 | `!int` | `:ok(int) \| :err(any)` (error union sugar) |

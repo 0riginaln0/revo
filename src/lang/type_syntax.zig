@@ -49,6 +49,17 @@ const Parser = struct {
         }
         return false;
     }
+    /// token type ahead positions past pos, skipping comments (lookahead for `?name:`)
+    fn peekAt(self: *Parser, ahead: usize) TokenType {
+        var i = self.pos.*;
+        var skipped: usize = 0;
+        while (i < self.tokens.len and skipped <= ahead) : (i += 1) {
+            if (self.tokens[i].type == .comment) continue;
+            if (skipped == ahead) return self.tokens[i].type;
+            skipped += 1;
+        }
+        return .eof;
+    }
     fn expect(self: *Parser, t: TokenType) !Token {
         if (self.check(t)) return self.advance();
         return error.UnexpectedToken;
@@ -176,7 +187,15 @@ const Parser = struct {
                         break :blk i < self.tokens.len and self.tokens[i].type == .colon;
                     };
 
-                    if (is_named) {
+                    // `?name:` is an optional field (may be absent);
+                    // a bare `?` is the `?T` optional-type prefix instead
+                    const is_optional = cur.type == .huh and self.peekAt(1) == .ident and self.peekAt(2) == .colon;
+                    if (is_optional) {
+                        _ = self.advance();
+                        const name_tok = try self.expect(.ident);
+                        _ = try self.expect(.colon);
+                        try fields.append(self.alloc, .{ .name = name_tok.text, .type_expr = try self.parseExpr(), .optional = true });
+                    } else if (is_named) {
                         self.pos.* += 1;
                         _ = try self.expect(.colon);
                         try fields.append(self.alloc, .{ .name = cur.text, .type_expr = try self.parseExpr() });
@@ -277,6 +296,7 @@ pub fn printType(ti: TypeInfo, writer: *std.Io.Writer, opts: PrintOptions) !void
                         break :blk true;
                     };
                     if (!positional) {
+                        if (f.optional) try writer.writeByte('?');
                         try writer.writeAll(f.name);
                         try writer.writeAll(": ");
                     }

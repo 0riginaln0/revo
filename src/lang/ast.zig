@@ -103,6 +103,8 @@ pub const MatchResult = struct {
 pub const RecordField = struct {
     name: []const u8,
     type_expr: *TypeExpr,
+    /// `?name:` fields may be absent; `name:` and `name: T?` require the key
+    optional: bool = false,
 };
 
 pub const TypeExpr = struct {
@@ -181,6 +183,7 @@ pub fn printTypeExpr(te: *const TypeExpr, writer: *std.Io.Writer) !void {
                     break :blk true;
                 };
                 if (!positional) {
+                    if (f.optional) try writer.writeByte('?');
                     try writer.writeAll(f.name);
                     try writer.writeAll(": ");
                 }
@@ -250,6 +253,7 @@ pub fn cloneTypeExpr(alloc: std.mem.Allocator, te: *const TypeExpr) std.mem.Allo
             for (fields, owned) |f, *dst| dst.* = .{
                 .name = try alloc.dupe(u8, f.name),
                 .type_expr = try cloneTypeExpr(alloc, f.type_expr),
+                .optional = f.optional,
             };
             break :blk .{ .record = owned };
         },

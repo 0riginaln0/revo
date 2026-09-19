@@ -11,7 +11,8 @@ examples:
 ```revo
 http.fetch(:get, "https://example.com")
 http.fetch(:post, "https://example.com", {
-	body = { foo = "bar", headers = :nil, max_redirects = :nil }
+  body = "{\"foo\":\"bar\"}",
+  max_redirects = 3
 })
 ```
 *#
@@ -19,9 +20,9 @@ pub declare http.fetch = fn(method: :get | :post | :put | :delete | :head | :opt
 
 type http.HeaderValue = string | num | :nil
 
-#* fetch options, all fields must be set *#
+#* fetch options *#
 pub type http.FetchOpts = {
-	headers: table<string, http.HeaderValue> | :nil,
-	body: string?,
-	max_redirects: num?,
+  ?headers: table<string, http.HeaderValue>,
+  ?body: string,
+  ?max_redirects: num,
 }

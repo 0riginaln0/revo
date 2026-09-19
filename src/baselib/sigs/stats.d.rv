@@ -5,7 +5,7 @@ statistics functions
 #*
 counts frequencies of elements in an array table and returns a mapping of elements to their counts
 *#
-pub declare stats.frequencies = fn(input: table<any>) -> table<any, int>
+pub declare stats.frequencies = fn(input: table<any>) -> table<any, num>
 
 #*
 calculates the arithmetic mean of an array of numbers
@@ -25,7 +25,7 @@ pub declare stats.median = fn(input: table<num>) -> num
 #*
 most frequent occuring value of input data
 *#
-pub declare stats.mode = fn(input: table<any>) -> num
+pub declare stats.mode = fn(input: table<any>) -> any
 
 #*
 population variance of the input data
@@ -70,7 +70,21 @@ pub declare stats.sample_kurtosis = fn(input: table<num>) -> num
 #*
 table of all statistics of the input data
 *#
-pub declare stats.statistics = fn(input: table<num>) -> table
+pub declare stats.statistics = fn(input: table<num>) -> {
+  n: num,
+  frequencies: table,
+  mean: num,
+  median: num,
+  mode: num,
+  stdev: num,
+  sample_stdev: num,
+  variance: num,
+  sample_variance: num,
+  skewness: num,
+  sample_skewness: num,
+  kurtosis: num,
+  sample_kurtosis: num,
+}
 
 #*
 slope of the regression of the input data
@@ -100,4 +114,12 @@ pub declare stats.sample_covariance = fn(input1: table<num>, input2: table<num>)
 #*
 table of regression statistics of the input data
 *#
-pub declare stats.regression = fn(input1: table<num>, input2: table<num>) -> table
+pub declare stats.regression = fn(input1: table<num>, input2: table<num>) -> {
+  n: num,
+  sum_of_products: num,
+  slope: num,
+  intercept: num,
+  correlation: num,
+  covariance: num,
+  sample_covariance: num,
+}

@@ -44,10 +44,10 @@ rεvo > csv.encode({{"hi", "wow"}, {'yay; so cool!', "aaa"}})
 *#
 pub declare csv.decode = fn(source: string, ?opts: csv.Opts) -> !any/string
 
-#* csv encoding and decoding options, all fields must be set *#
+#* csv encoding and decoding options *#
 pub type csv.Opts = {
-  delimiter: string?,
-  terminator: string?,
-  quote: string?,
-  bom: :true | :false | :nil,
+  ?delimiter: string,
+  ?terminator: string,
+  ?quote: string?,
+  ?bom: bool,
 }

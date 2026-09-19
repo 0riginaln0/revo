@@ -36,12 +36,13 @@ rεvo > uri.encode({
 *#
 pub declare uri.encode = fn(value: uri.Uri) -> !string
 
-#* parts of a uri, all fields must be set *#
+#* parts of a uri; encode tolerates absent fields, decode fills them *#
 pub type uri.Uri = {
-  scheme: string,
-  user: string?,
-  host: string?,
-  path: string?,
-  query: table<string, string | num> | :nil,
-  fragment: string?,
+  ?scheme: string,
+  ?user: string,
+  ?host: string,
+  ?path: string,
+  ?query: table<string, string | num>,
+  ?fragment: string,
+  ?port: num,
 }

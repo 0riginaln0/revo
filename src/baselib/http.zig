@@ -178,10 +178,14 @@ fn buildBody(method: Method, opts: Args.table, vm: *VM) !?Body {
         return null;
     }
     if (vm.getField(Value.new.table(@intFromEnum(opts)), "body")) |id| {
+        // explicit :nil is rejected (omit the key instead); anything else
+        // non-string is json, the default content-type is json too (TODO detect it)
+        if (id.asAtom()) |a| {
+            if (a == revo.CoreAtoms.nil.atomId()) return error.TypeError;
+        }
         if (id.asStr()) |s| {
             return .{ .slice = vm.stringValue(s) };
         }
-        // anything else is json, the default content-type is json too (TODO detect it)
         return .{ .slice = try @import("json.zig").encodeAlloc(id, vm), .owned = true };
     }
 

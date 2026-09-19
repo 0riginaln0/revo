@@ -3535,6 +3535,34 @@ test "records accept matching shapes" {
     , "NotFound");
 }
 
+test "optional ?field: accepts absent keys" {
+    try t.topNumber(
+        \\ fn f(opts: {?max_bytes: num}) -> num do 0 end
+        \\ f({})
+    , 0);
+    try t.topNumber(
+        \\ fn f(opts: {?max_bytes: num}) -> num do 0 end
+        \\ f({max_bytes = 5})
+    , 0);
+    try t.topNumber(
+        \\ type Opts = {?a: num?, ?b: string}
+        \\ let o: Opts = {a = :nil}
+        \\ 1
+    , 1);
+
+    // present-but-wrong-typed still rejects
+    try t.expectSemanticError(
+        \\ fn f(opts: {?max_bytes: num}) -> num do 0 end
+        \\ f({max_bytes = "lots"})
+    );
+
+    // required fields still reject absent keys
+    try t.expectSemanticError(
+        \\ fn f(opts: {max_bytes: num}) -> num do 0 end
+        \\ f({})
+    );
+}
+
 test "records reject mismatched shapes" {
     try t.expectSemanticError(
         \\ let u: { name: string, age: num } = { name = "alice" }
@@ -5109,7 +5137,7 @@ test "manifest dotted macros rescope under the import name" {
 
 test "baselib dotted type resolves qualified, unknown qualified errors" {
     try t.topNumber(
-        \\ const u: uri.Uri = { scheme = "https", user = :nil, host = "example.com", path = "/hi/there", query = { "search", "page" = 3 }, fragment = :nil }
+        \\ const u: uri.Uri = { scheme = "https", host = "example.com", path = "/hi/there", query = { "search", "page" = 3 } }
         \\ 1
     , 1);
     try t.expectSemanticError(

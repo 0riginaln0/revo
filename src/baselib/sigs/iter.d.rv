@@ -101,7 +101,7 @@ like reduce but without an initial value; first element seeds the fold
 returns nil for empty collections
    iter.fold({1, 2, 3, 4}, fn(acc, x) acc + x)
 *#
-pub declare iter.fold = fn(collection: any, fn: function) -> any
+pub declare iter.fold = fn(collection: any, fn: function) -> any | :nil
 
 #*
 iterates over elements, calling function for side effects, returns :ok
@@ -114,7 +114,7 @@ pub declare iter.each = fn(collection: any, fn: function) -> :ok
 returns first element where function returns true, or nil
    iter.find({1, 2, 3, 4}, fn(x) x > 2)
 *#
-pub declare iter.find = fn(what: any, fn: function) -> any
+pub declare iter.find = fn(what: any, fn: function) -> any | :nil
 
 #*
 returns true if function returns true for all elements

@@ -7,5 +7,5 @@ enabling `pretty` will emit indented json
 pub declare json.encode = fn(value: any, ?pretty: bool) -> !string
 
 #* decodes json string into revo value *#
-pub declare json.decode = fn(source: string) -> !any/string
+pub declare json.decode = fn(source: string) -> !any
 

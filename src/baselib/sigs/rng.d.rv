@@ -15,6 +15,6 @@ pub declare rng.range = fn(lower_bound: num, upper_bound: num) -> num
 #* Returns a random float in the range [0, 1] *#
 pub declare rng.rand_float = fn() -> num
 
-#* Returns a random element from a table (note: this function *ignores* key value pairs.) *#
-pub declare rng.choice = fn(input: table) -> any
+#* Returns a random element from a table, or :nil if empty (note: this function *ignores* key value pairs.) *#
+pub declare rng.choice<T> = fn(input: table<T>) -> T | :nil
 

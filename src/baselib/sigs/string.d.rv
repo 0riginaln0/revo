@@ -18,7 +18,7 @@ pub declare string.sub = fn(self: string, start: num, length: num) -> string
 pub declare string.replace = fn(self: string, old: string, new: string) -> string
 
 #* splits string by delimiter into table *#
-pub declare string.split = fn(self: string, delim: string) -> table
+pub declare string.split = fn(self: string, delim: string) -> table<string>
 
 #* trims whitespace from both ends *#
 pub declare string.trim = fn(self: string) -> string
@@ -51,7 +51,7 @@ converts string to table of characters
 "asdf":table() => {"a", "s", "d", "f"}
 ```
 *#
-pub declare string.table = fn(self: string) -> table
+pub declare string.table = fn(self: string) -> table<string>
 
 #*
 returns ASCII code of first character
@@ -78,7 +78,7 @@ of_ascii(97) => "a"
 pub declare string.of_ascii = fn(code: num) -> string
 
 #* joins table elements into string with separator *#
-pub declare string.join = fn(table: table, sep: string) -> string
+pub declare string.join = fn(table: table<string>, sep: string) -> string
 
 #* converts value to string: string(x) *#
 pub declare string.__call = fn(value: any) -> string

@@ -10,10 +10,10 @@ use `file.close()` when you're done with the handle
 pub declare fs.open = fn(path: string, mode: string?) -> !table
 
 #* returns table of directory entries *#
-pub declare fs.readdir = fn(path: string) -> !table
+pub declare fs.readdir = fn(path: string) -> !table<{name: string, kind: atom}>
 
 #* returns table of directory entries for the dir handle's path *#
-pub declare file.readdir = fn(self: table) -> !table
+pub declare file.readdir = fn(self: table) -> !table<{name: string, kind: atom}>
 
 #* does path exist? answers :false when missing, raises on unexpected io errors *#
 pub declare fs.exists? = fn(path: string) -> bool
@@ -46,7 +46,7 @@ optional permissions default to the platform file default
 pub declare file.write = fn(self: table, data: string, append: bool?, permissions: num?) -> !num
 
 #* get file metadata as a table; follow optional, defaults to :true: :false leaves symlinks alone *#
-pub declare file.stat = fn(self: table, follow: bool?) -> !table
+pub declare file.stat = fn(self: table, follow: bool?) -> !fs.Stat
 
 #*
 closes a file handle table
@@ -55,4 +55,14 @@ this is currently a logical close for wrapper handles
 pub declare file.close = fn(self: table) -> !atom
 
 #* get file metadata as a table from a path; follow optional, defaults to :true *#
-pub declare fs.stat = fn(path: string, follow: bool?) -> !table
+pub declare fs.stat = fn(path: string, follow: bool?) -> !fs.Stat
+
+#* file metadata as returned by file.stat and fs.stat *#
+pub type fs.Stat = {
+  size: num,
+  kind: atom,
+  permissions: num,
+  mtime: num,
+  atime: num,
+  ctime: num,
+}

@@ -7,9 +7,11 @@ pub const UnionVariant = struct {
 };
 
 /// one named field of a structural table type: `{ name: string }`
+/// `?name:` fields may be absent from the value
 pub const RecordField = struct {
     name: []const u8,
     field_type: TypeInfo,
+    optional: bool = false,
 };
 
 /// build a table TypeInfo; the key/value ptrs borrow the caller's
@@ -83,6 +85,7 @@ pub const TypeInfo = struct {
                     if (fs.len != os.len) break :blk false;
                     for (fs, os) |f, of| {
                         if (!std.mem.eql(u8, f.name, of.name)) break :blk false;
+                        if (f.optional != of.optional) break :blk false;
                         if (!eql(f.field_type, of.field_type)) break :blk false;
                     }
                 } else if (o.fields != null) break :blk false;
@@ -403,6 +406,7 @@ pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
                 for (fs, owned) |f, *dst| dst.* = .{
                     .name = try alloc.dupe(u8, f.name),
                     .field_type = try clone(f.field_type, alloc),
+                    .optional = f.optional,
                 };
                 break :blk owned;
             } else null;
@@ -492,7 +496,11 @@ pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
         if (to_table.fields) |wants| {
             if (from_table.fields) |haves| {
                 for (wants) |w| {
-                    const have = findField(haves, w.name) orelse return false;
+                    const have = findField(haves, w.name) orelse {
+                        // `?name:` wants tolerate absent fields
+                        if (w.optional) continue;
+                        return false;
+                    };
                     if (!canCoerce(have.field_type, w.field_type)) return false;
                 }
                 return true;
@@ -991,6 +999,7 @@ pub fn evalTypeExpr(ctx: CheckCtx, te: *const ast.TypeExpr) !TypeInfo {
             for (fields, owned) |f, *dst| dst.* = .{
                 .name = f.name,
                 .field_type = try evalTypeExpr(ctx, f.type_expr),
+                .optional = f.optional,
             };
             const value = try ctx.alloc.create(TypeInfo);
             value.* = .{ .tag = .any };
@@ -1259,6 +1268,7 @@ pub fn substituteTypeParams(alloc: std.mem.Allocator, ti: TypeInfo, subst: anyty
                 for (fs, owned) |f, *dst| dst.* = .{
                     .name = f.name,
                     .field_type = try substituteTypeParams(alloc, f.field_type, subst),
+                    .optional = f.optional,
                 };
                 break :blk2 owned;
             } else null;

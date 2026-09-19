@@ -29,5 +29,5 @@ pub declare setenv = fn(name: string, value: string) -> :ok
 
 #* read input options *#
 pub type InputOpts = {
-  delimiter: string | :nil | :eof
+  ?delimiter: string | :nil | :eof
 }

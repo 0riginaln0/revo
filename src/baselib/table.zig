@@ -70,7 +70,7 @@ pub const Impl = struct {
             "table",
             typeof(Value.new.table(@intFromEnum(self)), vm),
         );
-        if (table.array.items.len == 0) return .data(Value.new.nil());
+        if (table.array.items.len == 0) return .coreAtom(.undef);
 
         const removed = table.array.orderedRemove(table.array.items.len - 1);
         return .data(removed);

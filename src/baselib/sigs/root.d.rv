@@ -31,11 +31,23 @@ pub declare assert = fn(value: any) -> any
 #* panics if values are not equal *#
 pub declare assert_eq = fn(a: any, b: any) -> any
 
-#* sets debug flags from a table *#
-pub declare set_debug = fn(flags: table) -> :ok
+#* sets debug flags from a table (all fields default to :false) *#
+pub declare set_debug = fn(flags: {dump: bool?, trace: bool?, instr: bool?, stack: bool?}) -> :ok
 
 #* returns debug info as a table *#
-pub declare debug_info = fn() -> table
+pub declare debug_info = fn() -> {
+  flags: {dump: bool, trace: bool, instr: bool, stack: bool},
+  fiber_id: num,
+  pc: num,
+  stack_depth: num,
+  frame_depth: num,
+  program_len: num,
+  has_debug_info: bool,
+  source_name: string|:nil,
+  source: string|:nil,
+  span_count: num,
+  panic_message: string|:nil,
+}
 
 #* creates a new channel with optional buffer size *#
 pub declare chan = fn(?capacity: num...) -> {:chan, num}

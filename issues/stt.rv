@@ -1,0 +1,12 @@
+#!
+structural table typing wishlist (incomplete)
+!#
+
+# [ ] table<number | :ok | string>
+let t = {1}:merge({2, 3, :ok, input()?})
+
+# [ ] {:a, "b"}
+let t = {a = 2, "b" = 10}:keys()
+
+# [ ] {:a, "b"}
+let t = {a = 2, "b" = 10}:keys()
