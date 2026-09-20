@@ -158,6 +158,82 @@ pub const Report = struct {
     }
 };
 
+/// one `Part{error}` + `Part{span primary}` pair
+///   slices stored as given, never duped, caller owns the text
+pub fn appendErrorPair(
+    list: *std.ArrayList(Part),
+    alloc: std.mem.Allocator,
+    message: []const u8,
+    span: ast.Span,
+) !void {
+    try list.append(alloc, .{ .@"error" = message });
+    try list.append(alloc, .{ .span = .{ .span = span, .role = .primary } });
+}
+
+/// same pair with a span label, stored as given like message
+pub fn appendErrorLabelPair(
+    list: *std.ArrayList(Part),
+    alloc: std.mem.Allocator,
+    message: []const u8,
+    span: ast.Span,
+    label: []const u8,
+) !void {
+    try list.append(alloc, .{ .@"error" = message });
+    try list.append(alloc, .{ .span = .{ .span = span, .role = .primary, .message = label } });
+}
+
+/// warn twin of the label pair, reports carry one message either way
+pub fn appendWarnPair(
+    list: *std.ArrayList(Part),
+    alloc: std.mem.Allocator,
+    message: []const u8,
+    span: ast.Span,
+    label: []const u8,
+) !void {
+    try list.append(alloc, .{ .warn = message });
+    try list.append(alloc, .{ .span = .{ .span = span, .role = .primary, .message = label } });
+}
+
+/// incremental pair builder for standalone reports
+///   same pairs as above, finish takes message + severity explicitly
+///   code and source stay null here, caller sets what it knows
+pub const DiagnosticBuilder = struct {
+    alloc: std.mem.Allocator,
+    parts: std.ArrayList(Part),
+
+    pub fn init(alloc: std.mem.Allocator) DiagnosticBuilder {
+        return .{ .alloc = alloc, .parts = .empty };
+    }
+
+    pub fn deinit(self: *DiagnosticBuilder) void {
+        self.parts.deinit(self.alloc);
+    }
+
+    pub fn errOnly(self: *DiagnosticBuilder, message: []const u8) !void {
+        try self.parts.append(self.alloc, .{ .@"error" = message });
+    }
+
+    pub fn err(self: *DiagnosticBuilder, message: []const u8, span: ast.Span) !void {
+        try appendErrorPair(&self.parts, self.alloc, message, span);
+    }
+
+    pub fn errLabel(self: *DiagnosticBuilder, message: []const u8, span: ast.Span, label: []const u8) !void {
+        try appendErrorLabelPair(&self.parts, self.alloc, message, span, label);
+    }
+
+    pub fn warn(self: *DiagnosticBuilder, message: []const u8, span: ast.Span, label: []const u8) !void {
+        try appendWarnPair(&self.parts, self.alloc, message, span, label);
+    }
+
+    pub fn finish(self: *DiagnosticBuilder, message: []const u8, severity: Severity) !Report {
+        return .{
+            .parts = try self.parts.toOwnedSlice(self.alloc),
+            .message = message,
+            .severity = severity,
+        };
+    }
+};
+
 /// wrapper for reports emitted by a phase
 pub fn Diagnostic(comptime Kind: type) type {
     return struct {

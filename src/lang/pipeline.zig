@@ -387,22 +387,22 @@ fn macroReport(
     missed: []UnexpandedMacro,
 ) !diagnostic.Report {
     const fmt = "unknown macro `{s}`";
-    var parts = try std.ArrayList(diagnostic.Part).initCapacity(allocator, missed.len * 2);
-    errdefer parts.deinit(allocator);
+    var b = diagnostic.DiagnosticBuilder.init(allocator);
+    errdefer b.deinit();
 
     for (missed) |m| {
         const msg = try std.fmt.allocPrint(allocator, fmt, .{m.name});
-        try parts.append(allocator, .{ .@"error" = msg });
-        try parts.append(allocator, .{ .span = .{ .span = m.span, .role = .primary } });
+        try b.err(msg, m.span);
     }
 
     const first = try std.fmt.allocPrint(allocator, fmt, .{missed[0].name});
-    return .{
-        .message = first,
-        .parts = try parts.toOwnedSlice(allocator),
-        .source_name = source_name,
-        .source = source,
-    };
+    errdefer allocator.free(first);
+
+    var report = try b.finish(first, .err);
+    report.source_name = source_name;
+    report.source = source;
+
+    return report;
 }
 
 pub fn compile(

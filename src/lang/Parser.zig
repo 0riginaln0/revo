@@ -107,12 +107,12 @@ pub fn parseSourceReport(allocator: std.mem.Allocator, source: []const u8) !Pars
                 .LateModuleDoc => .LexLateModuleDoc,
                 .Unknown => .LexUnknown,
             };
-            const parts = try allocator.alloc(diagnostic.Part, 2);
-            parts[0] = diagnostic.Part{ .@"error" = failure.message };
-            parts[1] = .{ .span = .{ .span = failure.span, .role = .primary } };
+            var b = diagnostic.DiagnosticBuilder.init(allocator);
+            errdefer b.deinit();
+            try b.err(failure.message, failure.span);
             return .{ .err = .{
                 .kind = kind,
-                .report = .{ .parts = parts, .message = failure.message },
+                .report = try b.finish(failure.message, .err),
             } };
         },
     };
@@ -126,32 +126,41 @@ pub fn parseTokensReport(alloc: std.mem.Allocator, tokens: []const Token) anyerr
     const expr = parser.parse() catch |err| switch (err) {
         error.UnexpectedToken => {
             const token = parser.peek();
-            const parts = try alloc.alloc(diagnostic.Part, 2);
-            parts[0] = diagnostic.Part{ .@"error" = try alloc.dupe(u8, "unexpected token") };
-            parts[1] = .{ .span = .{ .span = token.span(), .role = .primary } };
+            const msg = try alloc.dupe(u8, "unexpected token");
+            errdefer alloc.free(msg);
+
+            var b = diagnostic.DiagnosticBuilder.init(alloc);
+            errdefer b.deinit();
+            try b.err(msg, token.span());
             return .{ .err = .{
                 .kind = .UnexpectedToken,
-                .report = .{ .parts = parts, .message = parts[0].@"error" },
+                .report = try b.finish(msg, .err),
             } };
         },
         error.ExpectedIdentifier => {
             const token = parser.peek();
-            const parts = try alloc.alloc(diagnostic.Part, 2);
-            parts[0] = diagnostic.Part{ .@"error" = try alloc.dupe(u8, "expected identifier") };
-            parts[1] = .{ .span = .{ .span = token.span(), .role = .primary } };
+            const msg = try alloc.dupe(u8, "expected identifier");
+            errdefer alloc.free(msg);
+
+            var b = diagnostic.DiagnosticBuilder.init(alloc);
+            errdefer b.deinit();
+            try b.err(msg, token.span());
             return .{ .err = .{
                 .kind = .ExpectedIdentifier,
-                .report = .{ .parts = parts, .message = parts[0].@"error" },
+                .report = try b.finish(msg, .err),
             } };
         },
         error.ExpectedMatchArm => {
             const token = parser.peek();
-            const parts = try alloc.alloc(diagnostic.Part, 2);
-            parts[0] = diagnostic.Part{ .@"error" = try alloc.dupe(u8, "match expression requires at least one arm") };
-            parts[1] = .{ .span = .{ .span = token.span(), .role = .primary } };
+            const msg = try alloc.dupe(u8, "match expression requires at least one arm");
+            errdefer alloc.free(msg);
+
+            var b = diagnostic.DiagnosticBuilder.init(alloc);
+            errdefer b.deinit();
+            try b.err(msg, token.span());
             return .{ .err = .{
                 .kind = .ExpectedMatchArm,
-                .report = .{ .parts = parts, .message = parts[0].@"error" },
+                .report = try b.finish(msg, .err),
             } };
         },
         else => return err,
@@ -249,8 +258,7 @@ fn recordError(self: *Parser, kind: Kind, message: []const u8, span: ast.Span) !
         self.first_error_kind = kind;
         self.first_error_message = message;
     }
-    try self.errors.append(self.alloc, .{ .@"error" = owned });
-    try self.errors.append(self.alloc, .{ .span = .{ .span = span, .role = .primary } });
+    try diagnostic.appendErrorPair(&self.errors, self.alloc, owned, span);
     try self.error_depths.append(self.alloc, self.depth);
 }
 

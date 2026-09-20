@@ -51,22 +51,17 @@ fn buildReport(
     source: []const u8,
     info: ProcFailure,
 ) !diagnostic.Report {
-    var parts: [2]diagnostic.Part = undefined;
-    const slice = if (info.span) |s| blk: {
-        parts[0] = .{ .@"error" = info.message };
-        parts[1] = .{ .span = .{ .span = s, .role = .primary } };
-        break :blk parts[0..2];
-    } else blk: {
-        parts[0] = .{ .@"error" = info.message };
-        break :blk parts[0..1];
-    };
+    var b = diagnostic.DiagnosticBuilder.init(allocator);
+    errdefer b.deinit();
+
+    if (info.span) |s| try b.err(info.message, s) else try b.errOnly(info.message);
+
     const report_source_name = if (source_name.len == 0) "<proc>" else source_name;
-    return .{
-        .message = info.message,
-        .parts = try allocator.dupe(diagnostic.Part, slice),
-        .source_name = report_source_name,
-        .source = source,
-    };
+    var report = try b.finish(info.message, .err);
+    report.source_name = report_source_name;
+    report.source = source;
+
+    return report;
 }
 
 pub fn expandExprWithSource(
