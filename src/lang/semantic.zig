@@ -26,7 +26,7 @@ pub const ModuleResolver = struct {
 
 /// run semantic analysis; known_globals are names that exist at runtime (builtins)
 /// type_map, if set, is populated with name -> type_name during analysis
-/// annotations, if set, intern every baselib-call return into the table
+/// annotations, if set, intern every analyzed node into the table
 /// module_resolver resolves import paths to source text
 pub fn analyze(
     alloc: std.mem.Allocator,
@@ -187,10 +187,6 @@ const SemanticChecker = struct {
     docs: ?*std.StringHashMap([]const u8),
     /// one sig per baselib spec, keyed by the spec's const-storage address
     sig_cache: std.AutoHashMap(*const revo.baselib.specs.FnSpec, *const FnSig),
-    /// function sigs parsed from baselib specs (globals, methods, module
-    /// fns); used to mark which call sites the compiler can trust an
-    /// annotation for instead of its own inference
-    baselib_sig_ptrs: std.ArrayList(*const types_mod.FunctionSignature),
     return_types: std.ArrayList(types_mod.TypeInfo),
     type_map: ?*std.StringHashMap(types_mod.TypeInfo),
     annotations: ?types_mod.Annotations,
@@ -235,7 +231,6 @@ const SemanticChecker = struct {
             .type_aliases = .init(alloc),
             .docs = docs,
             .sig_cache = .init(alloc),
-            .baselib_sig_ptrs = try .initCapacity(alloc, 4),
             .return_types = try .initCapacity(alloc, 4),
             .type_map = type_map,
             .annotations = annotations,
@@ -627,7 +622,6 @@ const SemanticChecker = struct {
         });
 
         try self.sig_cache.put(spec, sig);
-        try self.baselib_sig_ptrs.append(self.alloc, sig);
         return sig;
     }
 
@@ -674,7 +668,7 @@ const SemanticChecker = struct {
     }
 
     fn analyzeNode(self: *SemanticChecker, node: *const ast.Node) anyerror!types_mod.TypeInfo {
-        return switch (node.expr) {
+        const t: types_mod.TypeInfo = switch (node.expr) {
             .binding => |b| try self.analyzeBinding(b, null, node.span),
             .decl => |d| try self.analyzeDecl(d, node.span),
             .type_alias => |alias| try self.analyzeTypeAlias(alias, null, node.span),
@@ -693,31 +687,7 @@ const SemanticChecker = struct {
             .assign_expr => |assign| try self.analyzeAssign(assign, node.span),
             .compound_assign => |assign| try self.analyzeCompound(assign.target, assign.op, assign.value, node.span),
             .return_expr => |val| try self.analyzeReturn(val, node.span),
-            .call => |call| blk: {
-                const t = try self.analyzeCall(call, node.span);
-                // baselib and method callees resolve from spec sigs only the
-                // semantic checker knows
-                //
-                // annotate them so compiler can
-                // use return type. source fns stay compiler-inferred so
-                // flow narrowing and generic substitution keep their edge
-                if (self.annotations) |ann| {
-                    const resolved = if (call.callee.expr == .ident)
-                        self.lookup(call.callee.expr.ident) orelse null
-                    else
-                        types_mod.inferExprType(self.check(), call.callee);
-                    if (resolved) |r| {
-                        if (r.tag == .function and
-                            std.mem.findScalar(*const types_mod.FunctionSignature, self.baselib_sig_ptrs.items, r.tag.function) != null)
-                        {
-                            if (ann.table.intern(t)) |id| {
-                                ann.map.put(node, id) catch {};
-                            } else |_| {}
-                        }
-                    }
-                }
-                break :blk t;
-            },
+            .call => |call| try self.analyzeCall(call, node.span),
             .if_expr => |v| try self.analyzeIf(v, node.span),
             .unless_expr => |v| try self.analyzeUnless(v, node.span),
             .ident => |name| try self.analyzeIdent(name, node.span),
@@ -1064,6 +1034,65 @@ const SemanticChecker = struct {
                 break :blk .{ .tag = .any };
             },
         };
+
+        // every node leaves with an annotation; the compiler reads these
+        // instead of re-inferring, so narrowing and generics edges live here now
+        if (self.annotations) |ann| {
+            const tv = self.annotatedType(node, t);
+            if (ann.table.intern(tv)) |id| {
+                ann.map.put(node, id) catch {};
+            } else |_| {}
+        }
+
+        return t;
+    }
+
+    /// ident annotations go rite over flow-tracked fields onto the declared shape
+    ///   mirrors inferFieldType,,, literal fields win, tracked fill gaps
+    ///   transient in checker alloc, intern clones; never freed, arena-owned
+    fn annotatedType(self: *SemanticChecker, node: *const ast.Node, declared: types_mod.TypeInfo) types_mod.TypeInfo {
+        if (node.expr != .ident) return declared;
+        if (declared.tag != .table) return declared;
+        const tracked = self.table_field_map.get(node.expr.ident) orelse return declared;
+        if (tracked.count() == 0) return declared;
+
+        const base = declared.tag.table.fields orelse &.{};
+        var extra: usize = 0;
+        var it = tracked.iterator();
+        while (it.next()) |e| {
+            var found = false;
+            for (base) |f| {
+                if (std.mem.eql(u8, f.name, e.key_ptr.*)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) extra += 1;
+        }
+        if (extra == 0) return declared;
+
+        var fields = std.ArrayList(types_mod.RecordField).initCapacity(self.alloc, base.len + extra) catch return declared;
+        for (base) |f| fields.appendAssumeCapacity(f);
+        var it2 = tracked.iterator();
+        while (it2.next()) |e| {
+            var found = false;
+            for (base) |f| {
+                if (std.mem.eql(u8, f.name, e.key_ptr.*)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) fields.appendAssumeCapacity(.{
+                .name = e.key_ptr.*,
+                .field_type = e.value_ptr.*,
+            });
+        }
+
+        return .{ .tag = .{ .table = .{
+            .key = declared.tag.table.key,
+            .value = declared.tag.table.value,
+            .fields = fields.items,
+        } } };
     }
 
     fn analyzeIdent(self: *SemanticChecker, name: []const u8, span: ast.Span) !types_mod.TypeInfo {
@@ -1118,11 +1147,6 @@ const SemanticChecker = struct {
         try self.declare(alias.name, t, doc orelse alias.doc);
         // also usable in type positions: `const x: MAX_ITEMS = 5`
         try self.type_aliases.put(alias.name, .{ .info = t, .doc = doc orelse alias.doc });
-        // host-contract sigs are as trustworthy as baselib sigs: trust the
-        // return type at call sites
-        if (t.tag == .function) {
-            try self.baselib_sig_ptrs.append(self.alloc, t.tag.function);
-        }
         return .{ .tag = .any };
     }
 
