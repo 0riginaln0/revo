@@ -1275,6 +1275,46 @@ test "hasUnderscore" {
     res = (try pipeline.parse(arena, .{ .text = "_ + 42", .name = "<>" }, .{})).ok;
     try std.testing.expect(hasUnderscore(res.root));
 }
+
+const IdentityWalk = struct {
+    pub fn walk(_: @This(), allocator: std.mem.Allocator, expr: *Node, _: @This()) std.mem.Allocator.Error!*Node {
+        return walkExpr(allocator, expr, @This(), .{});
+    }
+};
+
+test "walkExpr aliases armless nodes instead of copying (known gap)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const span = Span{ .start = 0, .end = 0, .line = 0, .column = 0 };
+
+    // leaves have no walkExpr arm, else => expr hands back the same pointer
+    const leaf = try allocNode(alloc, span, .nil);
+    try std.testing.expect(try walkExpr(alloc, leaf, IdentityWalk, .{}) == leaf);
+
+    // anything with an arm rebuilds, even when children are unchanged
+    const operand = try allocNode(alloc, span, .nil);
+    const parent = try allocNode(alloc, span, .{ .unary = .{ .op = .not, .expr = operand } });
+    try std.testing.expect(try walkExpr(alloc, parent, IdentityWalk, .{}) != parent);
+}
+
+test "walkExpr drops fn doc/native on rebuild (known gap)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const span = Span{ .start = 0, .end = 0, .line = 0, .column = 0 };
+
+    const body = try allocNode(alloc, span, .nil);
+    const f = try allocNode(alloc, span, .{ .fn_expr = .{
+        .params = &[_]FnParam{},
+        .body = body,
+        .doc = "hi",
+        .native = true,
+    } });
+    const out = try walkExpr(alloc, f, IdentityWalk, .{});
+    try std.testing.expect(out.expr.fn_expr.doc == null);
+    try std.testing.expect(out.expr.fn_expr.native == false);
+}
 pub const NumberLiteral = struct {
     value: f64,
     is_float: bool = false,

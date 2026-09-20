@@ -230,6 +230,61 @@ const UnexpandedMacro = struct {
     span: ast.Span,
 };
 
+/// owned `a.b.c!` dotted path for a bang field callee, null when not one
+///   walks the object chain up to 16 deep, caller frees the hit
+fn dottedMacroName(alloc: std.mem.Allocator, callee: *const Node) !?[]u8 {
+    if (callee.expr != .field) return null;
+
+    const f = callee.expr.field;
+    if (!std.mem.endsWith(u8, f.name, "!")) return null;
+
+    var parts: [16][]const u8 = undefined;
+    var part_count: usize = 0;
+    {
+        var cur: *const Node = f.object;
+        while (true) {
+            switch (cur.expr) {
+                .ident => |n| {
+                    parts[part_count] = n;
+                    part_count += 1;
+                    break;
+                },
+                .field => |fld| {
+                    parts[part_count] = fld.name;
+                    part_count += 1;
+                    cur = fld.object;
+                },
+                else => break,
+            }
+            if (part_count == parts.len) break;
+        }
+    }
+    // reverse parts so they're in base..field order
+    var i: usize = 0;
+    var j: usize = part_count;
+    while (i < j) {
+        j -= 1;
+        const tmp = parts[i];
+        parts[i] = parts[j];
+        parts[j] = tmp;
+        i += 1;
+    }
+    // append f.name as the final field
+    if (part_count < parts.len) {
+        parts[part_count] = f.name;
+        part_count += 1;
+    }
+    var name = try alloc.dupe(u8, parts[0]);
+    errdefer alloc.free(name);
+    for (parts[1..part_count]) |part| {
+        const combined = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ name, part });
+        alloc.free(name);
+        name = combined;
+    }
+
+    return name;
+}
+
 const UnexpandedVisitor = struct {
     alloc: std.mem.Allocator,
     out: *std.ArrayList(UnexpandedMacro),
@@ -242,58 +297,7 @@ const UnexpandedVisitor = struct {
                     self.out.append(self.alloc, .{ .name = n, .span = callee.span }) catch return;
                 },
                 .field => |f| if (std.mem.endsWith(u8, f.name, "!")) {
-                    var parts: [16][]const u8 = undefined;
-                    var part_count: usize = 0;
-                    {
-                        var cur: *const Node = f.object;
-                        while (true) {
-                            switch (cur.expr) {
-                                .ident => |n| {
-                                    parts[part_count] = n;
-                                    part_count += 1;
-                                    break;
-                                },
-                                .field => |fld| {
-                                    parts[part_count] = fld.name;
-                                    part_count += 1;
-                                    cur = fld.object;
-                                },
-                                else => break,
-                            }
-                            if (part_count == parts.len) break;
-                        }
-                    }
-                    // reverse parts so they're in base..field order
-                    var i: usize = 0;
-                    var j: usize = part_count;
-                    while (i < j) {
-                        j -= 1;
-                        const tmp = parts[i];
-                        parts[i] = parts[j];
-                        parts[j] = tmp;
-                        i += 1;
-                    }
-                    // append f.name as the final field
-                    if (part_count < parts.len) {
-                        parts[part_count] = f.name;
-                        part_count += 1;
-                    }
-                    const full_name = blk: {
-                        var name = self.alloc.dupe(u8, parts[0]) catch return;
-                        for (parts[1..part_count]) |part| {
-                            const combined = std.fmt.allocPrint(
-                                self.alloc,
-                                "{s}.{s}",
-                                .{ name, part },
-                            ) catch {
-                                self.alloc.free(name);
-                                return;
-                            };
-                            self.alloc.free(name);
-                            name = combined;
-                        }
-                        break :blk name;
-                    };
+                    const full_name = (dottedMacroName(self.alloc, callee) catch return) orelse return;
                     self.out.append(self.alloc, .{ .name = full_name, .span = callee.span }) catch {
                         self.alloc.free(full_name);
                         return;

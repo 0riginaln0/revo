@@ -53,16 +53,50 @@ fn walkAndProcessImports(
     visited_sub: *std.StringHashMap(void),
     cache: *ImportCache,
 ) !void {
-    switch (node.expr) {
-        .block => |items| {
-            for (items) |item| try walkAndProcessImports(vm, item, alloc, inject_nodes, visited, visited_sub, cache);
-        },
-        .import_stmt => |stmt| try processImport(vm, stmt.path, stmt.name, alloc, inject_nodes, visited, visited_sub, cache),
-        .decl => |d| try walkAndProcessImports(vm, d.inner, alloc, inject_nodes, visited, visited_sub, cache),
-        .binding => |b| try walkAndProcessImports(vm, b.value, alloc, inject_nodes, visited, visited_sub, cache),
-        else => {},
-    }
+    var visitor = ImportWalkVisitor{
+        .vm = vm,
+        .alloc = alloc,
+        .inject_nodes = inject_nodes,
+        .visited = visited,
+        .visited_sub = visited_sub,
+        .cache = cache,
+    };
+    visitor.visit(node);
+    if (visitor.failed) |e| return e;
 }
+
+/// walkAST visitor matching the old hand recursion exactly
+///   only block|decl|binding recurse, so imports under if/match/fn stay missed
+///   first error aborts like propagation did, visit just cannot return it
+const ImportWalkVisitor = struct {
+    vm: *VM,
+    alloc: std.mem.Allocator,
+    inject_nodes: *std.ArrayList(*Node),
+    visited: *std.StringHashMap(void),
+    visited_sub: *std.StringHashMap(void),
+    cache: *ImportCache,
+    failed: ?anyerror = null,
+
+    pub fn visit(self: *@This(), node: *const Node) void {
+        if (self.failed != null) return;
+        switch (node.expr) {
+            .import_stmt => |stmt| processImport(
+                self.vm,
+                stmt.path,
+                stmt.name,
+                self.alloc,
+                self.inject_nodes,
+                self.visited,
+                self.visited_sub,
+                self.cache,
+            ) catch |e| {
+                if (self.failed == null) self.failed = e;
+            },
+            .block, .decl, .binding => ast.walkAST(@This(), self, node),
+            else => {},
+        }
+    }
+};
 
 /// resolve module path matching runtime import resolution
 pub fn resolveModuleFile(vm: *VM, name: []const u8) !?[]const u8 {

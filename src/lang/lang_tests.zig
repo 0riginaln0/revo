@@ -1778,6 +1778,26 @@ test "imported proc macros expand, unknown ones error" {
     , "unknown macro `m.nope!`");
 }
 
+test "nested imports never preload macros (known gap)" {
+    // import_scan only walks block|decl|binding, so an import nested under
+    // fn never preloads; the call below stays unexpanded. fixing the walk
+    // must update this test, not just the code.
+    var m = try t.TmpMod.init(&.{
+        .{ .path = "macs.rv", .data =
+        \\ pub macro answer! `(%w:expr)` `%w`
+        },
+    });
+    defer m.deinit();
+
+    try t.expectExpandErrorInDir(m.dir,
+        \\ fn f() do
+        \\   const m = import "./macs"
+        \\   m.answer!(1)
+        \\ end
+        \\ f()
+    , "unknown macro `m.answer!`");
+}
+
 test "unknown macro calls are compile errors" {
     // yes this happens sometimes and its REALLY unfun
     try t.expectExpandError(
