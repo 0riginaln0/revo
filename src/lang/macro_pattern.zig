@@ -5,6 +5,7 @@ const ast = @import("ast.zig");
 const Node = ast.Node;
 const Span = ast.Span;
 const Parser = @import("Parser.zig");
+const macro_common = @import("macro_common.zig");
 
 pub const ExpandError = error{
     UnsupportedMacroPattern,
@@ -132,19 +133,15 @@ fn maybeExpandCall(
 
     // qualified module macro
     //     mod_name.macro_name!
-    if (expanded_callee.expr == .field) {
-        const f = expanded_callee.expr.field;
-        if (f.object.expr == .ident and std.mem.endsWith(u8, f.name, "!")) {
-            const qualified = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ f.object.expr.ident, f.name });
-            defer allocator.free(qualified);
-            if (env.map.get(qualified)) |def| {
-                if (matchPattern(allocator, def.pattern, expanded_args)) |result| {
+    if (try macro_common.qualifiedMacroName(allocator, expanded_callee)) |qualified| {
+        defer allocator.free(qualified);
+        if (env.map.get(qualified)) |def| {
+            if (matchPattern(allocator, def.pattern, expanded_args)) |result| {
+                return instantiateTemplate(allocator, span, def.template, result.singles, result.groups);
+            }
+            if (expanded_args.len == 1) {
+                if (matchExprPattern(allocator, def.pattern, expanded_args[0])) |result| {
                     return instantiateTemplate(allocator, span, def.template, result.singles, result.groups);
-                }
-                if (expanded_args.len == 1) {
-                    if (matchExprPattern(allocator, def.pattern, expanded_args[0])) |result| {
-                        return instantiateTemplate(allocator, span, def.template, result.singles, result.groups);
-                    }
                 }
             }
         }
@@ -163,11 +160,7 @@ fn maybeExpandCall(
         }
     }
 
-    return ast.allocNode(allocator, span, .{ .call = .{
-        .callee = expanded_callee,
-        .args = expanded_args,
-        .implicit_self = implicit_self,
-    } });
+    return macro_common.rebuildCall(allocator, span, expanded_callee, expanded_args, implicit_self);
 }
 
 //

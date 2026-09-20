@@ -9,6 +9,7 @@ const Expr = ast.Expr;
 const Node = ast.Node;
 const Span = ast.Span;
 const compiler = @import("compiler/root.zig");
+const macro_common = @import("macro_common.zig");
 
 pub const ExpandError = error{
     InvalidProcReturn,
@@ -248,20 +249,16 @@ fn maybeExpandCall(
     const expanded_args = try ast.walkSliceWith(allocator, args, ProcCtx, .{ .vm = vm, .env = env, .mode = mode });
 
     // qualified module macro: mod_name.macro_name!
-    if (expanded_callee.expr == .field) {
-        const f = expanded_callee.expr.field;
-        if (f.object.expr == .ident and std.mem.endsWith(u8, f.name, "!")) {
-            const qualified = try std.fmt.allocPrint(allocator, "{s}.{s}", .{ f.object.expr.ident, f.name });
-            defer allocator.free(qualified);
-            if (env.map.get(qualified)) |def| {
-                if (mode == .runtimeize) return makeRuntimeProcCall(allocator, span, def, expanded_args);
-                return evalProcMacro(vm, span, def, expanded_args, env) catch |err| {
-                    if (err != error.RecursiveProcMacro) {
-                        reportProcExpandError(env, def.name, span, err);
-                    }
-                    return err;
-                };
-            }
+    if (try macro_common.qualifiedMacroName(allocator, expanded_callee)) |qualified| {
+        defer allocator.free(qualified);
+        if (env.map.get(qualified)) |def| {
+            if (mode == .runtimeize) return makeRuntimeProcCall(allocator, span, def, expanded_args);
+            return evalProcMacro(vm, span, def, expanded_args, env) catch |err| {
+                if (err != error.RecursiveProcMacro) {
+                    reportProcExpandError(env, def.name, span, err);
+                }
+                return err;
+            };
         }
     }
 
@@ -277,11 +274,7 @@ fn maybeExpandCall(
         }
     }
 
-    return ast.allocNode(allocator, span, .{ .call = .{
-        .callee = expanded_callee,
-        .args = expanded_args,
-        .implicit_self = implicit_self,
-    } });
+    return macro_common.rebuildCall(allocator, span, expanded_callee, expanded_args, implicit_self);
 }
 
 const ProcCtx = struct {
@@ -457,7 +450,7 @@ fn encodeExpr(allocator: std.mem.Allocator, node: *const Node, splices: []const 
     if (node.expr == .number) {
         var items = try std.ArrayList(*Node).initCapacity(allocator, if (node.expr.number.is_float) 3 else 2);
         errdefer items.deinit(allocator);
-        try items.append(allocator, try atomNode(allocator, node.span, "number"));
+        try items.append(allocator, try atomNode(allocator, node.span, macro_common.number_tag));
         try items.append(
             allocator,
             try ast.allocNode(
@@ -467,7 +460,7 @@ fn encodeExpr(allocator: std.mem.Allocator, node: *const Node, splices: []const 
             ),
         );
 
-        if (node.expr.number.is_float) try items.append(allocator, try atomNode(allocator, node.span, "float"));
+        if (node.expr.number.is_float) try items.append(allocator, try atomNode(allocator, node.span, macro_common.float_marker));
         return listNode(allocator, node.span, try items.toOwnedSlice(allocator));
     }
 
@@ -566,7 +559,7 @@ fn encodeValue(
                 return ast.allocNode(allocator, span, .nil);
             }
         },
-        .bool => if (value) atomNode(allocator, span, "true") else atomNode(allocator, span, "false"),
+        .bool => if (value) atomNode(allocator, span, macro_common.true_atom) else atomNode(allocator, span, macro_common.false_atom),
         .float => ast.allocNode(allocator, span, .{ .number = .{ .value = @floatCast(value), .is_float = true } }),
         .int, .comptime_int => ast.allocNode(allocator, span, .{ .number = .{ .value = @floatFromInt(value) } }),
         .comptime_float => ast.allocNode(allocator, span, .{ .number = .{ .value = value, .is_float = true } }),
@@ -618,13 +611,13 @@ fn decodeExprNode(vm: *revo.VM, allocator: std.mem.Allocator, span: Span, data: 
     if (items.len == 0 or items[0].asAtom() == null) return error.InvalidProcReturn;
     const tag = vm.stringValue(items[0].asAtom().?);
 
-    if (std.mem.eql(u8, tag, "number")) {
+    if (std.mem.eql(u8, tag, macro_common.number_tag)) {
         if (items.len < 2) return error.InvalidProcReturn;
         const value = items[1].asNumOpt() orelse return error.InvalidProcReturn;
         const is_float = items.len >= 3 and items[2].asAtom() != null and std.mem.eql(
             u8,
             vm.stringValue(items[2].asAtom().?),
-            "float",
+            macro_common.float_marker,
         );
 
         if (items.len != 2 and items.len != 3) return error.InvalidProcReturn;
@@ -692,8 +685,8 @@ fn decodeValue(
             .atom => blk: {
                 const atom = data.asAtom().?;
                 const name = vm.stringValue(atom);
-                if (std.mem.eql(u8, name, "true")) break :blk true;
-                if (std.mem.eql(u8, name, "false")) break :blk false;
+                if (std.mem.eql(u8, name, macro_common.true_atom)) break :blk true;
+                if (std.mem.eql(u8, name, macro_common.false_atom)) break :blk false;
                 return error.InvalidProcReturn;
             },
             else => error.InvalidProcReturn,
