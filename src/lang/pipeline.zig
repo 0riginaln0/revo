@@ -18,6 +18,27 @@ pub fn build(vm: *VM, source: Source, opts: BuildOptions) !BuildResult {
 /// the report is owned by vm.runtime.alloc
 ///     , deinit it when done
 ///
+/// known globals off the vm, caller owns the list
+///   frozen first, then user
+pub fn knownGlobalsFromVm(vm: *VM, alloc: std.mem.Allocator) ![]const []const u8 {
+    var list = try std.ArrayList([]const u8).initCapacity(
+        alloc,
+        vm.frozen_globals.count() + vm.user_globals.count(),
+    );
+
+    var cit = vm.frozen_globals.keyIterator();
+    while (cit.next()) |atom_id| {
+        try list.append(alloc, vm.stringValue(atom_id.*));
+    }
+
+    var git = vm.user_globals.iterator();
+    while (git.next()) |entry| {
+        try list.append(alloc, vm.stringValue(entry.key_ptr.*));
+    }
+
+    return list.toOwnedSlice(alloc);
+}
+
 pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: *?diagnostic.Report) !BuildResult {
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
@@ -49,8 +70,12 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     // closures with pub decls should return their @exports table
     parsed.root = try scope_wiring.wrapPubFunctions(arena.allocator(), parsed.root);
 
+    // import text cache, populated by preload, read by semantic resolver
+    //   empty when preload is skipped, lookups just miss
+    var import_cache = import_scan.ImportCache.init(arena.allocator());
+
     if (!opts.skip_preload and comptime !revo.is_freestanding)
-        import_scan.preloadImports(vm, parsed.root, arena.allocator()) catch |err| switch (err) {
+        import_scan.preloadImports(vm, parsed.root, arena.allocator(), &import_cache) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => revo.term.fatal("preload: {s}", .{@errorName(err)}, vm),
         };
@@ -81,22 +106,12 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         type_annotations.deinit();
     }
 
-    var known_globals = try std.ArrayList([]const u8)
-        .initCapacity(vm.runtime.alloc, vm.frozen_globals.count());
-    defer known_globals.deinit(vm.runtime.alloc);
-    {
-        var cit = vm.frozen_globals.keyIterator();
-        while (cit.next()) |atom_id| {
-            try known_globals.append(vm.runtime.alloc, vm.stringValue(atom_id.*));
-        }
-        var git = vm.user_globals.iterator();
-        while (git.next()) |entry| {
-            try known_globals.append(vm.runtime.alloc, vm.stringValue(entry.key_ptr.*));
-        }
-    }
+    const known_globals = try knownGlobalsFromVm(vm, vm.runtime.alloc);
+    defer vm.runtime.alloc.free(known_globals);
 
     const PipelineResolver = struct {
         vm: *VM,
+        cache: *import_scan.ImportCache,
         fn resolve(ptr: *anyopaque, path: []const u8, a: std.mem.Allocator) ?[]const u8 {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             if (comptime !revo.is_freestanding) {
@@ -112,19 +127,21 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
                     }
                     return null;
                 }
+                if (self.cache.lookup(resolved)) |hit| return a.dupe(u8, hit) catch null;
+
                 return std.Io.Dir.cwd().readFileAlloc(self.vm.runtime.io, resolved, a, std.Io.Limit.unlimited) catch null;
             }
             return null;
         }
     };
-    var pipeline_resolver = PipelineResolver{ .vm = vm };
+    var pipeline_resolver = PipelineResolver{ .vm = vm, .cache = &import_cache };
 
     if (try semantic.analyze(
         vm.runtime.alloc,
         expanded.root,
         source.name orelse "",
         source.text,
-        known_globals.items,
+        known_globals,
         null,
         &type_annotations,
         null,

@@ -264,14 +264,6 @@ pub fn baselibSig(name: []const u8) ?*const revo.baselib.specs.FnSpec {
 /// get known global names from the vm
 pub fn getKnownGlobals(ws: *Workspace, alloc: std.mem.Allocator) ![]const []const u8 {
     const vm = ws.vm orelse return &.{};
-    var list = try std.ArrayList([]const u8).initCapacity(alloc, 64);
-    var cit = vm.frozen_globals.keyIterator();
-    while (cit.next()) |atom_id| {
-        try list.append(alloc, vm.stringValue(atom_id.*));
-    }
-    var git = vm.user_globals.iterator();
-    while (git.next()) |entry| {
-        try list.append(alloc, vm.stringValue(entry.key_ptr.*));
-    }
-    return list.toOwnedSlice(alloc);
+
+    return pipeline.knownGlobalsFromVm(vm, alloc);
 }
