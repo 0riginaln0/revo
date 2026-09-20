@@ -556,6 +556,146 @@ pub fn deinitType(ti: *TypeInfo, alloc: std.mem.Allocator) void {
     ti.* = .{ .tag = .never };
 }
 
+/// interned type handle, index into TypeTable
+///   copies are free, the table owns the canonical trees
+pub const TypeId = u32;
+
+/// annotations bundle: node -> TypeId map plus the table owning the types
+///   map and table travel together; the table outlives every map reader
+pub const Annotations = struct {
+    map: *std.AutoHashMap(*const ast.Node, TypeId),
+    table: *TypeTable,
+};
+
+/// dedup store for canonical TypeInfo trees
+///   intern clones into the table arena; inputs stay caller-owned as before
+///   lookup returns borrowed views, never free them
+///   linear scan: distinct types per build number in the dozens, and exact
+///  compare short-circuits on the tag
+pub const TypeTable = struct {
+    alloc: std.mem.Allocator,
+    types: std.ArrayList(TypeInfo),
+
+    pub fn init(alloc: std.mem.Allocator) TypeTable {
+        return .{ .alloc = alloc, .types = .empty };
+    }
+
+    pub fn deinit(self: *TypeTable) void {
+        for (self.types.items) |*ti| deinitType(ti, self.alloc);
+        self.types.deinit(self.alloc);
+    }
+
+    pub fn intern(self: *TypeTable, info: TypeInfo) !TypeId {
+        for (self.types.items, 0..) |existing, i| {
+            if (eqlExact(existing, info)) return @intCast(i);
+        }
+
+        const owned = try clone(info, self.alloc);
+        errdefer {
+            var tmp = owned;
+            deinitType(&tmp, self.alloc);
+        }
+        try self.types.append(self.alloc, owned);
+
+        return @intCast(self.types.items.len - 1);
+    }
+
+    pub fn get(self: *const TypeTable, id: TypeId) TypeInfo {
+        return self.types.items[id];
+    }
+};
+
+/// exact structural identity for interning, unlike eql below
+///   any matches only any, all sig fields count including names and docs
+///   pointer leaves (table key/value, sig, defaults) compare by identity
+///   when non-empty; empty slices match regardless of backing
+pub fn eqlExact(a: TypeInfo, b: TypeInfo) bool {
+    if (std.meta.activeTag(a.tag) != std.meta.activeTag(b.tag)) return false;
+
+    if (a.doc == null) {
+        if (b.doc != null) return false;
+    } else if (b.doc) |bd| {
+        if (!std.mem.eql(u8, a.doc.?, bd)) return false;
+    } else return false;
+
+    return switch (a.tag) {
+        .bool, .number, .string, .any, .never => true,
+        .atom => |s| std.mem.eql(u8, s, b.tag.atom),
+        .type_var => |s| std.mem.eql(u8, s, b.tag.type_var),
+        .@"union" => |us| blk: {
+            const vs = b.tag.@"union";
+            if (us.len != vs.len) break :blk false;
+
+            for (us, vs) |u, v| {
+                if (!std.mem.eql(u8, u.name, v.name)) break :blk false;
+                if (u.types.len != v.types.len) break :blk false;
+
+                for (u.types, v.types) |ut, vt| {
+                    if (!eqlExact(ut, vt)) break :blk false;
+                }
+            }
+            break :blk true;
+        },
+        .table => |t| blk: {
+            const o = b.tag.table;
+
+            if ((t.key == null) != (o.key == null)) break :blk false;
+            if (t.key) |k| {
+                if (!eqlExact(k.*, o.key.?.*)) break :blk false;
+            }
+
+            if (!eqlExact(t.value.*, o.value.*)) break :blk false;
+            if ((t.fields == null) != (o.fields == null)) break :blk false;
+
+            if (t.fields) |fs| {
+                const os = o.fields.?;
+                if (fs.len != os.len) break :blk false;
+                for (fs, os) |f, of| {
+                    if (!std.mem.eql(u8, f.name, of.name)) break :blk false;
+                    if (f.optional != of.optional) break :blk false;
+                    if (!eqlExact(f.field_type, of.field_type)) break :blk false;
+                }
+            }
+            break :blk true;
+        },
+        .function => |f| blk: {
+            // wow this is ugly..... cant be arsed to make it smart
+            const o = b.tag.function;
+            if (f == o) break :blk true;
+            if (f.params.len != o.params.len) break :blk false;
+            for (f.params, o.params) |p, q| {
+                if (!eqlExact(p, q)) break :blk false;
+            }
+
+            if (!eqlExact(f.return_type, o.return_type)) break :blk false;
+            if (f.param_names.len != o.param_names.len) break :blk false;
+            for (f.param_names, o.param_names) |n, m| {
+                if (!std.mem.eql(u8, n, m)) break :blk false;
+            }
+
+            if (f.required_count != o.required_count) break :blk false;
+            if (f.is_any_fn_sig != o.is_any_fn_sig) break :blk false;
+            if (f.type_params.len != o.type_params.len) break :blk false;
+            for (f.type_params, o.type_params) |tp, tq| {
+                if (!std.mem.eql(u8, tp, tq)) break :blk false;
+            }
+
+            if (f.default_values.len != o.default_values.len) break :blk false;
+            for (f.default_values, o.default_values) |d, e| {
+                if ((d == null) != (e == null)) break :blk false;
+                if (d != null and d.? != e.?) break :blk false;
+            }
+
+            if (f.doc == null) {
+                if (o.doc != null) break :blk false;
+            } else if (o.doc) |od| {
+                if (!std.mem.eql(u8, f.doc.?, od)) break :blk false;
+            } else break :blk false;
+            break :blk true;
+        },
+    };
+}
+
 pub fn canCoerce(from: TypeInfo, to: TypeInfo) bool {
     if (from.tag == .never) return true;
     if (to.tag == .never) return false;
@@ -1849,6 +1989,32 @@ test "types: TypeInfo equality" {
 
     try std.testing.expect(int_type.eql(.{ .tag = .number }));
     try std.testing.expect(any_type.eql(.{ .tag = .any }));
+}
+
+test "types: table interning dedups exact shapes only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var table = TypeTable.init(arena.allocator());
+    defer table.deinit();
+
+    const n1 = try table.intern(.{ .tag = .number });
+    const n2 = try table.intern(.{ .tag = .number });
+    try std.testing.expectEqual(n1, n2);
+
+    const s = try table.intern(.{ .tag = .string });
+    try std.testing.expect(n1 != s);
+
+    // subtyping eql is not interning identity: any stays its own id
+    const a = try table.intern(.{ .tag = .any });
+    try std.testing.expect(a != n1);
+    try std.testing.expect(eqlExact(table.get(a), .{ .tag = .any }));
+
+    // same spelling twice shares one entry, table owns the copy
+    const name = try arena.allocator().dupe(u8, "ok");
+    const at1 = try table.intern(.{ .tag = .{ .atom = name } });
+    const at2 = try table.intern(.{ .tag = .{ .atom = "ok" } });
+    try std.testing.expectEqual(at1, at2);
+    try std.testing.expectEqualStrings("ok", table.get(at1).tag.atom);
 }
 
 test "types: numeric type check" {

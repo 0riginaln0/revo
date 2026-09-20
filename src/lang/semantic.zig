@@ -26,6 +26,7 @@ pub const ModuleResolver = struct {
 
 /// run semantic analysis; known_globals are names that exist at runtime (builtins)
 /// type_map, if set, is populated with name -> type_name during analysis
+/// annotations, if set, intern every baselib-call return into the table
 /// module_resolver resolves import paths to source text
 pub fn analyze(
     alloc: std.mem.Allocator,
@@ -34,7 +35,7 @@ pub fn analyze(
     source: []const u8,
     known_globals: []const []const u8,
     type_map: ?*std.StringHashMap(types_mod.TypeInfo),
-    type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
+    annotations: ?types_mod.Annotations,
     docs: ?*std.StringHashMap([]const u8),
     module_resolver: ModuleResolver,
     warnings: *?diagnostic.Report,
@@ -43,7 +44,7 @@ pub fn analyze(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, type_annotations, docs, module_resolver);
+    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, annotations, docs, module_resolver);
     defer checker.deinit();
 
     try checker.collectPredeclared(root);
@@ -51,7 +52,6 @@ pub fn analyze(
     if (type_map) |tm| {
         try reparentMap([]const u8, std.StringHashMap(types_mod.TypeInfo), tm, alloc);
     }
-    if (type_annotations) |ta| try reparentMap(*const ast.Node, std.AutoHashMap(*const ast.Node, types_mod.TypeInfo), ta, alloc);
     if (docs) |dm| try reparentDocs(dm, alloc);
     if (checker.errors.items.len == 0) {
         // warnings never fail the build; errors dominate so these drop with them
@@ -193,7 +193,7 @@ const SemanticChecker = struct {
     baselib_sig_ptrs: std.ArrayList(*const types_mod.FunctionSignature),
     return_types: std.ArrayList(types_mod.TypeInfo),
     type_map: ?*std.StringHashMap(types_mod.TypeInfo),
-    type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
+    annotations: ?types_mod.Annotations,
     typed_names: std.StringHashMap(void),
     table_field_map: std.StringHashMap(std.StringHashMap(types_mod.TypeInfo)),
     /// idents assigned inside fn bodies
@@ -221,7 +221,7 @@ const SemanticChecker = struct {
         source: []const u8,
         known_globals: []const []const u8,
         type_map: ?*std.StringHashMap(types_mod.TypeInfo),
-        type_annotations: ?*std.AutoHashMap(*const ast.Node, types_mod.TypeInfo),
+        annotations: ?types_mod.Annotations,
         docs: ?*std.StringHashMap([]const u8),
         resolver: ModuleResolver,
     ) !SemanticChecker {
@@ -238,7 +238,7 @@ const SemanticChecker = struct {
             .baselib_sig_ptrs = try .initCapacity(alloc, 4),
             .return_types = try .initCapacity(alloc, 4),
             .type_map = type_map,
-            .type_annotations = type_annotations,
+            .annotations = annotations,
             .typed_names = .init(alloc),
             .table_field_map = .init(alloc),
             .escaped = .init(alloc),
@@ -701,7 +701,7 @@ const SemanticChecker = struct {
                 // annotate them so compiler can
                 // use return type. source fns stay compiler-inferred so
                 // flow narrowing and generic substitution keep their edge
-                if (self.type_annotations) |map| {
+                if (self.annotations) |ann| {
                     const resolved = if (call.callee.expr == .ident)
                         self.lookup(call.callee.expr.ident) orelse null
                     else
@@ -710,7 +710,9 @@ const SemanticChecker = struct {
                         if (r.tag == .function and
                             std.mem.findScalar(*const types_mod.FunctionSignature, self.baselib_sig_ptrs.items, r.tag.function) != null)
                         {
-                            map.put(node, t) catch {};
+                            if (ann.table.intern(t)) |id| {
+                                ann.map.put(node, id) catch {};
+                            } else |_| {}
                         }
                     }
                 }

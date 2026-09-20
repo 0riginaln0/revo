@@ -350,12 +350,10 @@ pub fn ensureInspect(
         type_map.deinit();
     }
 
-    var type_annotations = std.AutoHashMap(*const ast.Node, types.TypeInfo).init(scratch);
-    defer {
-        var it = type_annotations.iterator();
-        while (it.next()) |entry| types.deinitType(@constCast(entry.value_ptr), scratch);
-        type_annotations.deinit();
-    }
+    var type_annotations = std.AutoHashMap(*const ast.Node, types.TypeId).init(scratch);
+    defer type_annotations.deinit();
+    var type_table = types.TypeTable.init(arena.allocator());
+    defer type_table.deinit();
 
     const WorkspaceResolver = struct {
         ws: *Workspace,
@@ -398,7 +396,7 @@ pub fn ensureInspect(
         snap.text,
         known_globals,
         &type_map,
-        &type_annotations,
+        .{ .map = &type_annotations, .table = &type_table },
         &docs,
         .{ .ptr = &ws_resolver, .resolveFn = WorkspaceResolver.resolve },
         &dropped_warn,

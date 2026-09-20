@@ -366,6 +366,7 @@ fn runCompileTimeProc(parent_vm: *revo.VM, root: *Node, proc_name: []const u8, e
         root,
         false,
         null,
+        null,
     ) catch return error.ProcCompileFailed;
     const bytecode = switch (bytecode_report) {
         .ok => |ok| ok,

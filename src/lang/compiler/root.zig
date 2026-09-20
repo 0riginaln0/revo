@@ -64,7 +64,8 @@ pub fn compileExprReport(
     vm: *VM,
     expr: *const Node,
     test_mode: bool,
-    type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeInfo),
+    type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeId),
+    type_table: ?*const types.TypeTable,
 ) !BytecodeResult {
     var arena = std.heap.ArenaAllocator.init(vm.runtime.alloc);
     defer arena.deinit();
@@ -76,6 +77,7 @@ pub fn compileExprReport(
         vm.runtime.alloc,
     );
     compiler.type_annotations = type_annotations;
+    compiler.type_table = type_table;
     defer compiler.deinit();
 
     compiler.compileRoot(expr) catch |err| switch (err) {
@@ -122,7 +124,9 @@ pub const Compiler = struct {
     // register cache for upvalue loads, cleared per-block in compileBlock
     upvalue_cache: std.AutoHashMap(usize, usize),
     type_aliases: std.StringHashMap(types.TypeInfo),
-    type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeInfo) = null,
+    type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeId) = null,
+    /// table owning the annotated types, set together with type_annotations
+    type_table: ?*const types.TypeTable = null,
     pending_templates: std.ArrayList(revo.TemplateID),
     declared_globals: std.StringHashMap(void),
     current_template: revo.TemplateID = 0,
@@ -184,7 +188,9 @@ pub const Compiler = struct {
 
     pub fn inferExprType(self: *Compiler, node: *const Node) types.TypeInfo {
         if (self.type_annotations) |map| {
-            if (map.get(node)) |t| return t;
+            if (map.get(node)) |id| {
+                if (self.type_table) |table| return table.get(id);
+            }
         }
         return types.inferExprType(self.check(), node);
     }

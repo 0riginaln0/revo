@@ -98,13 +98,9 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         },
     };
 
-    var type_annotations = std.AutoHashMap(*const Node, compiler.types.TypeInfo).init(vm.runtime.alloc);
-    defer {
-        var it = type_annotations.iterator();
-        while (it.next()) |entry|
-            compiler.types.deinitType(@constCast(entry.value_ptr), vm.runtime.alloc);
-        type_annotations.deinit();
-    }
+    var type_annotations = std.AutoHashMap(*const Node, compiler.types.TypeId).init(vm.runtime.alloc);
+    defer type_annotations.deinit();
+    var type_table = compiler.types.TypeTable.init(arena.allocator());
 
     const known_globals = try knownGlobalsFromVm(vm, vm.runtime.alloc);
     defer vm.runtime.alloc.free(known_globals);
@@ -143,7 +139,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         source.text,
         known_globals,
         null,
-        &type_annotations,
+        .{ .map = &type_annotations, .table = &type_table },
         null,
         .{ .ptr = &pipeline_resolver, .resolveFn = PipelineResolver.resolve },
         warnings,
@@ -161,7 +157,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         .install_debug_info = opts.install_debug_info,
         .source = source,
         .test_mode = opts.test_mode,
-    }, &type_annotations);
+    }, &type_annotations, &type_table);
     return switch (compile_result) {
         .ok => |bytecode| .{ .ok = bytecode },
         .err => |failure| .{ .err = .{ .compile = failure } },
@@ -412,13 +408,15 @@ pub fn compile(
     vm: *VM,
     expanded: Expanded,
     opts: CompileOptions,
-    type_annotations: ?*const std.AutoHashMap(*const Node, compiler.types.TypeInfo),
+    type_annotations: ?*const std.AutoHashMap(*const Node, compiler.types.TypeId),
+    type_table: ?*const compiler.types.TypeTable,
 ) !CompileResult {
     const compiled = try compiler.compileExprReport(
         vm,
         expanded.root,
         opts.test_mode,
         type_annotations,
+        type_table,
     );
     return switch (compiled) {
         .ok => |bytecode| blk: {
