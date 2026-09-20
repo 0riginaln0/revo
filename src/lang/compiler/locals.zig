@@ -377,38 +377,20 @@ pub fn allocFnSig(
     return_type: ?*ast.TypeExpr,
     type_params: []const []const u8,
 ) !*types.FunctionSignature {
-    var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, params.len);
-    errdefer param_names.deinit(self.alloc);
-    for (params) |p| try param_names.append(self.alloc, p.name);
+    return try types.buildFnSig(
+        self.alloc,
+        self,
+        evalCtxThunk,
+        params,
+        return_type,
+        type_params,
+        null,
+        .{ .degrade_param = true, .want_defaults = true },
+    );
+}
 
-    var param_types = try std.ArrayList(types.TypeInfo).initCapacity(self.alloc, params.len);
-    errdefer param_types.deinit(self.alloc);
-    for (params) |p| try param_types.append(self.alloc, if (p.type_name) |tn|
-        types.evalTypeExpr(self.check(), tn) catch types.TypeInfo{ .tag = .any }
-    else
-        types.implicitParamType(p));
-
-    var required_count: usize = params.len;
-    for (params) |p| {
-        if (p.optional or p.default_value != null) required_count -= 1;
-    }
-
-    var default_values = try std.ArrayList(?*ast.Node).initCapacity(self.alloc, params.len);
-    errdefer default_values.deinit(self.alloc);
-    for (params) |p| try default_values.append(self.alloc, p.default_value);
-
-    const combined = try types.combinedTypeParams(self.alloc, type_params, params);
-    return try types.newSignature(self.alloc, .{
-        .param_names = try param_names.toOwnedSlice(self.alloc),
-        .params = try param_types.toOwnedSlice(self.alloc),
-        .return_type = if (return_type) |rt|
-            types.evalTypeExpr(self.check(), rt) catch types.TypeInfo{ .tag = .any }
-        else
-            types.TypeInfo{ .tag = .any },
-        .required_count = required_count,
-        .type_params = combined,
-        .default_values = try default_values.toOwnedSlice(self.alloc),
-    });
+fn evalCtxThunk(self: *Compiler, te: *const ast.TypeExpr) !types.TypeInfo {
+    return try types.evalTypeExpr(self.check(), te);
 }
 
 pub fn declareFnSignature(

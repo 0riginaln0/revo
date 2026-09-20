@@ -212,6 +212,78 @@ pub fn implicitParamType(p: ast.FnParam) TypeInfo {
     return .{ .tag = .{ .type_var = p.name } };
 }
 
+/// params needing values at call time, one formula for all four sig loops
+///   replaces `+= 1` and `len -= 1` spellings, same count either way
+pub fn requiredCount(params: []const ast.FnParam) usize {
+    var n: usize = 0;
+    for (params) |p| {
+        if (!p.optional and p.default_value == null) n += 1;
+    }
+
+    return n;
+}
+
+/// buildFnSig flags, both off for semantic strict mode
+pub const SigOpt = struct {
+    degrade_param: bool = false,
+    want_defaults: bool = false,
+};
+
+/// one fn-sig builder for all four inference sites
+///   eval resolves each annotation, comptime generic so error sets stay narrow
+///   degrade turns per-param failures to any, strict propagates
+///   want_defaults fills default_values like locals does
+///   scoping save/restore stays at call sites, only loop + sig live here
+pub fn buildFnSig(
+    alloc: std.mem.Allocator,
+    ctx: anytype,
+    eval: anytype,
+    params: []const ast.FnParam,
+    return_type: ?*ast.TypeExpr,
+    type_params: []const []const u8,
+    doc: ?[]const u8,
+    opt: SigOpt,
+) !*FunctionSignature {
+    var param_names = try std.ArrayList([]const u8).initCapacity(alloc, params.len);
+    errdefer param_names.deinit(alloc);
+
+    var param_types = try std.ArrayList(TypeInfo).initCapacity(alloc, params.len);
+    errdefer param_types.deinit(alloc);
+
+    for (params) |p| {
+        try param_names.append(alloc, p.name);
+
+        const t = if (p.type_name) |tn| eval(ctx, tn) catch |e| blk: {
+            if (opt.degrade_param) break :blk TypeInfo{ .tag = .any };
+
+            return e;
+        } else implicitParamType(p);
+        try param_types.append(alloc, t);
+    }
+
+    const default_values = if (opt.want_defaults) blk: {
+        var defaults = try std.ArrayList(?*ast.Node).initCapacity(alloc, params.len);
+        errdefer defaults.deinit(alloc);
+        for (params) |p| try defaults.append(alloc, p.default_value);
+
+        break :blk try defaults.toOwnedSlice(alloc);
+    } else &.{};
+
+    return newSignature(alloc, .{
+        .param_names = try param_names.toOwnedSlice(alloc),
+        .params = try param_types.toOwnedSlice(alloc),
+        .return_type = if (return_type) |rt| eval(ctx, rt) catch |e| blk: {
+            if (opt.degrade_param) break :blk TypeInfo{ .tag = .any };
+
+            return e;
+        } else TypeInfo{ .tag = .any },
+        .required_count = requiredCount(params),
+        .type_params = try combinedTypeParams(alloc, type_params, params),
+        .default_values = default_values,
+        .doc = doc,
+    });
+}
+
 /// the single inference interface every scope implements
 ///
 /// BareCtx degrades unknown names to any; ModuleCtx resolves dep-local

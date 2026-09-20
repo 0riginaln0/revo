@@ -632,36 +632,23 @@ const SemanticChecker = struct {
         return sig;
     }
 
+    fn evalCheckedThunk(self: *SemanticChecker, te: *const ast.TypeExpr) !types_mod.TypeInfo {
+        return try self.evalCheckedTypeExpr(te);
+    }
+
     fn makeFnSig(self: *SemanticChecker, fn_expr: anytype) !*FnSig {
-        var param_names = try std.ArrayList([]const u8).initCapacity(self.alloc, fn_expr.params.len);
-        var param_types = try std.ArrayList(types_mod.TypeInfo).initCapacity(self.alloc, fn_expr.params.len);
-        var required_count: usize = 0;
-
-        for (fn_expr.params) |p| {
-            try param_names.append(self.alloc, p.name);
-            const t = if (p.type_name) |tn|
-                try self.evalCheckedTypeExpr(tn)
-            else
-                types_mod.implicitParamType(p);
-
-            try param_types.append(self.alloc, t);
-            if (!p.optional and p.default_value == null) required_count += 1;
-        }
-
-        const params_slice = try param_types.toOwnedSlice(self.alloc);
-        const names_slice = try param_names.toOwnedSlice(self.alloc);
-        const ret = if (fn_expr.return_type) |rt| try self.evalCheckedTypeExpr(rt) else types_mod.TypeInfo{ .tag = .any };
         const doc: ?[]const u8 = if (@hasField(@TypeOf(fn_expr), "doc")) fn_expr.doc else null;
-        const combined = try types_mod.combinedTypeParams(self.alloc, fn_expr.type_params, fn_expr.params);
 
-        return try types_mod.newSignature(self.alloc, .{
-            .param_names = names_slice,
-            .params = params_slice,
-            .return_type = ret,
-            .required_count = required_count,
-            .type_params = combined,
-            .doc = doc,
-        });
+        return try types_mod.buildFnSig(
+            self.alloc,
+            self,
+            evalCheckedThunk,
+            fn_expr.params,
+            fn_expr.return_type,
+            fn_expr.type_params,
+            doc,
+            .{},
+        );
     }
 
     fn analyzeFnBody(self: *SemanticChecker, fn_expr: anytype, sig: *FnSig) !types_mod.TypeInfo {

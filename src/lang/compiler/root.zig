@@ -256,32 +256,22 @@ pub const Compiler = struct {
         type_params: []const []const u8,
         doc: ?[]const u8,
     ) types.TypeInfo {
-        var param_types = std.ArrayList(types.TypeInfo).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
-        defer param_types.deinit(self.alloc);
-
-        var param_names = std.ArrayList([]const u8).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
-        defer param_names.deinit(self.alloc);
-        var required_count: usize = 0;
-
-        for (params) |p| {
-            const pt = if (p.type_name) |tn| types.evalTypeExpr(self.check(), tn) catch types.TypeInfo{ .tag = .any } else types.implicitParamType(p);
-            param_types.append(self.alloc, pt) catch return .{ .tag = .any };
-            param_names.append(self.alloc, p.name) catch return .{ .tag = .any };
-            if (!p.optional and p.default_value == null) required_count += 1;
-        }
-
-        const combined = types.combinedTypeParams(self.alloc, type_params, params) catch type_params;
-
-        const sig = types.newSignature(self.alloc, .{
-            .param_names = param_names.toOwnedSlice(self.alloc) catch return .{ .tag = .any },
-            .params = param_types.toOwnedSlice(self.alloc) catch return .{ .tag = .any },
-            .return_type = if (return_type) |rt| types.evalTypeExpr(self.check(), rt) catch types.TypeInfo{ .tag = .any } else .{ .tag = .any },
-            .required_count = required_count,
-            .type_params = combined,
-            .doc = doc,
-        }) catch return .{ .tag = .any };
+        const sig = types.buildFnSig(
+            self.alloc,
+            self,
+            evalCtxThunk,
+            params,
+            return_type,
+            type_params,
+            doc,
+            .{ .degrade_param = true },
+        ) catch return .{ .tag = .any };
 
         return .{ .tag = .{ .function = sig } };
+    }
+
+    fn evalCtxThunk(self: *Compiler, te: *const ast.TypeExpr) !types.TypeInfo {
+        return try types.evalTypeExpr(self.check(), te);
     }
 
     pub fn resolveTypeAlias(self: *Compiler, name: []const u8) ?types.TypeInfo {

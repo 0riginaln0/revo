@@ -136,37 +136,22 @@ const ModuleCtx = struct {
         self.type_params = combined;
         defer self.type_params = saved;
 
-        var param_types = std.ArrayList(TypeInfo).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
-        defer param_types.deinit(self.alloc);
-        var param_names = std.ArrayList([]const u8).initCapacity(self.alloc, params.len) catch return .{ .tag = .any };
-        defer param_names.deinit(self.alloc);
-        var required: usize = 0;
+        const sig = types.buildFnSig(
+            self.alloc,
+            self,
+            evalCtxThunk,
+            params,
+            return_type,
+            combined,
+            doc,
+            .{ .degrade_param = true },
+        ) catch return .{ .tag = .any };
 
-        for (params) |p| {
-            param_names.append(self.alloc, p.name) catch return .{ .tag = .any };
-            param_types.append(self.alloc, if (p.type_name) |tn| types.evalTypeExpr(self.check(), tn) catch .{ .tag = .any } else types.implicitParamType(p)) catch return .{ .tag = .any };
-            if (!p.optional and p.default_value == null) required += 1;
-        }
-
-        const owned_params = param_types.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
-        errdefer self.alloc.free(owned_params);
-        const owned_names = param_names.toOwnedSlice(self.alloc) catch return .{ .tag = .any };
-        errdefer self.alloc.free(owned_names);
-
-        const ret: TypeInfo = if (return_type) |rt|
-            types.evalTypeExpr(self.check(), rt) catch .{ .tag = .any }
-        else
-            .{ .tag = .any };
-
-        const sig = types.newSignature(self.alloc, .{
-            .param_names = owned_names,
-            .params = owned_params,
-            .return_type = ret,
-            .required_count = required,
-            .type_params = combined,
-            .doc = doc,
-        }) catch return .{ .tag = .any };
         return .{ .tag = .{ .function = sig } };
+    }
+
+    fn evalCtxThunk(self: *ModuleCtx, te: *const ast.TypeExpr) !TypeInfo {
+        return try types.evalTypeExpr(self.check(), te);
     }
 };
 
