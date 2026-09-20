@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 #[cfg(feature = "macros")]
 pub use revo_macros::*;
+pub use revo_sys;
 use revo_sys::*;
 
 fn last_error_ptr(ptr: *mut ErevoVM) -> String {
@@ -126,6 +127,9 @@ pub struct VM {
     _not_thread_safe: PhantomData<Rc<()>>,
 }
 
+pub trait VirtualMachine {}
+impl VirtualMachine for VM {}
+
 const _: () = assert!(std::mem::size_of::<VM>() == std::mem::size_of::<*mut ErevoVM>());
 
 impl Default for VM {
@@ -233,7 +237,7 @@ impl VM {
 // i find it fucked up how i have to do all of this to make them distinct
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Atom(String);
+pub struct Atom(pub String);
 
 impl From<String> for Atom {
     fn from(value: String) -> Self {
@@ -389,6 +393,14 @@ impl<'vm> Table<'vm> {
         })
     }
 
+    /// iterate over the array part of the table
+    pub fn iter(&'vm self) -> TableIterator<'vm> {
+        TableIterator {
+            table: self,
+            index: 0,
+        }
+    }
+
     fn c_ptr(&self) -> *mut std::ffi::c_void {
         c_void_ptr(self.vm_ptr)
     }
@@ -499,6 +511,21 @@ impl<'vm> Table<'vm> {
     }
 }
 
+pub struct TableIterator<'a> {
+    table: &'a Table<'a>,
+    index: usize,
+}
+
+impl<'a> Iterator for TableIterator<'a> {
+    type Item = Value;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.table.get_idx(self.index as u64).ok().flatten();
+        self.index += 1;
+        result
+    }
+}
+
 /// copies eagerly, strings randomly die of gc under vm's rule
 fn get_revo_str(vm_ptr: *mut ErevoVM, val: RevoValue) -> Result<String, &'static str> {
     let id = val & REVO_PAYLOAD_MASK;
@@ -519,6 +546,7 @@ pub enum Error {
     ExpectedTable,
     ExpectedValueType,
     ExpectedBool,
+    Other(String),
 }
 
 //
@@ -528,31 +556,45 @@ pub enum Error {
 pub trait ToValue {
     fn to_value(self) -> Value;
 }
+
+pub trait TryToValue {
+    fn try_to_value(self) -> Result<Value, Error>;
+}
+
+impl<T> ToValue for T
+where
+    T: TryToValue,
+{
+    fn to_value(self) -> Value {
+        self.try_to_value().unwrap()
+    }
+}
+
 pub trait TryFromValue {
     type Output;
-    fn try_from_value(data: Value, vm: &VM) -> Result<Self::Output, Error>;
-    fn from_value(data: Value, vm: &VM) -> Option<Self::Output> {
-        Self::try_from_value(data, vm).ok()
+    fn try_from_value(vm: &VM, data: &Value) -> Result<Self::Output, Error>;
+    fn from_value(vm: &VM, data: &Value) -> Option<Self::Output> {
+        Self::try_from_value(vm, data).ok()
     }
-    fn from_value_unchecked(data: Value, vm: &VM) -> Self::Output {
-        Self::try_from_value(data, vm).unwrap()
+    fn from_value_unchecked(vm: &VM, data: &Value) -> Self::Output {
+        Self::try_from_value(vm, data).unwrap()
     }
 }
 
 macro_rules! impl_num_data {
     ($($ty:ident),*) => {
         $(
-            impl ToValue for $ty {
-                fn to_value(self) -> Value {
-                    Value::Num(self as f64)
+            impl TryToValue for $ty {
+                fn try_to_value(self) -> Result<Value, Error> {
+                    Ok(Value::Num(self as f64))
                 }
             }
 
             impl TryFromValue for $ty {
                 type Output = Self;
-                fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
+                fn try_from_value( _vm: &VM, data: &Value) -> Result<Self::Output, Error> {
                     match data {
-                        Value::Num(n) => Ok(n as Self::Output),
+                        Value::Num(n) => Ok(*n as Self::Output),
                         _ => Err(Error::ExpectedValueType),
                     }
                 }
@@ -565,17 +607,22 @@ impl_num_data!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
 );
 
-impl ToValue for bool {
-    fn to_value(self) -> Value {
-        match self {
+impl TryToValue for () {
+    fn try_to_value(self) -> Result<Value, Error> {
+        Ok(::revo_sys::NIL.to_value())
+    }
+}
+impl TryToValue for bool {
+    fn try_to_value(self) -> Result<Value, Error> {
+        Ok(match self {
             true => ::revo_sys::TRUE.to_value(),
             false => ::revo_sys::FALSE.to_value(),
-        }
+        })
     }
 }
 impl TryFromValue for bool {
     type Output = Self;
-    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(_vm: &VM, data: &Value) -> Result<Self::Output, Error> {
         match data {
             Value::Atom(a) => match a.as_str() {
                 "true" => Ok(true),
@@ -587,45 +634,45 @@ impl TryFromValue for bool {
     }
 }
 
-impl ToValue for String {
-    fn to_value(self) -> Value {
-        Value::String(self)
+impl TryToValue for String {
+    fn try_to_value(self) -> Result<Value, Error> {
+        Ok(Value::String(self))
     }
 }
 impl TryFromValue for String {
     type Output = Self;
-    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(_vm: &VM, data: &Value) -> Result<Self::Output, Error> {
         match data {
-            Value::String(s) => Ok(s),
+            Value::String(s) => Ok(s.clone()),
             _ => Err(Error::ExpectedValueType),
         }
     }
 }
 
-impl ToValue for Atom {
-    fn to_value(self) -> Value {
-        Value::Atom(self)
+impl TryToValue for Atom {
+    fn try_to_value(self) -> Result<Value, Error> {
+        Ok(Value::Atom(self))
     }
 }
 impl TryFromValue for Atom {
     type Output = Self;
-    fn try_from_value(data: Value, _vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(_vm: &VM, data: &Value) -> Result<Self::Output, Error> {
         match data {
-            Value::Atom(a) => Ok(a),
+            Value::Atom(a) => Ok(a.clone()),
             _ => Err(Error::ExpectedValueType),
         }
     }
 }
 
-impl<'a> ToValue for Table<'a> {
-    fn to_value(self) -> Value {
-        Value::Table(TableId(self.raw & REVO_PAYLOAD_MASK))
+impl<'a> TryToValue for Table<'a> {
+    fn try_to_value(self) -> Result<Value, Error> {
+        Ok(Value::Table(TableId(self.raw & REVO_PAYLOAD_MASK)))
     }
 }
 impl<'a> TryFromValue for Table<'a> {
     type Output = Self;
     // wrap a `Value::Table` from eval back into a handle
-    fn try_from_value(data: Value, vm: &VM) -> Result<Self::Output, Error> {
+    fn try_from_value(vm: &VM, data: &Value) -> Result<Self::Output, Error> {
         match data {
             Value::Table(id) => Ok(Self {
                 raw: boxed(RevoType_revo_table, id.0),
@@ -634,5 +681,14 @@ impl<'a> TryFromValue for Table<'a> {
             }),
             _other => Err(Error::ExpectedTable),
         }
+    }
+}
+
+impl<T> TryToValue for Result<T, Error>
+where
+    T: ToValue,
+{
+    fn try_to_value(self) -> Result<Value, Error> {
+        self.map(ToValue::to_value)
     }
 }

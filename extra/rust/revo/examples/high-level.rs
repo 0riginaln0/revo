@@ -1,5 +1,5 @@
 fn main() {
-    use revo::{Value, Program, Table, VM};
+    use revo::{Program, Table, ToValue, TryFromValue, VM, Value};
 
     let mut vm = VM::new();
 
@@ -29,8 +29,8 @@ fn main() {
     let mut t = Table::new(&vm);
     t.set_name("answer", &Value::Num(42.0)).unwrap();
 
-    let data = t.to_value(); // `t`'s borrow ends here, so `vm` is usable again
-    vm.set_global("t", &data).unwrap();
+    let value = t.to_value(); // `t`'s borrow ends here, so `vm` is usable again
+    vm.set_global("t", &value).unwrap();
 
     let back = Table::from_value(&vm, &vm.get_global("t").unwrap()).unwrap();
     println!("table: {}", back.get_name("answer").unwrap().unwrap());
