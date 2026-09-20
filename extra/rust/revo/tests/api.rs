@@ -1,7 +1,7 @@
 //! the runtime is single-threaded only (see `VM`)
 //! it's a zig-side thing, the vm can only run on one thread now
 //! while the harness runs `#[test]` fns on parallel threads
-use revo_sys::{Value, Program, Table, VM};
+use revo::{Atom, Program, Table, ToValue, TryFromValue, VM, Value};
 
 fn eval_num() {
     let mut vm = VM::new();
@@ -20,15 +20,15 @@ fn globals_round_trip() {
     assert_eq!(vm.get_global("n").unwrap(), Value::Num(3.5));
     vm.set_global("s", &Value::String("hello".into())).unwrap();
     assert_eq!(vm.get_global("s").unwrap(), Value::String("hello".into()));
-    vm.set_global("a", &Value::Atom("ok".into())).unwrap();
-    assert_eq!(vm.get_global("a").unwrap(), Value::Atom("ok".into()));
+    vm.set_global("a", &Value::Atom(Atom("ok".into()))).unwrap();
+    assert_eq!(vm.get_global("a").unwrap(), Value::Atom(Atom("ok".into())));
 }
 
 fn missing_global_is_nil() {
     let vm = VM::new();
     assert_eq!(
         vm.get_global("definitely-not-set").unwrap(),
-        Value::Atom("nil".into())
+        Value::Atom(Atom("nil".into()))
     );
 }
 
@@ -56,12 +56,12 @@ fn table_crud() {
     let vm = VM::new();
     let mut t = Table::new(&vm);
     assert!(t.is_empty());
-    let key = Value::Atom("x".into());
+    let key = Value::Atom(Atom("x".into()));
     t.set(&key, &Value::Num(99.0)).unwrap();
 
     assert!(!t.is_empty());
     assert_eq!(t.get(&key).unwrap(), Some(Value::Num(99.0)));
-    assert_eq!(t.get(&Value::Atom("y".into())).unwrap(), None);
+    assert_eq!(t.get(&Value::Atom(Atom("y".into()))).unwrap(), None);
     assert!(t.remove(&key).unwrap());
     assert!(!t.remove(&key).unwrap());
     assert_eq!(t.get(&key).unwrap(), None);
@@ -105,8 +105,8 @@ fn table_eval_bridge() {
 
 fn table_from_value_rejects_non_table() {
     let vm = VM::new();
-    let err = Table::from_value(&vm, &Value::Num(1.0)).unwrap_err();
-    assert!(err.contains("not a table"), "unexpected error: {err}");
+    let err = Table::try_from_value(&vm, &Value::Num(1.0)).unwrap_err();
+    std::assert_matches!(err, revo::Error::ExpectedTable);
 }
 
 #[test]

@@ -18,10 +18,16 @@ use std::ffi::*;
 
 use revo_sys::{RevoBinding, RevoValue};
 
-extern "C" fn hi(_vm: *mut c_void, _argc: usize, _argv: *mut RevoValue, out: *mut RevoValue) {
+extern "C" fn hi(
+    _vm: *mut c_void,
+    _argc: usize,
+    _argv: *mut RevoValue,
+    out: *mut RevoValue,
+) -> i32 {
     unsafe {
         *out = revo_sys::NIL;
     }
+    revo_sys::REVO_OK as i32
 }
 
 #[unsafe(no_mangle)]
