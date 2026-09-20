@@ -8,26 +8,27 @@ the revo frontend: text in, bytecode out. the vm lives in
 one file per stage, data flows down, never back up:
 
 ```ruby
-source -> Lexer -> Parser -> expander -> semantic -> compiler -> bytecode
+source -> Lexer -> Parser -> expand -> semantic -> compiler -> bytecode
 ```
 
 `pipeline.zig` drives it (`build` is the whole thing)
 
-`pipeline/` holds its companions: `module_scope` (`@exports` wiring)
-and `import_preload` (compile-time import extraction)
+`pipeline/` holds its companions: `scope_wiring` (`@exports` wiring)
+and `import_scan` (compile-time import extraction)
 
 ## files
 
 - `ast.zig`: ast defs, tree walking, and printing
 - `Lexer.zig`: tokenizer
 - `Parser.zig`: `parseSource`, `parseSourceReport`, token to tree
-- `expander.zig`: template macros; `proc.zig` is `proc!` macros
+- `macro_pattern.zig`: template macros; `macro_proc.zig` is `proc!` macros;
+  `macro_common.zig` holds their shared dispatch bits
 - `semantic.zig`: name and type checking, owns `Failure`
 - `compiler/`: compiling to bytecode; `types.zig` is where all the types are at
   plus `evalTypeExpr` and the `CheckCtx` interface every scope implements
-- `ir/`: `IrInst` plus the optimization passes
-- `type_serde.zig`: text-only type serialization/deserialiization
-- `module_iface.zig`: public type surface of a module
+- `ir/`: `IrInst` plus the optimization passes, `opt.zig` runs em all
+- `type_syntax.zig`: text-only type serialization/deserialiization
+- `import_types.zig`: public type surface of a module
 - `diagnostic.zig`: reports: parts, spans, severities, render
 - `pipeline/`: build orchestration stuff
 - `Workspace.zig` + `workspace/`: incremental IDE state (hover, completions, symbols, diagnostics);
@@ -35,8 +36,9 @@ and `import_preload` (compile-time import extraction)
 - `Project.zig`:
   `lib.json` / `exe.json` detection
   (only for now, later itll actually manage build & lsp features and such)
-- `docs.zig`: doc extraction and rendering
-- `testing.zig`: test helpers; `tests.zig`: the language suite
+- `docgen.zig`: doc extraction and rendering
+- `test_helpers.zig`: test helpers; `lang_tests.zig`: the language suite;
+  `ir/tests.zig`: the optimizer suite
 - `root.zig`: facade for outsiders, re-exports only
 
 ## import rules
@@ -58,12 +60,12 @@ each have a one-line `check()`;\
 ## how to add things
 
 new syntax: `Lexer.zig` (tokens) -> `Parser.zig` (tree) -> `ast.zig`
-    (node kinds) -> `expander.zig` if it desugars, `compiler/` if it compiles
+    (node kinds) -> `macro_pattern.zig` if it desugars, `compiler/` if it compiles
 
-new builtin: `../baselib/iface/*.d.rv` decl plus zig impl (see `../baselib/`), iface @ `api.zig`
+new builtin: `../baselib/sigs/*.d.rv` decl plus zig impl (see `../baselib/`)
     docs and runtime stay in sync that way
 
-new type behavior: `compiler/types.zig` inference, `type_serde.zig` only if the text spelling changes
+new type behavior: `compiler/types.zig` inference, `type_syntax.zig` only if the text spelling changes
 
 new check: `semantic.zig`, errors accumulate as report parts and the single `Failure` carries them out.
 error codes are kebab slugs on the report, add one when the message alone is not greppable
@@ -75,4 +77,4 @@ syntax while implementations stay in focused files
 ## tests
 
 unit tests go inline next to the code
-end-to-end coverage lives in `tests.zig` via the `testing.zig` helpers
+end-to-end coverage lives in `lang_tests.zig` via the `test_helpers.zig` helpers
