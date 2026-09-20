@@ -15,11 +15,9 @@ const ast = @import("../ast.zig");
 const Node = ast.Node;
 const Binding = ast.Binding;
 const control = @import("control.zig");
-const dce = @import("../ir/dce.zig");
-const fold = @import("../ir/fold.zig");
 const ir = @import("../ir/root.zig");
 const macro_pattern = @import("../macro_pattern.zig");
-const peephole = @import("../ir/peephole.zig");
+const opt = @import("../ir/opt.zig");
 const state_mod = @import("locals.zig");
 
 const bindings = @import("bindings.zig");
@@ -299,9 +297,7 @@ pub const Compiler = struct {
         //         std.debug.print("  op={any} res_r={d} arg={d}\n", .{ inst.opcode, inst.result_reg, inst.op_arg });
         //     }
         // }
-        try fold.foldIr(self);
-        try dce.dceIr(self);
-        try peephole.peepholeIr(self);
+        try opt.optimize(self);
         const bytecode = try self.toBytecode();
         const instr_copy = try self.runtime_alloc.dupe(Instruction, bytecode);
         defer self.alloc.free(bytecode);

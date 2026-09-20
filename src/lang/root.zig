@@ -99,4 +99,6 @@ test {
     _ = @import("ir/dce.zig");
     _ = @import("ir/fold.zig");
     _ = @import("ir/peephole.zig");
+    _ = @import("ir/opt.zig");
+    _ = @import("ir/tests.zig");
 }
