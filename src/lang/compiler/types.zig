@@ -873,7 +873,7 @@ pub fn inferExprType(ctx: CheckCtx, node: *const ast.Node) TypeInfo {
         },
         .orelse_expr => |v| inferOrelseType(inferExprType(ctx, v.left), inferExprType(ctx, v.right)),
         .comp_block => |cb| inferExprType(ctx, cb.expr),
-        .import_stmt, .test_block, .test_suite, .macro_expr, .proc_macro, .quasiquote => .{ .tag = .any },
+        .import_stmt, .test_block, .test_suite, .proc_macro, .quasiquote => .{ .tag = .any },
         .match_expr => |v| inferMatchType(ctx, v.subject, v.arms),
         .range_literal, .slice_literal => .{ .tag = .number },
         .assign_expr, .compound_assign, .decl, .binding, .table_pattern, .ascribed, .type_alias => .{ .tag = .any },

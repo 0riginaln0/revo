@@ -53,53 +53,6 @@ pub const UnaryOp = enum {
     yield,
 };
 
-pub const CaptureType = enum {
-    expr, // any expression
-    ident, // identifier only
-    str, // string literal only
-    number, // number literal only
-    call, // function call only
-};
-
-pub const Quantifier = enum {
-    zero_or_more, // *
-    one_or_more, // +
-    optional, // ?
-};
-
-pub const CaptureNode = struct {
-    name: []const u8,
-    capture_type: ?CaptureType = null,
-};
-
-pub const GroupNode = struct {
-    name: []const u8,
-    pattern: []const PatternNode,
-    quantifier: Quantifier,
-};
-
-pub const PatternNode = union(enum) {
-    literal: []const u8, // "if", "elif", "then", etc.
-    capture: CaptureNode, // %x or %x:expr
-    sequence: []const PatternNode, // (pattern pattern pattern)
-    group: GroupNode, // %NAME(pattern*) with quantifier
-};
-
-pub const SingleCapture = struct {
-    name: []const u8,
-    expr: *Node,
-};
-
-pub const GroupCapture = struct {
-    name: []const u8,
-    captures: [][]*Node,
-};
-
-pub const MatchResult = struct {
-    singles: []SingleCapture,
-    groups: []GroupCapture,
-};
-
 pub const RecordField = struct {
     name: []const u8,
     type_expr: *TypeExpr,
@@ -456,7 +409,7 @@ pub const Expr = union(enum) {
     compound_assign: struct { target: *Node, op: BinOp, value: *Node },
     loop_expr: struct { body: *Node, label: ?[]const u8 = null },
     for_loop: struct { params: []FnParam, iter: *Node, body: *Node, label: ?[]const u8 = null },
-    comp_block: struct { expr: *Node, is_macro: bool = false },
+    comp_block: struct { expr: *Node },
     while_loop: struct { predicate: *Node, body: *Node, label: ?[]const u8 = null },
     break_expr: struct { value: ?*Node, label: ?[]const u8 },
     continue_expr: struct { value: ?*Node, label: ?[]const u8 },
@@ -473,7 +426,6 @@ pub const Expr = union(enum) {
         end: ?*Node,
     },
     import_stmt: struct { name: []const u8, path: []const u8, pub_: bool = false },
-    macro_expr: struct { name: []const u8, pattern: []const u8, template: []const u8 },
     test_block: struct { name: []const u8, body: *Node, skip: bool = false },
     test_suite: struct { name: []const u8, body: *Node },
     block: []*Node,
@@ -569,7 +521,6 @@ pub const Node = struct {
             .atom => |h| try writer.print(":{s}", .{h}),
             .nil => try writer.writeAll("nil"),
             .ident => |name| try writer.writeAll(name),
-            .macro_expr => |m| try writer.print("(macro {s} `{s}` `{s}`)", .{ m.name, m.pattern, m.template }),
 
             .decl => |d| try d.inner.printAt(writer, depth),
 
@@ -830,7 +781,6 @@ pub const Node = struct {
             },
             .comp_block => |cb| {
                 try writer.writeAll("(comp");
-                if (cb.is_macro) try writer.writeAll(" macro");
                 try sep(writer, depth, 1);
                 try cb.expr.printAt(writer, child(depth));
                 try close(writer, depth);
@@ -1478,7 +1428,6 @@ pub fn walkExpr(
 
         .comp_block => |cb| allocNode(allocator, expr.span, .{ .comp_block = .{
             .expr = try ctx.walk(allocator, cb.expr, ctx),
-            .is_macro = cb.is_macro,
         } }),
         .assign_expr => |v| allocNode(allocator, expr.span, .{ .assign_expr = .{
             .target = try ctx.walk(allocator, v.target, ctx),

@@ -47,12 +47,12 @@ you can then open infinity more terminals and run the same command and have them
 
 ```revo
 const server = (net.listen(6767))?
-print!("serving on localhost:%d...", server.port)
+print(fmt("serving on localhost:%d...", server.port))
 
 fn serve(peer) do
   let counter = 0
   let iterations = 0
-  print!("new peer %v", peer)
+  print(fmt("new peer %v", peer))
 
   while iterations < 5 do
     # send a prompt; if the socket is not writable yet, this fiber parks here
@@ -84,7 +84,7 @@ fn serve(peer) do
       return :client_closed
     end
     | (:err, reason) => do
-      print!("recv failed: %s \n", string(reason))
+      print(fmt("recv failed: %s \n", string(reason)))
       # close here too: once recv fails, the socket is no longer useful
       peer:close()?
       # this is not an error but a status, which is why we use snake_case instead of PascalCase

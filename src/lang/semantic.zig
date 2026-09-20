@@ -314,7 +314,6 @@ const SemanticChecker = struct {
                 .binding => |b| if (b.target.expr == .ident) b.target.expr.ident else null,
                 .type_alias => |t| t.name,
                 .import_stmt => |stmt| stmt.name,
-                .macro_expr => |m| m.name,
                 .proc_macro => |p| p.name,
                 else => null,
             };
@@ -1050,10 +1049,6 @@ const SemanticChecker = struct {
                     } else |_| {}
                 }
                 try self.declare(stmt.name, .{ .tag = .any }, null);
-                break :blk .{ .tag = .any };
-            },
-            .macro_expr => |m| blk: {
-                try self.declare(m.name, .{ .tag = .any }, null);
                 break :blk .{ .tag = .any };
             },
             .number, .string, .multiline_string, .atom, .nil, .table, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),

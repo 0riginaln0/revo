@@ -195,13 +195,12 @@ the fundamental types are:
   only `:false`, `0`, and `:nil` are falsey - everything else (including `""` and `{{}}`) is truthy
 
   for this reason, the language does not have exceptions/errors and uses
-  {:err, :ErrorName} and {:ok, value} together with pattern matching, `?`, `orelse`, `:unwrap()`,
-  and `ok?!`/`err?!` to handle errors. toplevel `?` panics instead of returning silently. there are
-  helpers to check these:
+  {:err, :ErrorName} and {:ok, value} together with pattern matching, `?`, `orelse` and `:unwrap()`
+  to handle errors. toplevel `?` panics instead of returning silently:
 
     ```revo
-    ok?!({:ok, 42})      # :true
-    err?!({:err, :Bad})  # :true
+    {:ok, 42}[0] == :ok      # :true
+    {:err, :Bad}[0] == :err  # :true
     {:ok, 42}:unwrap() # 42  (panics on :err)
     {:err, :bad}?      # panics at toplevel
     {:err, :bad} orelse 0
@@ -292,11 +291,15 @@ the fundamental types are:
     'hello\nworld' # literal backslash-n
     ```
 
-  backtick strings `` ` `` are for macro patterns; they're parsed as raw text with
-  capture placeholders:
+  backtick strings `` ` `` are for quasiquote templates inside proc macros;
+  they're parsed as raw text with capture placeholders:
 
     ```revo
-    macro unless! `(%cond:expr %body:expr)` `if %cond :nil else %body`
+    proc unless!(iter) do
+      let cond = iter:next()
+      let body = iter:next()
+      {`{:if_expr, %cond, %body, {:nil}}`}
+    end
     ```
 
   you can also use the `"string":method()` methods:
@@ -1528,45 +1531,13 @@ print(comp (1 + 2))                # only runs at compilation time
 ### macro
 
 macros are compile-time code transformers. they can rewrite syntax into any
-other syntax, letting you extend the language without runtime cost. there are
-two kinds: pattern macros and procedural macros
+other syntax, letting you extend the language without runtime cost
 
 > if a language doesn't have metaprogramming, the programmer **will** metaprogram it themselves
 
 they are also how you implement variable-argument functions
 
 {{< ref "pub const Expr" >}}
-
-#### pattern macros (macro!)
-
-pattern macros match a template and produce a replacement. they use backtick
-patterns with typed captures:
-
-```revo
-macro unless! `(%cond:expr %body:expr)` `if %cond :nil else %body`
-unless!(5 < 0, :positive) # :positive
-```
-
-capture types:
-
-```rs
-`%e:expr`  - any expression
-`%n:ident` - an identifier
-`%s:str`   - a string literal
-```
-
-repetition groups match sequences:
-
-```revo
-macro sum_all! `(%first:expr %REST(%item:expr)*)` `%first %REST(+ %item)`
-sum_all!(10, 15, 17) # 42
-```
-
-```rs
-`%GROUP(...)*` - zero or more
-`%GROUP(...)+` - one or more
-`%GROUP(...)?` - optional
-```
 
 #### procedural macros (proc!)
 
@@ -1613,7 +1584,7 @@ proc print!(iter) do
   while iter:peek() != :nil do
     args:push(iter:next())
   end
-  {{:call, {:ident, "print"}, {{:call, {:ident, "fmt"}, args, :false}}, :false}}
+  {{:call, {:ident, "print"}, {{:call, {:ident, "fmt"}, args, :false, {}}}, :false, {}}}
 end
 
 print!("hello %v", :world) # "hello :world"
@@ -1711,16 +1682,9 @@ print(x, y) # 2, 1
 
 #### preloaded macros
 
-these live in `src/baselib/iface/root.d.rv` and merge into every build;
-  baselib groups can add more (`pub macro uri.shout! ...`), called qualified:
-
-```revo
-ok?!({:ok, 42})            # :true
-err?!({:err, :Bad})        # :true
-some?!({:some, 42})        # :true
-# none!?({:none})          # (preloaded check for :none)
-print!("hello %v", :world) # printf-style: prints "hello :world"
-```
+these live in `src/baselib/sigs/root.d.rv` and merge into every build.
+  right now that file declares no macros; baselib groups can add
+  `pub proc` macros there (`pub proc uri.shout! ...`), called qualified
 
 ### metatables
 

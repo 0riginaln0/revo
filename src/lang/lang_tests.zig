@@ -226,10 +226,6 @@ test "recursive typed calls stay specialized" {
     try std.testing.expect(saw_add);
 }
 
-test {
-    _ = @import("macro_pattern.zig").testing;
-}
-
 //
 // basic
 //
@@ -847,17 +843,6 @@ test "non-table values can use plain metatable fields as methods" {
 test "error helpers build and classify tagged errors" {
     try t.topString("string({:ok, 42})", "{ :ok, 42 }");
     try t.topString("string({:err, :FileNotFound})", "{ :err, :FileNotFound }");
-    try t.topTrue("err?!({:err, :Bad})");
-    try t.topTrue("err?!({:err, :FileNotFound})");
-    try t.topFalse("err?!({:ok, :Bad})");
-}
-
-test "result predicates replace native functions" {
-    try t.topTrue("ok?!({:ok, 42})");
-    try t.topTrue("ok?!({:ok, :nil})");
-    try t.topFalse("ok?!({:err, :Bad})");
-    try t.topTrue("err?!({:err, :Bad})");
-    try t.topFalse("err?!({:ok, 42})");
 }
 
 test "unwrap panics on err result" {
@@ -869,125 +854,6 @@ test "unwrap rejects non-results at runtime" {
     try t.expectRuntimeError(
         \\ {1, 2}:unwrap()
     , .TypeError);
-}
-
-//
-// macro
-// pattern grammar: %x (capture), %x:type (typed), %GROUP(...)*+? (quantified groups)
-//
-
-test "zero-arg macro expands on identifier use" {
-    try t.topNumber(
-        \\macro answer! `` `42`
-        \\answer!
-    , 42);
-}
-
-test "macro system capabilities and limitations" {
-    try t.topNumber(
-        \\ macro id! `%x:expr` `%x`
-        \\ id!(42)
-    , 42);
-
-    try t.topNumber(
-        \\ macro count_args! `(%fmt:str %ARGS(, %arg:expr)*)` `3`
-        \\ count_args!("format", 1, 2, 3)
-    , 3);
-}
-
-// basic simple captures
-test "binary structure macro - multiple captures with literals" {
-    try t.topNumber(
-        \\ macro combine! `(%left:expr %right:expr)` `%left + %right`
-        \\ combine!(20, 22)
-    , 42);
-}
-
-// type-consrtained captures
-test "identifier capture - creates bindings" {
-    try t.topNumber(
-        \\ macro const! `%name:ident = %val:expr` `const %name = %val`
-        \\ const!(answer = 42)
-        \\ answer
-    , 42);
-}
-
-test "string literal capture - constrains to string" {
-    try t.topType(
-        \\ macro get_format! `(%fmt:str %rest:expr)` `%fmt`
-        \\ get_format!("hello", 123)
-    , .string);
-}
-
-test "number literal capture - constrains to number" {
-    try t.topNumber(
-        \\ macro repeat_val! `(%n:number %body:expr)` `%n`
-        \\ repeat_val!(42, (1 + 2))
-    , 42);
-}
-
-// repetition groups
-test "zero-or-more repetition - captures multiple items" {
-    try t.topNil(
-        \\ macro do_all! `(%ITEMS(%item:expr)*)` `do %ITEMS(%item) :nil end`
-        \\ do_all!(1, 2, 3)
-    );
-}
-
-test "one-or-more repetition - at least one required" {
-    try t.topNumber(
-        \\ macro sum_all! `(%first:expr %REST(%item:expr)*)` `%first %REST(+ %item)`
-        \\ sum_all!(10, 15, 17)
-    , 42);
-}
-
-test "optional group - zero or one occurrence" {
-    try t.topNumber(
-        \\ macro maybe_print! `(%val:expr %MSG(%msg:str)?)` `%val`
-        \\ maybe_print!(42, "hello")
-    , 42);
-}
-
-test "comma-separated repetition - literal separators" {
-    try t.topNumber(
-        \\ macro list_fst! `(%first:expr %REST(%item:expr)*)` `%first`
-        \\ list_fst!(10, 15, 17)
-    , 10);
-}
-
-// complex combinations
-test "if-elif-else chain multiple groups with quantifiers" {
-    try t.topNumber(
-        \\ macro choose!
-        \\     `(%head:number %ITEMS(%item:number)* %MSG(%msg:str)?)`
-        \\     `do %head %ITEMS(+ %item) end`
-        \\
-        \\ choose!(10, 15, 17, "done")
-    , 42);
-}
-
-test "complex fn def captures, repetition, optional" {
-    try t.topNumber(
-        \\ macro sum_from! `(%start:number %ITEMS(%item:expr)+)`
-        \\     `do %start %ITEMS(+ %item) end`
-        \\
-        \\ sum_from!(10, 15, 17)
-    , 42);
-}
-
-// kw-based control flow
-test "negative conditional" {
-    try t.topType(
-        \\ macro unless! `(%cond:expr %body:expr)` `if %cond :nil else %body`
-        \\ unless!(5 < 0, :positive)
-    , .atom);
-}
-
-test "custom keyword structure - keywords at multiple positions" {
-    try t.topNumber(
-        \\ macro repeat_until! `(%body:expr %cond:expr)` `%body`
-        \\ repeat_until!(10 + 32, 5 == 0)
-    , 42);
 }
 
 //
@@ -1776,26 +1642,6 @@ test "imported proc macros expand, unknown ones error" {
         \\ const m = import "./macs"
         \\ m.nope!(1)
     , "unknown macro `m.nope!`");
-}
-
-test "nested imports never preload macros (known gap)" {
-    // import_scan only walks block|decl|binding, so an import nested under
-    // fn never preloads; the call below stays unexpanded. fixing the walk
-    // must update this test, not just the code.
-    var m = try t.TmpMod.init(&.{
-        .{ .path = "macs.rv", .data =
-        \\ pub macro answer! `(%w:expr)` `%w`
-        },
-    });
-    defer m.deinit();
-
-    try t.expectExpandErrorInDir(m.dir,
-        \\ fn f() do
-        \\   const m = import "./macs"
-        \\   m.answer!(1)
-        \\ end
-        \\ f()
-    , "unknown macro `m.answer!`");
 }
 
 test "unknown macro calls are compile errors" {
@@ -2637,7 +2483,7 @@ test "comp errors" {
     , .ParseError, 1, 8, "division by zero!");
     try t.expectCompileFailure(
         \\ proc bad_comp!(iter) do
-        \\   {{:comp_block, {:binary, :div, {:number, 1}, {:number, 0}}, :false}}
+        \\   {{:comp_block, {:binary, :div, {:number, 1}, {:number, 0}}}}
         \\ end
         \\ bad_comp!()
     , .ParseError, 4, 2, "division by zero!");
@@ -2677,14 +2523,6 @@ test "channel select w/ multiple waiters" {
         \\ spawn (fn() send(ch2, 20))()
         \\ recv(ch1) + recv(ch2)
     , 30);
-}
-
-test "macro inner binding invisible outside" {
-    try t.expectSemanticError(
-        \\ macro mac! `(%x:expr)` `let hidden = 99 :%x`
-        \\ mac!(42)
-        \\ hidden
-    );
 }
 
 test "proc macro call with multiple args does not analyze arguments" {
@@ -3035,39 +2873,6 @@ test "module non-pub values are not exported" {
         \\ const lib = import "./lib"
         \\ lib.visible
     , 42);
-}
-
-test "cross-module macro injection works" {
-    var m = try t.TmpMod.init(&.{
-        .{ .path = "macros.rv", .data =
-        \\ pub macro double! `%e:expr` `%e * 2`
-        },
-    });
-    defer m.deinit();
-    try t.topNumberInDir(m.dir,
-        \\ import "./macros"
-        \\ macros.double!(21)
-    , 42);
-}
-
-test "non-pub macro is not injected" {
-    var m = try t.TmpMod.init(&.{
-        .{ .path = "macros.rv", .data =
-        \\ macro hidden! `%e:expr` `42`
-        \\ pub macro visible! `%e:expr` `%e`
-        },
-    });
-    defer m.deinit();
-    try t.topNumberInDir(m.dir,
-        \\ import "./macros"
-        \\ macros.visible!(99)
-    , 99);
-    // non-pub macros are not injected, so the call never expands:
-    // unknown macro is a compile error, not a runtime one
-    try t.expectExpandErrorInDir(m.dir,
-        \\ import "./macros"
-        \\ macros.hidden!(21)
-    , "unknown macro `macros.hidden!`");
 }
 
 test "cross-module proc macro injection works" {
@@ -5135,10 +4940,9 @@ test "dotted pub type in .d.rv resolves qualified by import" {
     );
 }
 
-test "manifest dotted macros rescope under the import name" {
+test "manifest dotted proc macros rescope under the import name" {
     var m = try t.TmpMod.init(&.{
         .{ .path = "m.d.rv", .data =
-        \\pub macro q.shout! `(%w:expr)` `%w`
         \\pub proc q.add3!(iter) do
         \\  let a = iter:next()
         \\  let b = iter:next()
@@ -5150,8 +4954,8 @@ test "manifest dotted macros rescope under the import name" {
     defer m.deinit();
     try t.topNumberInDir(
         m.dir,
-        "import \"m.d.rv\"\nm.shout!(40) + m.add3!(10, 20, 10)\n",
-        80,
+        "import \"m.d.rv\"\nm.add3!(10, 20, 10)\n",
+        40,
     );
 }
 

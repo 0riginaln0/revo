@@ -15,4 +15,4 @@ end
 
 let root = spawn skynet(0, 1000000)
 print("Res:", join(root))
-print!("took %v", (time.now() - start)/1000)
+print(fmt("took %v", (time.now() - start)/1000))

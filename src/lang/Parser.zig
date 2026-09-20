@@ -549,7 +549,6 @@ fn parsePrefix(self: *Parser) anyerror!*Node {
             if (self.check(.ident)) return self.parseDecl(token);
             return self.allocExpr(token.span(), .{ .ident = token.text });
         },
-        .kw_macro => self.parseMacro(token),
         .kw_pub => self.parsePubPrefix(token),
         .backtick_string => try self.parseQuasiquote(token),
         .eof => return error.UnexpectedToken,
@@ -742,12 +741,9 @@ fn parseFnWithBodyMin(self: *Parser, start: Token, body_min_bp: u8) anyerror!*No
 }
 
 fn parseComp(self: *Parser, token: Token) anyerror!*Node {
-    const is_macro = self.peek().type == .kw_macro;
-    if (is_macro) _ = self.advance();
-
     const expr = try self.parseExpression(BP.comp);
     return self.allocExpr(Span.merge(token.span(), expr.span), .{
-        .comp_block = .{ .expr = expr, .is_macro = is_macro },
+        .comp_block = .{ .expr = expr },
     });
 }
 
@@ -1178,7 +1174,6 @@ fn parsePubPrefix(self: *Parser, _: Token) anyerror!*Node {
         .kw_suite,
         .kw_proc,
         .kw_type,
-        .kw_macro,
         .kw_import,
         .kw_declare,
     };
@@ -1192,7 +1187,7 @@ fn parsePubPrefix(self: *Parser, _: Token) anyerror!*Node {
     if (!found) return error.UnexpectedToken;
     const decl_start = self.advance();
 
-    // TODO: import and macro are not decl nodes
+    // TODO: import is not a decl node
     if (decl_start.type == .kw_import) {
         var node = try self.parseImport(decl_start);
         if (node.expr == .import_stmt) {
@@ -1203,11 +1198,6 @@ fn parsePubPrefix(self: *Parser, _: Token) anyerror!*Node {
             }
         }
         return node;
-    }
-
-    if (decl_start.type == .kw_macro) {
-        const node = try self.parseMacro(decl_start);
-        return self.allocExpr(node.span, .{ .decl = .{ .inner = node, .kind = .@"const", .pub_ = true } });
     }
 
     if (decl_start.type == .kw_proc) {
@@ -1320,10 +1310,8 @@ fn parseQuasiquote(self: *Parser, token: Token) anyerror!*Node {
     } });
 }
 
-/// macro name! `pattern` `template`
-/// `name!` or single-scoped `mod.name!`; deeper nesting cant expand
-/// (calls only resolve one field level)
-/// , core slots are values not macros
+/// macro head shared with proc parsing: `name!` or `mod.name!`
+/// deeper nesting cant expand (calls only resolve one field level)
 fn parseMacroHead(self: *Parser, first: Token) ![]const u8 {
     if (self.check(.atom) or self.check(.colon)) return error.UnexpectedToken;
     if (!self.match(.dot)) return first.text;
@@ -1331,21 +1319,6 @@ fn parseMacroHead(self: *Parser, first: Token) ![]const u8 {
 
     if (self.check(.dot)) return error.UnexpectedToken;
     return try std.mem.join(self.alloc, ".", &.{ first.text, seg.text });
-}
-
-fn parseMacro(self: *Parser, start: Token) anyerror!*Node {
-    if (!self.check(.ident)) return error.UnexpectedToken;
-    const name = try self.parseMacroHead(self.advance());
-    if (!std.mem.endsWith(u8, name, "!")) return error.InvalidMacroName;
-
-    const pattern = try self.expect(.backtick_string);
-    const template = try self.expect(.backtick_string);
-
-    return self.allocExpr(Span.merge(start.span(), template.span()), .{ .macro_expr = .{
-        .name = name,
-        .pattern = pattern.text,
-        .template = template.text,
-    } });
 }
 
 /// proc name(param) body
@@ -2161,12 +2134,12 @@ const call_stmt_boundary_tokens = makeTokenSet(&.{
 });
 
 const expr_start_tokens = makeTokenSet(&.{
-    .number,       .string,    .multiline_string, .atom,     .ident,
-    .kw_const,     .kw_let,    .kw_macro,         .minus,    .kw_not,
-    .pipe_forward, .lparen,    .kw_fn,            .kw_if,    .kw_unless,
-    .kw_match,     .kw_do,     .kw_loop,          .kw_break, .kw_continue,
-    .kw_return,    .kw_import, .kw_spawn,         .kw_yield, .lsquiggly,
-    .kw_type,      .kw_pub,    .eof,
+    .number,    .string,   .multiline_string, .atom,        .ident,
+    .kw_const,  .kw_let,   .minus,            .kw_not,      .pipe_forward,
+    .lparen,    .kw_fn,    .kw_if,            .kw_unless,   .kw_match,
+    .kw_do,     .kw_loop,  .kw_break,         .kw_continue, .kw_return,
+    .kw_import, .kw_spawn, .kw_yield,         .lsquiggly,   .kw_type,
+    .kw_pub,    .eof,
 });
 
 /// expr allows bare call after it (ident, field, call, fn_expr)
@@ -2423,20 +2396,6 @@ test "parses pub const with pub_ flag" {
     try std.testing.expect(root.expr.decl.kind == .@"const");
 }
 
-test "parses pub macro" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
-
-    const src = "pub macro assert! `(expr)` `(expr)`";
-    const tokens = try Lexer.lexAt(alloc, src, .{});
-    const root = try parseTokens(alloc, tokens);
-    try std.testing.expect(root.expr == .decl);
-    try std.testing.expect(root.expr.decl.pub_);
-    try std.testing.expect(root.expr.decl.inner.expr == .macro_expr);
-    try std.testing.expectEqualStrings("assert!", root.expr.decl.inner.expr.macro_expr.name);
-}
-
 test "parses pub import statement" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2570,9 +2529,6 @@ test "dotted heads" {
     try std.testing.expectEqual(@as(usize, 2), segs.len);
     try std.testing.expectEqualStrings("uri", segs[0]);
     try std.testing.expectEqualStrings("Hi", segs[1]);
-
-    const macro_root = try testing.parseOne(alloc, "pub macro uri.shout! `(%w:expr)` `%w`");
-    try std.testing.expectEqualStrings("uri.shout!", macro_root.expr.decl.inner.expr.macro_expr.name);
 
     const proc_root = try testing.parseOne(alloc, "pub proc uri.asdf!(m) do m end");
     try std.testing.expectEqualStrings("uri.asdf!", proc_root.expr.decl.inner.expr.proc_macro.name);

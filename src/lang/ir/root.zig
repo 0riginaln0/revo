@@ -137,6 +137,138 @@ pub fn compactIr(self: *Compiler, n: usize, live: []const bool) !void {
     }
 }
 
+/// registers read by an instruction in its lowering encoding
+///
+/// reads may be over-estimated (that keeps more code),
+/// so call/call_field read the whole argument range
+pub fn readRegs(inst: *const IrInst, out: []Register) usize {
+    const r = inst.result_reg;
+    switch (inst.opcode) {
+        // zig fmt: off
+        .jump, .yield,
+        .load_user_global, .load_builtin_global, .load_local, .load_upval,
+        .make_closure, .table_new, .load_nil, .load_small_int,
+        .load_const => return 0,
+
+        .move => {
+            out[0] = valueReg(inst.operands[0]);
+            return 1;
+        },
+
+        .range_loop => {
+            std.debug.assert(r >= 3);
+            out[0] = r - 3;
+            out[1] = r - 2;
+            out[2] = r - 1;
+            return 3;
+        },
+
+        .call, .spawn => {
+            const cnt = inst.op_arg + 1;
+            for (0..cnt) |k| out[k] = r + @as(Register, @intCast(k));
+            return cnt;
+        },
+
+        .call_field => {
+            const cnt = (inst.op_arg & ~@as(usize, 1 << 7)) + 2;
+            for (0..cnt) |k| out[k] = r + @as(Register, @intCast(k));
+            return cnt;
+        },
+
+        .halt, .ret, .jump_if_false, .jump_if_true, .jump_err,
+        .store_user_global, .store_user_global_const, .store_upval,
+        .store_local, .bind_local, .negate, .not,
+        .add_imm, .sub_imm, .mul_imm,
+        .band_imm, .lt_int_imm, .unwrap_result => {
+            out[0] = r;
+            return 1;
+        },
+
+        // the object register comes from the operand, not the result register:
+        // a peephole may point the read at an earlier live load of the object
+        .table_get_atom => {
+            if (inst.operands.len >= 1) {
+                out[0] = valueReg(inst.operands[0]);
+            } else out[0] = r;
+            return 1;
+        },
+
+        .add, .sub, .mul, .div, .mod, .concat,
+        .band, .bor, .bxor, .shl, .shr, .int_div,
+        .pow, .eq, .neq, .lt, .gt, .lte, .gte,
+        .eq_int, .neq_int, .lt_int, .gt_int, .lte_int, .gte_int,
+        .@"and", .@"or", .table_get,
+        .table_set_atom => {
+            out[0] = r;
+            out[1] = r + 1;
+            return 2;
+        },
+
+        .table_set, .range_init => {
+            out[0] = r;
+            out[1] = r + 1;
+            out[2] = r + 2;
+            return 3;
+        },
+
+        .slice => {
+            out[0] = r;
+            out[1] = r + 1;
+            out[2] = r + 2;
+            out[3] = r + 3;
+            return 4;
+        },
+        // zig fmt: on
+    }
+}
+
+/// registers written by an instruction. must be exact: over-estimating
+/// would kill registers that are still live at runtime
+pub fn writeRegs(inst: *const IrInst, out: *[3]Register) usize {
+    const r = inst.result_reg;
+    switch (inst.opcode) {
+        // zig fmt: off
+        .ret, .halt, .jump, .jump_if_false, .jump_if_true,
+        .jump_err,
+        .store_user_global, .store_user_global_const, .store_upval,
+        .store_local, .bind_local, .yield => return 0,
+
+        .range_init => {
+            out[0] = r;
+            out[1] = r + 1;
+            out[2] = r + 2;
+            return 3;
+        },
+
+        .range_loop => {
+            out[0] = r;
+            if (inst.operands.len > 0) {
+                out[1] = r + 1;
+                return 2;
+            }
+            return 1;
+        },
+        // zig fmt: on
+        else => {
+            out[0] = r;
+            return 1;
+        },
+    }
+}
+
+/// readRegs plus the instruction's `.reg` operands: the complete set of
+/// registers an instruction reads in its lowering encoding
+pub fn readRegsAll(inst: *const IrInst, out: []Register) usize {
+    var cnt = readRegs(inst, out);
+    for (inst.operands) |op| {
+        if (op == .reg and cnt < out.len) {
+            out[cnt] = op.reg;
+            cnt += 1;
+        }
+    }
+    return cnt;
+}
+
 pub fn lowerInst(alloc: std.mem.Allocator, out: *std.ArrayList(Instruction), inst: *const IrInst) !void {
     const op = inst.opcode;
     const r = inst.result_reg;

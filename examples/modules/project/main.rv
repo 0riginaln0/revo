@@ -6,4 +6,4 @@ import "mac/repeat"
 
 print(lib.greeting)
 print(lib.add(2, 3))
-print(repeat.double!(21))
+# TMPL: print(repeat.double!(21))

@@ -375,13 +375,13 @@ end
 fn macros() do
   print("\nmacros")
 
-  # macro defines a syntax transformation at compile time
-  macro double! `(%x:expr)` `%x * 2`
-  macro twice! `(%x:expr %y:expr)` `%x + %y`
+  # TMPL: macro defines a syntax transformation at compile time
+  # TMPL: macro double! `(%x:expr)` `%x * 2`
+  # TMPL: macro twice! `(%x:expr %y:expr)` `%x + %y`
 
-  # macro expands to the transformed code
-  print(double!(21))
-  print(twice!(1, 2))
+  # TMPL: macro expands to the transformed code
+  # TMPL: print(double!(21))
+  # TMPL: print(twice!(1, 2))
 end
 
 # proc macros;

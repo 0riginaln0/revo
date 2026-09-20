@@ -216,7 +216,7 @@ pub const Error = union(enum) {
 };
 
 pub const ParseResult = Result(Parsed, Parser.ParseFailure);
-pub const ExpandError = macro_pattern.ExpandError || macro_proc.ExpandError;
+pub const ExpandError = macro_proc.ExpandError;
 pub const ExpandResult = Result(Expanded, ExpandError);
 pub const ExpandWithVmResult = union(enum) {
     ok: Expanded,
@@ -368,13 +368,12 @@ pub fn expandWithVmSource(
     source_name: []const u8,
     source: []const u8,
 ) !ExpandWithVmResult {
-    const template_expanded = try macro_pattern.expandExpr(allocator, parsed.root);
-    const proc_result = try macro_proc.expandExprWithSource(vm, allocator, template_expanded, source_name, source);
+    const proc_result = try macro_proc.expandExprWithSource(vm, allocator, parsed.root, source_name, source);
 
     if (proc_result.error_report) |report|
         return .{ .proc_err = report };
 
-    const final = try macro_pattern.expandExpr(allocator, proc_result.root.?);
+    const final = proc_result.root.?;
     const missed = try collectUnexpandedMacros(allocator, final);
 
     if (missed.len > 0) {
@@ -526,7 +525,6 @@ const Node = ast.Node;
 const compiler = @import("compiler/root.zig");
 const diagnostic = @import("diagnostic.zig");
 const import_scan = @import("pipeline/import_scan.zig");
-const macro_pattern = @import("macro_pattern.zig");
 const macro_proc = @import("macro_proc.zig");
 const Parser = @import("Parser.zig");
 const scope_wiring = @import("pipeline/scope_wiring.zig");

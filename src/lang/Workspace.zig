@@ -383,7 +383,7 @@ pub const collectDependencyClosure = deps_mod.collectDependencyClosure;
 ///     bindings, functions, type aliases
 ///
 /// full dotted macro names from baselib manifests
-///     (`uri.asdf!`, `ok?!`)
+///     (`uri.asdf!`)
 ///
 /// names borrow the embedded sources (static)
 /// ; only the list is owned

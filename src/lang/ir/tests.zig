@@ -10,8 +10,7 @@ const Operand = revo.Operand;
 const Register = revo.opcode.Register;
 
 const Compiler = @import("../compiler/root.zig").Compiler;
-const peephole = @import("peephole.zig");
-const peepholeIr = peephole.peepholeIr;
+const peepholeIr = @import("opt.zig").peepholeIr;
 const pipeline = @import("../pipeline.zig");
 const testing = @import("../test_helpers.zig");
 const t = testing;

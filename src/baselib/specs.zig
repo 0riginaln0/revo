@@ -193,7 +193,7 @@ fn collectMacroSpans(alloc: std.mem.Allocator, src: []const u8) ![]ast.Span {
         if (!d.pub_) continue;
 
         switch (d.inner.expr) {
-            .macro_expr, .proc_macro => try out.append(alloc, item.span),
+            .proc_macro => try out.append(alloc, item.span),
             else => {},
         }
     }
@@ -527,7 +527,7 @@ pub fn collectSpecs(alloc: std.mem.Allocator, node: *const revo.lang.Node, iface
                 } else continue;
             },
             // macros ride along as source via macroSources, never as specs
-            .macro_expr, .proc_macro => {},
+            .proc_macro => {},
             .binding => |b| {
                 const doc = d.doc orelse b.doc;
                 if (iface) continue;
@@ -1024,18 +1024,16 @@ test "parseGroup collects pub type as type-only alias" {
     }
 }
 
-test "collectMacroSpans finds pub macros and procs only" {
+test "collectMacroSpans finds pub procs only" {
     const src =
-        \\pub macro ok?! `(%w:expr)` `%w`
         \\pub proc uri.asdf!(m) do m end
-        \\macro private! `(%w:expr)` `%w`
+        \\proc private!(m) do m end
         \\pub declare x = fn() -> num
     ;
     const spans = try collectMacroSpans(testing.allocator, src);
     defer testing.allocator.free(spans);
-    try testing.expectEqual(@as(usize, 2), spans.len);
-    try testing.expect(std.mem.find(u8, src[spans[0].start..spans[0].end], "ok?!") != null);
-    try testing.expect(std.mem.find(u8, src[spans[1].start..spans[1].end], "uri.asdf!") != null);
+    try testing.expectEqual(@as(usize, 1), spans.len);
+    try testing.expect(std.mem.find(u8, src[spans[0].start..spans[0].end], "uri.asdf!") != null);
 }
 
 test "loadAllSpecs pairs every spec with its impl" {

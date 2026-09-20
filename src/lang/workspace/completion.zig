@@ -445,7 +445,7 @@ test "baselib dot completion unions runtime table w declared aliases" {
     try std.testing.expectEqual(@as(usize, 1), decodes);
 }
 
-test "manifest macros complete w/o a hardcoded list" {
+test "template prelude macros complete no more" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
@@ -458,13 +458,13 @@ test "manifest macros complete w/o a hardcoded list" {
     const text = "ok?";
     const id = try ws.open("<test>", text, .{});
     const items = try ws.completions(arena.allocator(), id, text, text.len);
-    try expectCompletion(items, "ok?!", .function);
+    for (items) |it| try std.testing.expect(!std.mem.eql(u8, it.label, "ok?!"));
 
     const text2 = "pr";
     const id2 = try ws.open("<test2>", text2, .{});
     const items2 = try ws.completions(arena.allocator(), id2, text2, text2.len);
-    try expectCompletion(items2, "print!", .function);
     try expectCompletion(items2, "print", .function);
+    for (items2) |it| try std.testing.expect(!std.mem.eql(u8, it.label, "print!"));
 }
 
 test "imported manifest members complete by bare name" {
@@ -476,7 +476,6 @@ test "imported manifest members complete by bare name" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "shapes.d.rv", .data =
         \\pub type geo.Point = num
-        \\pub macro geo.macc! `(%w:expr)` `%w`
     });
     var dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const dir_n = try tmp.dir.realPath(std.testing.io, &dir_buf);
@@ -493,5 +492,4 @@ test "imported manifest members complete by bare name" {
     const id = try ws.open(script, text, .{});
     const items = try ws.completions(arena.allocator(), id, text, text.len);
     try expectCompletion(items, "Point", .field);
-    try expectCompletion(items, "macc!", .field);
 }

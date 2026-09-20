@@ -181,18 +181,6 @@ fn extractPubDefs(node: *Node, prefix: []const u8, alloc: std.mem.Allocator, out
         .decl => |d| {
             if (d.pub_) {
                 switch (d.inner.expr) {
-                    .macro_expr => |m| {
-                        // already-scoped names liek `uri.asdf!` rescope under
-                        // the import like bare ones
-                        //  `Port` -> `svc.Port`
-                        const qualified = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, ast.bareMacroName(m.name) });
-                        const cloned = try ast.allocNode(alloc, d.inner.span, .{ .macro_expr = .{
-                            .name = qualified,
-                            .pattern = m.pattern,
-                            .template = m.template,
-                        } });
-                        try out.append(alloc, cloned);
-                    },
                     .proc_macro => |pm| {
                         if (std.mem.endsWith(u8, pm.name, "!")) {
                             const qualified = try std.fmt.allocPrint(alloc, "{s}.{s}", .{ prefix, ast.bareMacroName(pm.name) });

@@ -16,7 +16,6 @@ const Node = ast.Node;
 const Binding = ast.Binding;
 const control = @import("control.zig");
 const ir = @import("../ir/root.zig");
-const macro_pattern = @import("../macro_pattern.zig");
 const opt = @import("../ir/opt.zig");
 const state_mod = @import("locals.zig");
 
@@ -55,7 +54,7 @@ pub const CompileError = error{
     UnsupportedSyntax,
     InvalidAssignmentTarget,
     IntegerOutOfRange,
-} || std.mem.Allocator.Error || macro_pattern.ExpandError;
+} || std.mem.Allocator.Error;
 
 const InternalCompileError = CompileError || error{CompileFailed};
 
@@ -497,7 +496,12 @@ pub const Compiler = struct {
             },
             .halt, .ret => {
                 result_reg = if (d == 0) 0 else try toRegister(d - 1);
-                try self.recordStackOp(op, 1, 0, result_reg, 0);
+                if (d > 0) {
+                    d -= 1;
+                    try self.recordStackOp(op, 1, 0, result_reg, op_arg);
+                } else {
+                    try self.recordStackOp(op, 0, 0, result_reg, op_arg);
+                }
             },
             .jump => {
                 result_reg = 0;
@@ -986,11 +990,6 @@ pub const Compiler = struct {
                 try self.type_aliases.put(ast.bareName(t), type_info);
                 try self.pushNil();
             },
-            .macro_expr => return self.fail(
-                .UnsupportedSyntax,
-                expr,
-                "syntax must be expanded before compilation",
-            ),
             .proc_macro => return self.fail(
                 .UnsupportedSyntax,
                 expr,
@@ -1719,7 +1718,16 @@ pub const Compiler = struct {
         }
         if (self.failure_reports.items.len != 0) return error.CompileFailed;
         if (self.active_registers == 0) try self.pushNil();
-        if (loop_sym) |sym| try control.emitLoopRecurse(self, params.len, sym) else try self.emit(.ret, 1);
+        if (loop_sym) |sym| {
+            try control.emitLoopRecurse(self, params.len, sym);
+        } else if (self.value_stack.items.len > caller_value_stack_len) {
+            try self.emit(.ret, 1);
+        } else {
+            // body already returned, nothing left to pop; bare ret keeps
+            // the fn ending in ret without touching an empty stack
+            try self.spans.append(self.alloc, self.active_span);
+            try self.recordStackOp(.ret, 0, 0, 0, 0);
+        }
 
         const fn_register_count = self.max_registers;
         self.fn_depth -= 1;

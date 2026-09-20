@@ -102,7 +102,7 @@ pub fn documentSymbols(
 ///     bindings, functions, type aliases
 ///
 /// full dotted macro names from baselib manifests
-///     (`uri.asdf!`, `ok?!`)
+///     (`uri.asdf!`)
 ///
 /// names borrow the embedded sources (static)
 /// ; only the list is owned
@@ -301,13 +301,11 @@ const SymbolVisitor = struct {
             .binding => |b| self.addBinding(b),
             .fn_expr => |f| for (f.params) |p| self.addName(p.name, .param, p.name_span),
             .type_alias => |t| self.addName(ast.bareName(t), .type_alias, t.name_span),
-            // proc and template macros share the kind
-            // ; node span lands on the decl start
-            //   (neither carries a name span)
+            // proc macros take the .macro kind
+            // ; node span lands on the decl start (no name span)
             // . bare member names, like type aliases: `q.macc!`
             //   in a dep file completes as `macc!` under import name
             .proc_macro => |pm| self.addName(ast.bareMacroName(pm.name), .macro, node.span),
-            .macro_expr => |m| self.addName(ast.bareMacroName(m.name), .macro, node.span),
             .import_stmt => |is| {
                 if (self.import_named) {
                     self.import_named = false;

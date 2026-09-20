@@ -2,7 +2,6 @@ pub const ast = @import("ast.zig");
 pub const diagnostic = @import("diagnostic.zig");
 pub const lang_tests = @import("lang_tests.zig");
 pub const Lexer = @import("Lexer.zig");
-pub const macro_pattern = @import("macro_pattern.zig");
 pub const macro_proc = @import("macro_proc.zig");
 pub const Parser = @import("Parser.zig");
 pub const pipeline = @import("pipeline.zig");
@@ -31,7 +30,6 @@ pub const ir = @import("ir/root.zig");
 pub const renderError = pipeline.renderError;
 pub const renderWarnings = pipeline.renderWarnings;
 pub const deinitError = pipeline.deinitError;
-pub const expandExpr = macro_pattern.expandExpr;
 pub const lexAt = Lexer.lexAt;
 pub const lexReportAt = Lexer.lexReportAt;
 pub const parseSource = Parser.parseSource;
@@ -78,7 +76,6 @@ pub const identIsFunction = Lexer.identIsFunction;
 test {
     _ = @import("ast.zig");
     _ = @import("docgen.zig");
-    _ = @import("macro_pattern.zig");
     _ = @import("macro_proc.zig");
     _ = @import("Lexer.zig");
     _ = @import("Parser.zig");
@@ -96,9 +93,7 @@ test {
     _ = @import("compiler/control.zig");
     _ = @import("compiler/bindings.zig");
     _ = @import("ir/root.zig");
-    _ = @import("ir/dce.zig");
-    _ = @import("ir/fold.zig");
-    _ = @import("ir/peephole.zig");
+    _ = @import("ir/opt.zig");
     _ = @import("ir/opt.zig");
     _ = @import("ir/tests.zig");
 }

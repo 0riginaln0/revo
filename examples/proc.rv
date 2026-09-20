@@ -45,8 +45,10 @@ proc print!(iter) do
 			{:ident, "fmt"},
 			args,
 			:false,
+			{},
 		}},
 		:false,
+		{},
 	}}
 end
 

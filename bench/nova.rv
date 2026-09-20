@@ -12,9 +12,9 @@ for num in 0..20001 do
 
     if num == sum do
         found += 1
-        print!("found %v (%vth perfect number)", num, found)
+        print(fmt("found %v (%vth perfect number)", num, found))
     end
 end
 
-print!("found %v perfect numbers", found)
-print!("took %v", (time.now() - start)/1000)
+print(fmt("found %v perfect numbers", found))
+print(fmt("took %v", (time.now() - start)/1000))

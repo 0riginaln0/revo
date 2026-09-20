@@ -8,5 +8,5 @@ match safe_div(10, 0)
 	| {:ok, v}  => print(v)
 	| {:err, e} => print(fmt("error: %v", e))
 
-print(ok?!({:ok, 42}))    # :true
-print(err?!({:err, :Boom})) # :true
+print({:ok, 42}[0] == :ok)    # :true
+print({:err, :Boom}[0] == :err) # :true
