@@ -26,7 +26,7 @@ pub const Impl = struct {
             .err => |e| return HostResult{ .err = e },
             .value => |v| v,
         };
-        const redirects: ?u16 = switch (try buildMaxRedirects(url, vm)) {
+        const redirects: ?u16 = switch (try buildMaxRedirects(Value.new.table(@intFromEnum(opts.value)), vm)) {
             .err => |e| return HostResult{ .err = e },
             .value => |v| v,
         };
@@ -124,6 +124,9 @@ fn urlToString(url: Value, vm: *VM) !HostErrOr([]const u8) {
 }
 
 fn buildMaxRedirects(options: Value, vm: *VM) !HostErrOr(?u16) {
+    if (options.asTable()) |tid| {
+        if (!vm.tables.isValid(tid)) return .{ .value = null };
+    }
     if (vm.getField(options, "max_redirects")) |id| {
         if (id.asNumOpt()) |num| {
             const max_redirects: u16 = @trunc(num);
@@ -136,13 +139,20 @@ fn buildMaxRedirects(options: Value, vm: *VM) !HostErrOr(?u16) {
 fn buildHeaders(options: Args.table, extra_headers: *std.ArrayList(std.http.Header), vm: *VM) !HostErrOr(std.http.Client.Request.Headers) {
     var headers = std.http.Client.Request.Headers{};
 
-    var options_table = try vm.tables.get(@intFromEnum(options));
-    if (options_table.getRaw(try vm.ownValueString("headers"), vm)) |id| {
+    const opts_id: usize = @intFromEnum(options);
+    if (!vm.tables.isValid(opts_id)) return .{ .value = headers };
+
+    if (vm.getField(Value.new.table(@intFromEnum(options)), "headers")) |id| {
         if (id.asTable()) |table_id| {
+            if (!vm.tables.isValid(table_id)) return .{ .value = headers };
             var table: *Table = try vm.tables.get(table_id);
             // hash part only: array entries are not headers
             var it = table.hash.orderedIterator();
             while (it.next()) |header| {
+                // only `:nil` values mean "omit this header"
+                if (header.value.asAtom()) |a|
+                    if (a == revo.CoreAtoms.nil.atomId()) continue;
+
                 const key = try headerToString(header.key, vm);
                 const val = try headerToString(header.value, vm);
                 if (!setKnownHeader(&headers, key, val))
@@ -177,6 +187,9 @@ fn buildBody(method: Method, opts: Args.table, vm: *VM) !?Body {
     if (!method.requestHasBody()) {
         return null;
     }
+    const opts_id: usize = @intFromEnum(opts);
+    if (!vm.tables.isValid(opts_id)) return null;
+
     if (vm.getField(Value.new.table(@intFromEnum(opts)), "body")) |id| {
         // explicit :nil is rejected (omit the key instead); anything else
         // non-string is json, the default content-type is json too (TODO detect it)
