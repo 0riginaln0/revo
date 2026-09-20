@@ -823,7 +823,6 @@ pub const type_name_map: std.StaticStringMap(TypeInfo) = std.StaticStringMap(Typ
     .{ "function", TypeInfo{ .tag = .{ .function = &ANY_FN_SIG } } },
     .{ "atom", TypeInfo{ .tag = .{ .atom = "" } } }, // empty atom payload is the "any atom" sentinel
     .{ "never", TypeInfo{ .tag = .never } },
-    .{ "parked", TypeInfo{ .tag = .any } },
 });
 
 pub fn resolveTypeName(ctx: CheckCtx, name: []const u8) TypeInfo {

@@ -11,7 +11,3 @@ pub declare time.monotonic = fn() -> num
 
 #* returns monotonic clock in nanoseconds since the first call *#
 pub declare time.monotonic_ns = fn() -> num
-
-#* parks current fiber for given milliseconds *#
-pub declare time.sleep = fn(ms: num) -> parked
-

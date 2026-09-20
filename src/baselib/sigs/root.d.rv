@@ -62,7 +62,7 @@ pub declare recv = fn(chan: {:chan, num}) -> any
 pub declare join = fn(handle: {:fiber, num}) -> any
 
 #* sleeps current fiber for given milliseconds *#
-pub declare sleep = fn(ms: num) -> parked
+pub declare sleep = fn(ms: num) -> :parked
 
 #* panics with given message *#
 pub declare panic = fn(args: any...) -> never

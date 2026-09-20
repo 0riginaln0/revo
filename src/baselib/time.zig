@@ -20,12 +20,6 @@ pub const Impl = struct {
         if (vm.runtime.time_mono_base == 0) vm.runtime.time_mono_base = ts.nanoseconds;
         return .data(Value.new.num(ts.nanoseconds - vm.runtime.time_mono_base));
     }
-
-    pub fn sleep(vm: *VM, ms: Args.number) !HostResult {
-        const ms_int: u64 = root.host.numToInt(u64, ms) orelse return .errType(0, "non-negative integer", "number");
-        try vm.schedParkCurrentForSleepMS(ms_int);
-        return .parked();
-    }
 };
 
 const Args = root.host.ArgTypes;

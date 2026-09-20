@@ -1569,7 +1569,7 @@ fn callNonClosureFunction(
                             try self.writeRegisterFast(
                                 base,
                                 instr.c,
-                                revo.Value.new.core(.missing),
+                                revo.Value.new.core(.parked),
                             );
                             return error.Parked;
                         },

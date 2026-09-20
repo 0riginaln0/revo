@@ -13,6 +13,7 @@ pub const CoreAtoms = enum(usize) {
     false,
     // false atoms all above to check faster
     true,
+    parked,
     range,
     ok,
     err,
