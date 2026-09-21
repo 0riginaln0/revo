@@ -64,7 +64,7 @@ pub fn compileLocalBinding(
     const inferred_type = if (type_name) |tn|
         try types_mod.evalTypeExpr(self.check(), tn)
     else
-        self.inferExprType(value);
+        self.annotatedType(value);
 
     try locals.setLocalTypeHint(self, name, inferred_type);
     if (type_name != null) {
@@ -332,7 +332,7 @@ fn storeIdentTop(self: *Compiler, name: []const u8, target: *const Node, hint_no
             return self.fail(.CompileError, target, "reassignment to constant!");
 
         try self.emit(.store_local, slot);
-        const inferred_type = self.inferExprType(hint_node);
+        const inferred_type = self.annotatedType(hint_node);
 
         try locals.setLocalTypeHint(self, name, inferred_type);
     } else if (try locals.resolveUpvalue(self, name)) |slot| {
@@ -402,8 +402,8 @@ fn finishIndexStore(self: *Compiler, object: *const Node, key: *const Node, obj_
 /// OLD is on stack top. folds int rhs into an immediate when both sides
 /// are numeric, else compiles rhs and emits the binop.
 fn computeCompoundNew(self: *Compiler, op: ast.BinOp, target: *const Node, value: *const Node) !void {
-    const left_type = self.inferExprType(target);
-    const right_type = self.inferExprType(value);
+    const left_type = self.annotatedType(target);
+    const right_type = self.annotatedType(value);
     const both_numeric = op != .concat and left_type.tag == .number and right_type.tag == .number;
     if (both_numeric) {
         if (root.immOpFor(op)) |op_imm| {
@@ -446,7 +446,7 @@ fn widenLocalTableHint(self: *Compiler, object: *const Node, field_name: []const
     const name = object.expr.ident;
     const hint = locals.resolveLocalTypeHint(self, name) orelse return;
     if (hint.tag != .table) return;
-    const field_type = self.inferExprType(value);
+    const field_type = self.annotatedType(value);
     const old = if (hint.tag.table.fields) |fs| fs else &[_]types_mod.RecordField{};
     var widened = hint;
     if (types_mod.findFieldIndex(old, field_name)) |i| {

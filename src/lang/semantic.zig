@@ -656,6 +656,11 @@ const SemanticChecker = struct {
         for (fn_expr.params, sig.params) |param, param_type| {
             try self.declare(param.name, param_type, null);
         }
+        // defaults can reference sibling params, so they analyze here where
+        // params are declared; also annotates them for the compiler's default checks
+        for (fn_expr.params) |param| {
+            if (param.default_value) |d| _ = try self.analyzeNode(d);
+        }
         const body_type = try self.analyzeNode(fn_expr.body);
         if (sig.return_type.tag == .any and body_type.tag != .any) {
             sig.return_type = body_type;

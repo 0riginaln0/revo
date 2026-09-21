@@ -451,7 +451,7 @@ pub fn compileMatch(
         const arm_body_base = self.active_registers;
 
         // capture subject type before patternTypeInfo overwrites the hint
-        const pre_narrow_subject_type = self.inferExprType(subject);
+        const pre_narrow_subject_type = self.annotatedType(subject);
 
         //
         // matchers are alternatives:
@@ -944,7 +944,6 @@ fn compileConditional(
     errdefer locals.popScope(self);
     if (else_expr) |branch| {
         try self.compile(branch, true);
-        _ = self.inferExprType(branch);
     } else try self.pushNil();
     locals.popScope(self);
 

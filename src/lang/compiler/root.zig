@@ -127,6 +127,8 @@ pub const Compiler = struct {
     type_annotations: ?*const std.AutoHashMap(*const Node, types.TypeId) = null,
     /// table owning the annotated types, set together with type_annotations
     type_table: ?*const types.TypeTable = null,
+    /// annotatedType misses during this build, temporary totality probe
+    annotation_misses: usize = 0,
     pending_templates: std.ArrayList(revo.TemplateID),
     declared_globals: std.StringHashMap(void),
     current_template: revo.TemplateID = 0,
@@ -193,6 +195,18 @@ pub const Compiler = struct {
             }
         }
         return types.inferExprType(self.check(), node);
+    }
+
+    /// pipeline lowering reads this, never live inference
+    ///   miss means lowering-synthesized or never-analyzed: safe any fallback
+    pub fn annotatedType(self: *Compiler, node: *const Node) types.TypeInfo {
+        if (self.type_annotations) |map| {
+            if (map.get(node)) |id| {
+                if (self.type_table) |table| return table.get(id);
+            }
+            self.annotation_misses += 1;
+        }
+        return .{ .tag = .any };
     }
 
     pub fn inferIdentType(self: *Compiler, name: []const u8) types.TypeInfo {
@@ -749,8 +763,8 @@ pub const Compiler = struct {
                     "union type expression used as a value",
                 );
 
-                const left_type = self.inferExprType(b.left);
-                const right_type = self.inferExprType(b.right);
+                const left_type = self.annotatedType(b.left);
+                const right_type = self.annotatedType(b.right);
 
                 const both_numeric = b.op != .concat and left_type.tag == .number and right_type.tag == .number;
 
@@ -1119,7 +1133,7 @@ pub const Compiler = struct {
         args: []const *Node,
         implicit_self: bool,
     ) InternalCompileError!bool {
-        const object_type = self.inferExprType(field.object);
+        const object_type = self.annotatedType(field.object);
         const module_name = switch (object_type.tag) {
             .string => "string",
             .table => "table",
@@ -1320,7 +1334,7 @@ pub const Compiler = struct {
         for (0..min_args) |i| {
             const expected_type = sig.params[i];
             if (expected_type.tag == .any) continue;
-            const actual_type = self.inferExprType(
+            const actual_type = self.annotatedType(
                 reordered_args[i],
             );
             // type params (generics) are .type_var, skip type check
@@ -1390,7 +1404,12 @@ pub const Compiler = struct {
             for (reordered_args.len..sig.params.len) |idx| {
                 const expected_type = sig.params[idx];
                 if (expected_type.tag == .any or expected_type.tag == .type_var) continue;
-                const actual_type = self.inferExprType(full_args[idx]);
+                // defaults analyze once in semantic; synthesized nones are
+                // always atom literals, no scope needed to type them
+                const actual_type = switch (full_args[idx].expr) {
+                    .atom => |name| types.TypeInfo{ .tag = .{ .atom = name } },
+                    else => self.annotatedType(full_args[idx]),
+                };
                 types.ensureCoercible(expected_type, actual_type) catch |err| switch (err) {
                     error.TypeError => {
                         const expected_str = try type_syntax.formatTypeOpts(self.alloc, expected_type, .{});
@@ -1453,6 +1472,9 @@ pub const Compiler = struct {
             self.runtime_alloc,
         );
         defer temp_compiler.deinit();
+        // comp bodies come from the analyzed tree, so parent annotations hold
+        temp_compiler.type_annotations = self.type_annotations;
+        temp_compiler.type_table = self.type_table;
         temp_compiler.compileRoot(expr) catch |err| switch (err) {
             error.CompileFailed => {
                 const nested_failure = try temp_compiler.finishFailure() orelse unreachable;
@@ -1557,7 +1579,7 @@ pub const Compiler = struct {
             const inferred_type = if (binding.type_name) |tn|
                 try types.evalTypeExpr(self.check(), tn)
             else
-                self.inferExprType(binding.value);
+                self.annotatedType(binding.value);
             try state_mod.setLocalTypeHint(self, name, inferred_type);
 
             if (ast.isDiscardName(name)) return;
@@ -1710,7 +1732,7 @@ pub const Compiler = struct {
         if (return_type) |rt| {
             _ = rt;
         } else {
-            const inferred_type = self.inferExprType(body);
+            const inferred_type = self.annotatedType(body);
             sig.return_type = inferred_type;
 
             // propagate to parent state so callers find it via
