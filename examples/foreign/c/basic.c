@@ -20,9 +20,9 @@ static void print_value(void *vm, RevoValue value) {
   } else if (revo_is_nil(value)) {
     printf("nil\n");
   } else if (revo_is_bool(value)) {
-    printf("bool: %s\n", revo_string_id(value) == ra_true ? "true" : "false");
+    printf("bool: %s\n", revo_bool_val(value) ? "true" : "false");
   } else if (revo_is_atom(value)) {
-    printf("atom id=%llu\n", (unsigned long long)revo_string_id(value));
+    printf("atom id=%llu\n", (unsigned long long)revo_atom_id(value));
   } else {
     printf("tag=%d\n", revo_type(value));
   }

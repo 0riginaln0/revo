@@ -139,6 +139,36 @@ pub fn int(comptime I: type, n: ArgTypes.number) ?I {
     return numToInt(I, n);
 }
 
+/// box a caller-owned ptr as a resource handle
+pub fn resource(vm: *VM, ptr: ?*anyopaque) !Value {
+    return Value.new.resource(try vm.resources.create(ptr));
+}
+
+/// resolve a handle to its ptr; null unless a live resource
+pub fn resourcePtr(vm: *VM, val: Value) ?*anyopaque {
+    const id = val.asResource() orelse return null;
+    const cell = vm.resources.get(id) catch return null;
+    return cell.ptr;
+}
+
+/// fresh metatable with `free` installed as `__gc`, attached to the handle
+/// , share the returned table across handles for named types
+pub fn withGc(vm: *VM, ud: Value, name: []const u8, free: HostFn) !Value {
+    const id = ud.asResource() orelse return error.TypeError;
+    const fn_id = try vm.installHost(name, .{
+        .arity = 1,
+        .param_types = &.{.any},
+        .func = free,
+        .variadic = false,
+        .ret_type = .any,
+    });
+    const mt = try vm.tables.create();
+    const tbl = try vm.tables.get(mt);
+    try tbl.putRawAtom(revo.CoreAtoms.atomId(.__gc), Value.new.function(fn_id), vm);
+    try vm.setResourceMetatable(id, mt);
+    return Value.new.table(mt);
+}
+
 // -- [test] ------------------------------------------------------------------
 
 test bindingsFor {

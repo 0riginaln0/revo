@@ -114,6 +114,7 @@ erevo_program_destroy(prog);
 {{< ref "pub fn erevo_compile(" >}}
 {{< ref "pub fn erevo_run(" >}}
 {{< ref "pub fn erevo_eval(" >}}
+{{< ref "pub fn erevo_program_destroy(" >}}
 
 `erevo_run` writes the result value through the optional `result` pointer
 
@@ -136,7 +137,7 @@ typedef uint64_t RevoValue;
 
 numbers are the raw f64 bits; boxed values pack the type nibble (bits
 51-48) and a payload (low 48 bits) behind a box tag. the payload is an
-intern id,, except `opaque`, whose payload is the low 48 bits of the
+intern id, except `opaque`, whose payload is the low 48 bits of the
 wrapped pointer:
 
 ```c
@@ -146,6 +147,7 @@ typedef enum {
     revo_atom = 9,
     revo_function = 10,
     revo_table = 11,
+    revo_resource = 12,
     revo_opaque = 13,
 } RevoType;
 ```
@@ -172,7 +174,9 @@ double   revo_num_value(RevoValue);
 uint64_t revo_string_id(RevoValue);
 uint64_t revo_atom_id(RevoValue);
 uint64_t revo_table_id(RevoValue);
-void    *revo_opaque_ptr(RevoValue);  // null if not opaque (see below)
+uint64_t revo_function_id(RevoValue);
+void    *revo_opaque_ptr(RevoValue);      // null if not opaque (see below)
+void    *revo_resource_ptr(void*, RevoValue);  // null unless resource (see below)
 int      revo_bool_val(RevoValue);   // 0 or 1, 0 if not bool
 int      revo_type(RevoValue);       // the RevoType of the value
 ```
@@ -186,6 +190,7 @@ int revo_is_string(RevoValue);
 int revo_is_atom(RevoValue);
 int revo_is_function(RevoValue);
 int revo_is_table(RevoValue);
+int revo_is_resource(RevoValue);
 int revo_is_opaque(RevoValue);
 int revo_is_bool(RevoValue);
 ```
@@ -233,30 +238,31 @@ explicit `free`; revo is never the owner:
 ```c
 typedef struct { double total; } Total;
 
-void total_new(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
+int total_new(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
     (void)argc; (void)argv;
     Total *t = malloc(sizeof(Total));
-    if (!t) { *out = revo_nil(); return; }
+    if (!t) return revo_c_err_other(vm, "out of memory");
     t->total = 0;
     *out = revo_opaque_new(t);
+    return REVO_OK;
 }
 
-void total_add(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
-    (void)vm;
-    if (argc < 2 || !revo_is_opaque(argv[0]) || !revo_is_number(argv[1])) {
-        *out = revo_nil();
-        return;
-    }
+int total_add(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
+    if (argc < 2) return revo_c_err_arity(vm, argc, 2);
+    if (!revo_is_opaque(argv[0])) return revo_c_err_type(vm, 0, "opaque", argv[0]);
+    if (!revo_is_number(argv[1])) return revo_c_err_type(vm, 1, "number", argv[1]);
     Total *t = revo_opaque_ptr(argv[0]);
-    if (!t) { *out = revo_nil(); return; }
+    if (!t) return revo_c_err_other(vm, "null handle");
     t->total += revo_num_value(argv[1]);
     *out = revo_num(t->total);
+    return REVO_OK;
 }
 
-void total_free(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
-    (void)vm; (void)argc;
+int total_free(void *vm, size_t argc, RevoValue *argv, RevoValue *out) {
+    (void)vm;
     if (argc >= 1 && revo_is_opaque(argv[0])) free(revo_opaque_ptr(argv[0]));
     *out = revo_nil();
+    return REVO_OK;
 }
 ```
 
@@ -370,8 +376,15 @@ uint64_t len = revo_string_length(vm, sid);
 `revo_string_data` returns a pointer to the internal string buffer
 (valid until the string is gc'd) and is **not** nul-terminated!!! use
 `revo_string_length` for the byte count, copy when you need a c string
+
+atoms intern the same way (`revo_intern_atom`); every `_cstr` wrapper
+(`revo_intern_cstr`, `revo_intern_atom_cstr`, `revo_table_set_name_cstr`,
+`revo_table_get_name_cstr`, plus the globals pair below) calls strlen
+internally
 {{< ref "pub fn revo_intern(" >}}
+{{< ref "pub fn revo_intern_atom(" >}}
 {{< ref "pub fn revo_string_data(" >}}
+{{< ref "pub fn revo_string_length(" >}}
 
 ### calling revo functions from c
 
@@ -385,6 +398,16 @@ int ok = revo_call(vm, fn_val, 2, args, &result);
 
 returns 0 if the value wasn't callable or the call threw. max 16 args.
 {{< ref "pub fn revo_call(" >}}
+
+to expose a c function without a `.so`, wrap the pointer (name borrowed,
+keep it static):
+
+```c
+RevoValue fn_val = revo_cfunc_new(vm, my_fn, "my_fn", 5);
+```
+
+nil on null fn or allocation failure
+{{< ref "pub fn revo_cfunc_new(" >}}
 
 ### globals
 
@@ -425,11 +448,16 @@ revo_table_get_idx(vm, arr, 1, &v);   // 2.0, false when out of range
 
 uint64_t n = revo_table_len(vm, t);    // total entries
 uint64_t a = revo_table_alen(vm, arr); // array part only
+
+bool gone = revo_table_remove(vm, t, key);  // true when something was there
 ```
 
 {{< ref "pub fn revo_table_create(" >}}
 {{< ref "pub fn revo_table_set(" >}}
 {{< ref "pub fn revo_table_get(" >}}
+{{< ref "pub fn revo_table_remove(" >}}
+{{< ref "pub fn revo_table_len(" >}}
+{{< ref "pub fn revo_table_from_items(" >}}
 
 ### results
 
@@ -449,7 +477,10 @@ if (revo_is_ok(vm, val)) {
 ```
 
 {{< ref "pub fn revo_ok(" >}}
+{{< ref "pub fn revo_err(" >}}
 {{< ref "pub fn revo_is_ok(" >}}
+{{< ref "pub fn revo_is_err(" >}}
+{{< ref "pub fn revo_ok_value(" >}}
 
 ### writing c extensions
 
@@ -515,7 +546,7 @@ the import's name
 
 the last row is an all-null terminator
 
-a worked-through example is at {{< ref "examples/c/extension.c" >}}, rebuild the `.so` after editing
+a worked-through example is at {{< ref "examples/foreign/c/extension.c" >}}, rebuild the `.so` after editing
 
 **data conversion**
 
@@ -599,5 +630,5 @@ cc -shared -fPIC -o extension.dylib extension.c -I/path/to/zig-out/include
 - `-fPIC` for shared libraries
 - don't store `RevoValue` values past the call; intern or copy what
   you need
-- persistent native state is a `revo_opaque_new` ptr passed as context;
-  otherwise a revo table
+- persistent native state is a `revo_resource_new` handle passed as
+  context (`revo_opaque_new` for borrows); otherwise a revo table

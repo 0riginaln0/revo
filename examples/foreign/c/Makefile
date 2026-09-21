@@ -4,8 +4,11 @@ LIB = ../../../zig-out/lib/liberevo.a
 UNAME := $(shell uname -s)
 
 # for my specific configuration, this is the only way to make it work on osx15.5
+# -undefined dynamic_lookup is a darwin-only flag: the .so resolves
+# revo_* against the host exe at dlopen time
 ifeq ($(UNAME), Darwin)
 CFLAGS += -mmacosx-version-min=15.5
+EXT_LDFLAGS = -undefined dynamic_lookup
 endif
 
 all: basic extension
@@ -17,7 +20,7 @@ basic: basic.c $(LIB)
 	$(CC) $(CFLAGS) $< $(LIB) -o $@
 
 extension: extension.c
-	$(CC) $(CFLAGS) -shared -fPIC -undefined dynamic_lookup $< -o extension.so
+	$(CC) $(CFLAGS) -shared -fPIC $(EXT_LDFLAGS) $< -o extension.so
 
 run: basic
 	./basic
