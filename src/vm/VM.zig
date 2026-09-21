@@ -185,6 +185,7 @@ builtin_globals: UserGlobals,
 loaded_specs: []const []const revo.baselib.specs.FnSpec = &.{},
 tables: TablePool,
 callable: FunctionPool,
+resources: ResourcePool,
 strings: Interner,
 atoms: std.StringHashMap(mem.AtomID),
 debug: DebugOptions = .{},
@@ -238,6 +239,7 @@ const MarkItem = union(enum) {
     data: Value,
     table: mem.TableID,
     function: mem.FunctionID,
+    resource: mem.ResourceID,
     upvalue: root.callable.UpvalueID,
 };
 
@@ -281,6 +283,8 @@ pub fn init(runtime: revo.Runtime) !VM {
     errdefer tables.deinit();
     var callable = try FunctionPool.init(rt.alloc);
     errdefer callable.deinit();
+    var resources = try ResourcePool.init(rt.alloc);
+    errdefer resources.deinit();
     var strings = try Interner.init(rt.alloc);
     errdefer strings.deinit();
     var package_path = try std.ArrayList([]const u8).initCapacity(rt.alloc, 4);
@@ -299,6 +303,7 @@ pub fn init(runtime: revo.Runtime) !VM {
         .builtin_globals = UserGlobals.init(rt.alloc),
         .tables = tables,
         .callable = callable,
+        .resources = resources,
         .strings = strings,
         .atoms = std.StringHashMap(mem.AtomID).init(rt.alloc),
         .import_cache = ImportCache.init(rt.alloc),
@@ -430,6 +435,16 @@ pub fn deinit(self: *VM) void {
     }
     self.gc_finalizers.deinit();
     self.c_refs.deinit();
+    // run pending resource __gc while tables are alive
+    {
+        var id = self.resources.first;
+        while (id != root.alloc_pool.end) {
+            const nxt = self.resources.next.items[id];
+            _ = self.runResourceGc(id);
+            id = nxt;
+        }
+    }
+    self.resources.deinit();
     self.sched.deinit();
     self.tables.deinit();
     self.callable.deinit();
@@ -469,6 +484,17 @@ pub fn registerFinalizer(self: *VM, table_id: mem.TableID, func: Value) !void {
 
 pub fn unregisterFinalizer(self: *VM, table_id: mem.TableID) void {
     _ = self.gc_finalizers.remove(table_id);
+}
+
+/// run a handle's metatable `__gc` on the handle; false when none
+pub fn runResourceGc(self: *VM, id: mem.ResourceID) bool {
+    const cell = self.resources.get(id) catch return false;
+    const mt = cell.metatable orelse return false;
+    const mt_tbl = self.tables.get(mt) catch return false;
+    const func = mt_tbl.getRawAtom(revo.CoreAtoms.atomId(.__gc), self) orelse return false;
+    if (func.asFunction() == null) return false;
+    _ = self.callFunctionParts(func, null, &.{Value.new.resource(id)}, null) catch {};
+    return true;
 }
 
 /// true when the table has a finalizer pending
@@ -1311,6 +1337,14 @@ pub fn getMetatableId(
                 )
             ];
         },
+        .resource => blk: {
+            const id = val.asResource().?;
+            if (self.resources.get(id)) |cell| {
+                if (cell.metatable) |mt_id|
+                    break :blk mt_id;
+            } else |_| {}
+            break :blk self.metatables[@intFromEnum(mem.ValueTag.resource)];
+        },
         else => |e| self.metatables[@intFromEnum(e)],
     };
 }
@@ -2129,12 +2163,14 @@ pub const opcode = root.opcode;
 const Instruction = opcode.Instruction;
 pub const Interner = root.interner.Interner;
 const TablePool = root.table.TablePool;
+const ResourcePool = root.resource.ResourcePool;
 pub const GlobalID = mem.StringID;
 pub const ChannelID = mem.TableID;
 pub const resolveField = lookup.resolveField;
 pub const FieldLookup = lookup.FieldLookup;
 pub const setMetatable = lookup.setMetatable;
 pub const setTableMetatable = lookup.setTableMetatable;
+pub const setResourceMetatable = lookup.setResourceMetatable;
 pub const runImportedModule = run.runImportedModule;
 const Scheduler = @import("scheduler.zig");
 const vm_dispatch = @import("dispatch.zig");

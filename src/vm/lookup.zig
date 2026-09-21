@@ -153,6 +153,7 @@ fn resolveIndexDepth(self: *VM, object: Value, key: Value, indexer: Value, depth
 pub fn setMetatable(self: *VM, val: Value, mt: ?mem.TableID) !void {
     switch (val.tag()) {
         .table => try self.setTableMetatable(val.asTable().?, mt),
+        .resource => try self.setResourceMetatable(val.asResource().?, mt),
         .number => self.metatables[@intFromEnum(mem.ValueTag.number)] = mt,
         else => self.metatables[@intFromEnum(val.tag())] = mt,
     }
@@ -164,5 +165,14 @@ pub fn setTableMetatable(self: *VM, id: mem.TableID, mt: ?mem.TableID) !void {
         tbl_ref.metatable = mt;
     } else {
         self.metatables[@intFromEnum(mem.ValueTag.table)] = mt;
+    }
+}
+
+pub fn setResourceMetatable(self: *VM, id: mem.ResourceID, mt: ?mem.TableID) !void {
+    if (self.resources.isValid(id)) {
+        const cell = try self.resources.get(id);
+        cell.metatable = mt;
+    } else {
+        self.metatables[@intFromEnum(mem.ValueTag.resource)] = mt;
     }
 }

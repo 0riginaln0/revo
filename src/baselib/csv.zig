@@ -104,6 +104,7 @@ fn writeCsvValue(data: Value, vm: *VM, writer: *Writer, nested: bool) anyerror!v
         },
         .function => return error.UnsupportedCsvValue,
         .@"opaque" => return error.UnsupportedCsvValue,
+        .resource => return error.UnsupportedCsvValue,
     }
 }
 

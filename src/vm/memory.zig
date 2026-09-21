@@ -8,6 +8,7 @@ pub const StringID = usize;
 pub const AtomID = usize;
 pub const FunctionID = usize;
 pub const TableID = usize;
+pub const ResourceID = usize;
 
 pub const ValueTag = enum(u4) {
     // stored tag nibble is bits 51-48; real values must have bit 51 set
@@ -18,6 +19,7 @@ pub const ValueTag = enum(u4) {
     atom = 9,
     function = 10,
     table = 11,
+    resource = 12,
     @"opaque" = 13,
     // latter numbers reserved for subtyping/opt
     //   (lua likes for threads to be their own types
@@ -72,6 +74,9 @@ pub const Value = extern struct {
         pub inline fn table(id: TableID) Value {
             return Value.boxed(.table, id);
         }
+        pub inline fn resource(id: ResourceID) Value {
+            return Value.boxed(.resource, id);
+        }
         pub inline fn @"opaque"(ptr: ?*anyopaque) Value {
             return Value.boxed(.@"opaque", @intFromPtr(ptr));
         }
@@ -115,6 +120,9 @@ pub const Value = extern struct {
     }
     pub inline fn isTable(self: Value) bool {
         return self.tag() == .table;
+    }
+    pub inline fn isResource(self: Value) bool {
+        return self.tag() == .resource;
     }
     pub inline fn isOpaque(self: Value) bool {
         return self.tag() == .@"opaque";
@@ -165,6 +173,11 @@ pub const Value = extern struct {
     }
     pub inline fn asTable(self: Value) ?TableID {
         if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.table))
+            return @intCast(self.bits & PAYLOAD_MASK);
+        return null;
+    }
+    pub inline fn asResource(self: Value) ?ResourceID {
+        if ((self.bits & BOX_MASK) == BOX_TAG and ((self.bits >> TAG_SHIFT) & TAG_MASK) == @intFromEnum(ValueTag.resource))
             return @intCast(self.bits & PAYLOAD_MASK);
         return null;
     }

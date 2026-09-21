@@ -185,6 +185,7 @@ pub inline fn evalCachedFast(
                         );
                     },
                     .@"opaque" => lhs.asOpaque().? == rhs.asOpaque().?,
+                    .resource => lhs.asResource().? == rhs.asResource().?,
                     else => unreachable,
                 };
                 VM.regWrite(slots, base, instr.a, Value.new.boolean(if (op == .eq) is_eq else !is_eq));

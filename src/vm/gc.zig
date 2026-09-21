@@ -29,26 +29,38 @@ pub fn maybeCollectGarbage(self: *VM) void {
     processMarkStack(self);
 
     const finalizer_pending = collectFinalizers(self);
+    const resource_pending = collectResourceGc(self);
 
     self.tables.sweep();
     self.callable.sweep();
+    self.resources.sweep();
     self.strings.sweep();
 
-    if (finalizer_pending) |pending| {
+    if (finalizer_pending != null or resource_pending != null) {
         self.gc_in_finalizer = true;
         defer self.gc_in_finalizer = false;
-        var pending_list = pending;
-        for (pending_list.items) |id| {
-            const entry = self.gc_finalizers.fetchRemove(id) orelse continue;
-            const table_val = revo.Value.new.table(id);
-            _ = self.callFunctionParts(entry.value, null, &.{table_val}, null) catch {};
+        if (finalizer_pending) |pending| {
+            var pending_list = pending;
+            defer pending_list.deinit(self.runtime.alloc);
+            for (pending_list.items) |id| {
+                const entry = self.gc_finalizers.fetchRemove(id) orelse continue;
+                const table_val = revo.Value.new.table(id);
+                _ = self.callFunctionParts(entry.value, null, &.{table_val}, null) catch {};
+            }
         }
-        pending_list.deinit(self.runtime.alloc);
+        if (resource_pending) |pending| {
+            var pending_list = pending;
+            defer pending_list.deinit(self.runtime.alloc);
+            for (pending_list.items) |p| {
+                _ = self.callFunctionParts(p.func, null, &.{revo.Value.new.resource(p.id)}, null) catch {};
+            }
+        }
     }
 
     self.gc_pending = false;
     const live_bytes = self.tables.bytes() +
         self.callable.bytes() +
+        self.resources.bytes() +
         self.strings.bytes();
 
     self.gc_threshold = @max(512 * 1024, live_bytes * self.gc_pause_factor);
@@ -84,6 +96,43 @@ fn collectFinalizers(self: *VM) ?std.ArrayList(revo.memory.TableID) {
     return pending;
 }
 
+/// dead handles with a `__gc` metatable get queued & re-marked;
+/// one-shot, the field clears at queue time. re-arm inside `__gc`
+/// with a fresh metatable. light `opaque` never lands here:
+/// no cell, no metatable, no `__gc`
+fn collectResourceGc(self: *VM) ?std.ArrayList(ResourceGcPending) {
+    const alloc = self.runtime.alloc;
+    var pending: ?std.ArrayList(ResourceGcPending) = null;
+    var id = self.resources.first;
+    while (id != revo.vm.alloc_pool.end) {
+        const nxt = self.resources.next.items[id];
+        if (self.resources.resources.items[id]) |cell| {
+            if (!self.resources.marks.isSet(id)) {
+                if (cell.metatable) |mt| {
+                    if (self.tables.get(mt)) |mt_tbl| {
+                        if (mt_tbl.getRawAtom(revo.CoreAtoms.atomId(.__gc), self)) |func| {
+                            if (func.asFunction() != null) {
+                                if (pending == null)
+                                    pending = std.ArrayList(ResourceGcPending).initCapacity(alloc, 4) catch @panic("OOM in GC");
+                                pending.?.append(alloc, .{ .id = id, .func = func }) catch @panic("OOM in GC");
+                                cell.metatable = null;
+                                self.resources.marks.set(id);
+                            }
+                        }
+                    } else |_| {}
+                }
+            }
+        }
+        id = nxt;
+    }
+    return pending;
+}
+
+const ResourceGcPending = struct {
+    id: revo.memory.ResourceID,
+    func: revo.Value,
+};
+
 pub fn processMarkStack(self: *VM) void {
     while (self.gc_mark_stack.pop()) |item| {
         switch (item) {
@@ -118,6 +167,11 @@ pub fn processMarkStack(self: *VM) void {
                 const upvalue = self.callable.upvalues.items[id] orelse continue;
                 if (upvalue.open_index == null)
                     pushMark(self, upvalue.closed);
+            },
+            .resource => |id| {
+                const cell = self.resources.get(id) catch continue;
+                if (cell.metatable) |mt|
+                    self.tables.mark(mt, self);
             },
         }
     }
@@ -184,7 +238,7 @@ pub inline fn markRoots(self: *VM) void {
 
 pub inline fn pushMark(self: *VM, data: revo.Value) void {
     switch (data.tag()) {
-        .string, .table, .function => {
+        .string, .table, .function, .resource => {
             self.gc_mark_stack.append(self.runtime.alloc, .{ .data = data }) catch @panic("OOM in GC marking");
         },
         else => {},
@@ -212,6 +266,10 @@ pub fn markValue(self: *VM, data: revo.Value) void {
         ),
         .function => self.callable.mark(
             data.asFunction().?,
+            self,
+        ),
+        .resource => self.resources.mark(
+            data.asResource().?,
             self,
         ),
         else => {},

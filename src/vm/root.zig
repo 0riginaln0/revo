@@ -25,6 +25,8 @@ pub const CoreAtoms = @import("CoreAtoms.zig").CoreAtoms;
 pub const isFalse = @import("memory.zig").isFalse;
 pub const Scheduler = @import("scheduler.zig").Scheduler;
 pub const table = @import("table.zig");
+pub const resource = @import("resource.zig");
+pub const alloc_pool = @import("alloc_pool.zig");
 pub const tests = @import("tests.zig");
 pub const VM = @import("VM.zig").VM;
 
@@ -39,6 +41,7 @@ test {
     _ = @import("interner.zig");
     _ = @import("memory.zig");
     _ = @import("run.zig");
+    _ = @import("resource.zig");
     _ = @import("opcode.zig");
     _ = @import("perf.zig");
     _ = @import("table.zig");

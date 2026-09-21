@@ -72,6 +72,7 @@ const JsonValue = struct {
             .table => try writeTableJson(vm, self.data.asTable().?, jws),
             .function => return error.UnsupportedJsonValue,
             .@"opaque" => return error.UnsupportedJsonValue,
+            .resource => return error.UnsupportedJsonValue,
         };
     }
 };

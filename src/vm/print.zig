@@ -153,6 +153,7 @@ pub fn writeValue(self: Value, writer: *std.Io.Writer, vm: *revo.VM, mode: Value
             tbl.write(writer, vm, mode) catch try writer.writeAll("<table-unprintable>");
         },
         .@"opaque" => try writer.print("<opaque {*}>", .{self.asOpaque().?}),
+        .resource => try writer.print("<resource #{d}>", .{self.asResource().?}),
     }
 }
 

@@ -77,6 +77,7 @@ fn serializeValue(buffer: *std.ArrayList(u8), allocator: Allocator, vm: *VM, ite
         .function => try writeIntLE(buffer, allocator, u64, item.asFunction().?),
         .table => try writeIntLE(buffer, allocator, u64, item.asTable().?),
         .@"opaque" => unreachable,
+        .resource => unreachable,
     }
 }
 
