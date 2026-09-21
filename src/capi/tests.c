@@ -570,6 +570,114 @@ int main(int argc, char **argv) {
     revo_unref(vm, fin_ref);
   }
 
+  T("revo_type resource tag") {
+    int marker = 5;
+    RevoValue e = revo_resource_new(vm, &marker);
+    assert(revo_type(e) == revo_resource);
+    assert(revo_resource == 12);
+    assert(revo_is_resource(e));
+    assert(!revo_is_opaque(e));
+    assert(!revo_is_table(e));
+    assert(revo_resource_ptr(vm, e) == &marker);
+    assert(revo_resource_ptr(vm, revo_num(1.0)) == NULL);
+    assert(!revo_is_resource(revo_num(1.0)));
+  }
+
+  T("resource metatables attach and read back") {
+    int marker = 6;
+    RevoValue e = revo_resource_new(vm, &marker);
+    RevoValue mt = revo_table_create(vm);
+    RevoValue got;
+    assert(!revo_resource_getmetatable(vm, e, &got));
+    assert(revo_resource_setmetatable(vm, e, mt));
+    assert(revo_resource_getmetatable(vm, e, &got));
+    assert(revo_is_table(got));
+    assert(revo_table_id(got) == revo_table_id(mt));
+    assert(!revo_resource_setmetatable(vm, revo_num(1.0), mt));
+    assert(!revo_resource_setmetatable(vm, e, revo_num(1.0)));
+    assert(revo_resource_setmetatable(vm, e, revo_nil()));
+    assert(!revo_resource_getmetatable(vm, e, &got));
+  }
+
+  T("resource methods dispatch through the metatable") {
+    ok = erevo_eval(vm, "test", "fn(self) 42", &val);
+    check(ok);
+    uint64_t who_ref = revo_ref(vm, val);
+    assert(who_ref != 0);
+
+    RevoValue methods = revo_table_create(vm);
+    uint64_t methods_ref = revo_ref(vm, methods);
+    assert(methods_ref != 0);
+    assert(revo_table_set_name(vm, methods, "who", 3, val));
+
+    RevoValue emt = revo_table_create(vm);
+    uint64_t emt_ref = revo_ref(vm, emt);
+    assert(emt_ref != 0);
+    assert(revo_table_set_name(vm, emt, "__index", 7, methods));
+
+    int mstate = 3;
+    RevoValue mu = revo_resource_new(vm, &mstate);
+    uint64_t mu_ref = revo_ref(vm, mu);
+    assert(mu_ref != 0);
+    assert(revo_resource_setmetatable(vm, mu, emt));
+
+    ok = erevo_eval(vm, "test", "fn(u) u:who()", &val);
+    check(ok);
+    RevoValue margs[1] = {mu};
+    call_ok = revo_call(vm, val, 1, margs, &call_result);
+    assert(call_ok);
+    assert(revo_is_number(call_result));
+    assert(fabs(revo_num_value(call_result) - 42.0) < 1e-12);
+
+    revo_unref(vm, who_ref);
+    revo_unref(vm, methods_ref);
+    revo_unref(vm, emt_ref);
+    revo_unref(vm, mu_ref);
+  }
+
+  T("resource __gc runs once on sweep") {
+    ok = erevo_eval(vm, "test", "fn(flag) fn(t) do flag.hit = flag.hit + 1 t end", &val);
+    check(ok);
+    RevoValue eflag = revo_table_create(vm);
+    assert(revo_table_set_name(vm, eflag, "hit", 3, revo_num(0.0)));
+    RevoValue gargs[1] = {eflag};
+    RevoValue gc_fn;
+    call_ok = revo_call(vm, val, 1, gargs, &gc_fn);
+    assert(call_ok);
+    uint64_t gc_ref = revo_ref(vm, gc_fn);
+    assert(gc_ref != 0);
+    uint64_t eflag_ref = revo_ref(vm, eflag);
+    assert(eflag_ref != 0);
+
+    RevoValue emt = revo_table_create(vm);
+    uint64_t emt_ref = revo_ref(vm, emt);
+    assert(emt_ref != 0);
+    assert(revo_table_set_name(vm, emt, "__gc", 4, gc_fn));
+
+    int estate = 9;
+    RevoValue doom = revo_resource_new(vm, &estate);
+    assert(revo_resource_setmetatable(vm, doom, emt));
+
+    for (int i = 0; i < 5000; i++) {
+      ok = erevo_eval(vm, "test", "{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}", &tval);
+      check(ok);
+    }
+    assert(revo_table_get_name(vm, eflag, "hit", 3, &tval));
+    assert(fabs(revo_num_value(tval) - 1.0) < 1e-12);
+
+    // one-shot: second storm, no re-run
+    for (int i = 0; i < 5000; i++) {
+      ok = erevo_eval(vm, "test", "{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}", &tval);
+      check(ok);
+    }
+    assert(revo_table_get_name(vm, eflag, "hit", 3, &tval));
+    assert(fabs(revo_num_value(tval) - 1.0) < 1e-12);
+
+    revo_unref(vm, gc_ref);
+    revo_unref(vm, eflag_ref);
+    revo_unref(vm, emt_ref);
+  }
+
   //
   // error handling
   //

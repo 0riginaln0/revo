@@ -379,3 +379,106 @@ test "vm gc stress test allocates many objects" {
     _ = try vm.tables.get(table_ids.items[0]);
     try testing.expect(vm.strings.contains(string_ids.items[0]));
 }
+
+var res_gc_hits: usize = 0;
+var res_gc_saw_resource: bool = false;
+
+fn resGcFn(args: []const Value, _: *VM) anyerror!revo.baselib.host.HostResult {
+    res_gc_hits += 1;
+    res_gc_saw_resource = args.len == 1 and args[0].isResource();
+    return .data(Value.new.nil());
+}
+
+fn resGcMetatable(vm: *VM) !revo.memory.TableID {
+    const gc_fn_id = try vm.installHost("__res_gc", .{
+        .arity = 1,
+        .param_types = &.{.any},
+        .func = resGcFn,
+        .variadic = false,
+        .ret_type = .any,
+    });
+    const mt = try vm.tables.create();
+    const tbl = try vm.tables.get(mt);
+    try tbl.putRawAtom(revo.CoreAtoms.atomId(.__gc), Value.new.function(gc_fn_id), vm);
+    return mt;
+}
+
+test "resource cells survive while referenced" {
+    var vm = try VM.init(vt_runtime());
+    defer vm.deinit();
+
+    var marker: u8 = 7;
+    const id = try vm.resources.create(@ptrCast(&marker));
+    try vm.push(Value.new.resource(id));
+    defer _ = vm.pop() catch {};
+
+    triggerGc(&vm);
+
+    try testing.expect(vm.resources.isValid(id));
+    const cell = try vm.resources.get(id);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&marker)), cell.ptr);
+    try testing.expectEqual(@as(?revo.memory.TableID, null), cell.metatable);
+}
+
+test "resource metatables resolve through getMetatableId" {
+    var vm = try VM.init(vt_runtime());
+    defer vm.deinit();
+
+    var marker: u8 = 7;
+    const id = try vm.resources.create(@ptrCast(&marker));
+    try vm.push(Value.new.resource(id));
+    defer _ = vm.pop() catch {};
+    const mt = try vm.tables.create();
+    try vm.push(Value.new.table(mt));
+    defer _ = vm.pop() catch {};
+
+    try testing.expectEqual(@as(?revo.memory.TableID, null), try vm.getMetatableId(Value.new.resource(id)));
+    try vm.setResourceMetatable(id, mt);
+    try testing.expectEqual(@as(?revo.memory.TableID, mt), try vm.getMetatableId(Value.new.resource(id)));
+}
+
+test "resource __gc runs once with the handle" {
+    var vm = try VM.init(vt_runtime());
+    defer vm.deinit();
+    res_gc_hits = 0;
+    res_gc_saw_resource = false;
+
+    const mt = try resGcMetatable(&vm);
+    try vm.push(Value.new.table(mt));
+    defer _ = vm.pop() catch {};
+
+    var marker: u8 = 7;
+    const id = try vm.resources.create(@ptrCast(&marker));
+    try vm.setResourceMetatable(id, mt);
+
+    triggerGc(&vm);
+    try testing.expectEqual(@as(usize, 1), res_gc_hits);
+    try testing.expect(res_gc_saw_resource);
+
+    // one-shot: no re-run, swept next pass
+    triggerGc(&vm);
+    try testing.expectEqual(@as(usize, 1), res_gc_hits);
+    try testing.expect(!vm.resources.isValid(id));
+}
+
+test "light opaque never finalizes; bare resource sweeps silent" {
+    var vm = try VM.init(vt_runtime());
+    defer vm.deinit();
+    res_gc_hits = 0;
+
+    const mt = try resGcMetatable(&vm);
+    try vm.push(Value.new.table(mt));
+    defer _ = vm.pop() catch {};
+
+    // __gc on the shared light slot stays dead
+    var marker: u8 = 7;
+    try vm.setMetatable(Value.new.@"opaque"(@ptrCast(&marker)), mt);
+
+    const bare = try vm.resources.create(@ptrCast(&marker));
+
+    triggerGc(&vm);
+    triggerGc(&vm);
+
+    try testing.expectEqual(@as(usize, 0), res_gc_hits);
+    try testing.expect(!vm.resources.isValid(bare));
+}
