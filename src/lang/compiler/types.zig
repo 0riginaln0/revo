@@ -296,6 +296,9 @@ pub const CheckCtx = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
     alloc: std.mem.Allocator,
+    /// annotations to consult before live inference, set only by Compiler
+    ///   semantic and import scopes analyze with null and infer everything
+    annotations: ?Annotations = null,
 
     pub const VTable = struct {
         isTypeParam: *const fn (ptr: *anyopaque, name: []const u8) bool,
@@ -973,6 +976,13 @@ pub fn resolveTypeName(ctx: CheckCtx, name: []const u8) TypeInfo {
 }
 
 pub fn inferExprType(ctx: CheckCtx, node: *const ast.Node) TypeInfo {
+    // annotated nodes answer from the table
+    //   everything else infers live
+    //   only Compiler sets annotations
+    //   , so producer scopes never hit this
+    if (ctx.annotations) |ann| {
+        if (ann.map.get(node)) |id| return ann.table.get(id);
+    }
     return switch (node.expr) {
         .number => .{ .tag = .number },
         .string, .multiline_string => .{ .tag = .string },

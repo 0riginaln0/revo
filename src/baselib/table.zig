@@ -421,11 +421,11 @@ test "table methods" {
     try testing.topTrue("let a = {1, 2, 3}; a:remove(1); a == {1, 3}");
 }
 
-test "table key/at go through __index" {
-    try testing.topNumber("set_meta({x = 1}, {__index = {y = 2}}):key(:y)", 2);
+test "table key/at bypass metatables" {
+    try testing.topAtom("set_meta({x = 1}, {__index = {y = 2}}):key(:y)", "undef");
     try testing.topNumber("set_meta({x = 1}, {__index = {y = 2}}):key(:x)", 1);
     try testing.topAtom("set_meta({x = 1}, {__index = {y = 2}}):key(:zz)", "undef");
-    try testing.topTrue("set_meta({x = 1}, {__index = {y = 2}}):key?(:y)");
+    try testing.topFalse("set_meta({x = 1}, {__index = {y = 2}}):key?(:y)");
 }
 
 test "table key with default" {

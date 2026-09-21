@@ -184,8 +184,16 @@ pub const Compiler = struct {
     }
 
     // the CheckCtx scope for types.zig inference and eval
+    //   has annotations so nested inference reads the table, not live scope
+    //   const-cast is fine in practice,,, CheckCtx never writes the map
     pub fn check(self: *Compiler) types.CheckCtx {
-        return types.CheckCtx.init(self, self.alloc);
+        var ctx = types.CheckCtx.init(self, self.alloc);
+        if (self.type_annotations) |map| {
+            if (self.type_table) |table| {
+                ctx.annotations = .{ .map = @constCast(map), .table = @constCast(table) };
+            }
+        }
+        return ctx;
     }
 
     pub fn inferExprType(self: *Compiler, node: *const Node) types.TypeInfo {
