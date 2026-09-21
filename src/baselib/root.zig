@@ -722,9 +722,9 @@ pub fn cwd(args: []const Value, vm: *VM) !host.HostResult {
     return .data(try vm.ownValueString(cwd_path));
 }
 
-pub fn exit(args: []const Value, vm: *VM) noreturn {
-    _ = vm;
-    const n = args[0].asNumOpt().?;
+pub fn exit(args: []const Value, vm: *VM) !host.HostResult {
+    if (args.len != 1) return .errArity(args.len, 1);
+    const n = args[0].asNumOpt() orelse return .errType(0, "number", typeof(args[0], vm));
     const status: u8 = host.numToInt(u8, n) orelse 255;
     std.process.exit(status);
 }
