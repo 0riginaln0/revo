@@ -9,7 +9,7 @@ pub const Impl = struct {
         const idx = root.host.numToInt(isize, index) orelse return .errType(1, "integer num", typeof(Value.new.num(index), vm));
         if (idx < 0) return .data(revo.Value.new.core(.undef));
         const f: f64 = @floatFromInt(idx);
-        return .data(try t.get(Value.new.num(f), vm) orelse revo.Value.new.core(.undef));
+        return .data(t.getRaw(Value.new.num(f), vm) orelse revo.Value.new.core(.undef));
     }
 
     pub fn @"at?"(vm: *VM, self: Args.table, index: Args.number) !HostResult {
@@ -17,17 +17,26 @@ pub const Impl = struct {
         const idx = root.host.numToInt(isize, index) orelse return ._bool(false);
         if (idx < 0) return ._bool(false);
         const f: f64 = @floatFromInt(idx);
-        return ._bool(try t.get(Value.new.num(f), vm) != null);
+        return ._bool(t.getRaw(Value.new.num(f), vm) != null);
     }
 
     pub fn key(vm: *VM, self: Args.table, k: Args.any) !HostResult {
         const t = try vm.tables.get(@intFromEnum(self));
-        return .data(try t.get(k, vm) orelse revo.Value.new.core(.undef));
+        return .data(t.getRaw(k, vm) orelse revo.Value.new.core(.undef));
     }
 
     pub fn @"key?"(vm: *VM, self: Args.table, k: Args.any) !HostResult {
         const t = try vm.tables.get(@intFromEnum(self));
-        return ._bool(try t.get(k, vm) != null);
+        return ._bool(t.getRaw(k, vm) != null);
+    }
+
+    pub fn last(vm: *VM, self: Args.table) !HostResult {
+        const t = try vm.tables.get(@intFromEnum(self));
+
+        return .data(if (t.array.items.len == 0)
+            Value.new.core(.undef)
+        else
+            t.array.items[t.array.items.len - 1]);
     }
 
     pub fn rawset(vm: *VM, self: Args.table, k: Args.any, val: Args.any) !HostResult {

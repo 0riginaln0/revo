@@ -9,24 +9,27 @@ returns :undef if key missing
 pub declare table.rawget = fn(self: table, key: any) -> any | :undef
 
 #*
-gets array element at 0-based index, metatable-aware
+gets array element at 0-based index, metatable-ignoring
 returns :undef when out of range
 *#
 pub declare table.at<T> = fn(self: table<T>, index: num) -> T | :undef
 
 #*
-whether a 0-based index holds an array element, metatable-aware
+whether a 0-based index holds an array element, metatable-ignoring
 *#
 pub declare table.at? = fn(self: table, index: num) -> bool
 
 #*
-gets map value, metatable-aware
+gets map value, metatable-ignoring
 returns :undef if key missing
 *#
 pub declare table.key<V> = fn(self: table<V>, key: any) -> V | :undef
 
+#* the array part's last element *#
+pub declare table.last = fn(self: table) -> table
+
 #*
-whether a key exists, metatable-aware
+whether a key exists, metatable-ignoring
 *#
 pub declare table.key? = fn(self: table, key: any) -> bool
 
