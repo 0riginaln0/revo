@@ -43,6 +43,7 @@ typedef enum {
   revo_atom = 9,
   revo_function = 10,
   revo_table = 11,
+  revo_resource = 12,
   revo_opaque = 13,
 } RevoType;
 
@@ -66,7 +67,8 @@ typedef enum {
 
 // nanbox layout: numbers are raw f64 bits, boxed values are
 // (REVO_BOX_TAG | (type << 48) | payload)
-// payload is an intern id, except opaque: low 48 ptr bits
+// payload is an intern id -- pool id for resource --
+// except opaque: low 48 ptr bits
 #define REVO_BOX_TAG 0x7FF8000000000000ULL
 #define REVO_TAG_SHIFT 48
 #define REVO_TAG_MASK 0xFULL
@@ -122,6 +124,7 @@ static inline int revo_is_atom(RevoValue d) { return revo_type(d) == revo_atom; 
 static inline int revo_is_function(RevoValue d) { return revo_type(d) == revo_function; }
 static inline int revo_is_table(RevoValue d) { return revo_type(d) == revo_table; }
 static inline int revo_is_opaque(RevoValue d) { return revo_type(d) == revo_opaque; }
+static inline int revo_is_resource(RevoValue d) { return revo_type(d) == revo_resource; }
 
 static inline int revo_is_bool(RevoValue d) {
   return revo_is_atom(d) && ((d & REVO_PAYLOAD_MASK) == ra_true ||

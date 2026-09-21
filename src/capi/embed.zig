@@ -19,6 +19,7 @@ pub const ErevoType = enum(u64) {
     atom = 9,
     function = 10,
     table = 11,
+    resource = 12,
     @"opaque" = 13,
 };
 

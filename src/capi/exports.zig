@@ -253,6 +253,50 @@ pub export fn revo_opaque_ptr(val: Value) callconv(.c) ?*anyopaque {
     return val.asOpaque();
 }
 
+/// owned handles! caller ptr in a gc cell + a per-handle metatable
+/// , cell frees at sweep, pointee never. nil on failure
+pub export fn revo_resource_new(vm_ptr: *anyopaque, ptr: ?*anyopaque) callconv(.c) Value {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const id = v.resources.create(ptr) catch return nil_val;
+    return Value.new.resource(id);
+}
+
+/// unwrap through the vm; null unless resource. null-ptr cells
+/// unwrap null too, so `revo_is_resource` first when it matters
+pub export fn revo_resource_ptr(vm_ptr: *anyopaque, val: Value) callconv(.c) ?*anyopaque {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const id = val.asResource() orelse return null;
+    const cell = v.resources.get(id) catch return null;
+    return cell.ptr;
+}
+
+/// stick a metatable on a handle, nil clears; false otherwise
+/// , share one table per kind & you have named types
+pub export fn revo_resource_setmetatable(vm_ptr: *anyopaque, ud: Value, mt: Value) callconv(.c) bool {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const id = ud.asResource() orelse return false;
+    if (!v.resources.isValid(id)) return false;
+    const mt_id: ?memory.TableID = if (mt.asTable()) |t| t else blk: {
+        if (mt.asAtom()) |a| {
+            if (a == revo.CoreAtoms.atomId(.nil)) break :blk null;
+        }
+        return false;
+    };
+    v.setResourceMetatable(id, mt_id) catch return false;
+    return true;
+}
+
+/// read the metatable back; false unless one attached. same
+/// table means same kind: that is your type check
+pub export fn revo_resource_getmetatable(vm_ptr: *anyopaque, ud: Value, out: *Value) callconv(.c) bool {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const id = ud.asResource() orelse return false;
+    const cell = v.resources.get(id) catch return false;
+    const mt = cell.metatable orelse return false;
+    out.* = Value.new.table(mt);
+    return true;
+}
+
 /// pin a value past gc; registry id, 0 on failure
 /// , nil pins to 0, 0 never valid, ids never reused
 pub export fn revo_ref(vm_ptr: *anyopaque, val: Value) callconv(.c) u64 {
