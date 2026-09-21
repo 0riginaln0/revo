@@ -19,29 +19,28 @@ const ParamType = revo.baselib.host.ParamType;
 const nil_val = Value.new.nil();
 
 /// intern a byte slice, returns stable string id (0 on failure)
-pub export fn revo_intern(vm_ptr: *anyopaque, ptr_val: u64, len: usize) callconv(.c) u64 {
+/// `ptr` is borrowed for the call only (not null-terminated)
+/// , `len` is the byte count
+pub export fn revo_intern(vm_ptr: *anyopaque, ptr: ?[*]const u8, len: usize) callconv(.c) u64 {
     // returns 0 on failure but safe because vm assigns ids starting at 1
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(ptr_val)));
-    const slice = ptr[0..len];
+    const slice = if (len == 0) "" else (ptr orelse return 0)[0..len];
     const id = v.strings.own(slice) catch return 0;
     return @intCast(id);
 }
 
 /// intern a byte slice as an atom, returns stable atom id (0 on failure)
-pub export fn revo_intern_atom(vm_ptr: *anyopaque, ptr_val: u64, len: usize) callconv(.c) u64 {
+pub export fn revo_intern_atom(vm_ptr: *anyopaque, ptr: ?[*]const u8, len: usize) callconv(.c) u64 {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(ptr_val)));
-    const slice = ptr[0..len];
+    const slice = if (len == 0) "" else (ptr orelse return 0)[0..len];
     const id = v.internAtom(slice) catch return 0;
     return @intCast(id);
 }
 
 /// look up a global variable by name, returns nil if missing
-pub export fn revo_getglobal(vm_ptr: *anyopaque, name_ptr: u64, name_len: usize) callconv(.c) Value {
+pub export fn revo_getglobal(vm_ptr: *anyopaque, name: ?[*]const u8, name_len: usize) callconv(.c) Value {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
-    const name_slice = ptr[0..name_len];
+    const name_slice = if (name_len == 0) "" else (name orelse return nil_val)[0..name_len];
 
     const value = v.getGlobal(name_slice) orelse
         return nil_val;
@@ -54,10 +53,9 @@ pub export fn revo_getglobal(vm_ptr: *anyopaque, name_ptr: u64, name_len: usize)
 }
 
 /// set a global variable by name
-pub export fn revo_setglobal(vm_ptr: *anyopaque, name_ptr: u64, name_len: usize, value: Value) callconv(.c) void {
+pub export fn revo_setglobal(vm_ptr: *anyopaque, name: ?[*]const u8, name_len: usize, value: Value) callconv(.c) void {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
-    const name_slice = ptr[0..name_len];
+    const name_slice = if (name_len == 0) "" else (name orelse return)[0..name_len];
 
     v.setGlobal(name_slice, value) catch {};
 }
@@ -136,19 +134,19 @@ pub export fn revo_table_from_items(vm_ptr: *anyopaque, count: u64, items: [*]co
 }
 
 /// name-keyed write (interns the name); false on bad table or failure
-pub export fn revo_table_set_name(vm_ptr: *anyopaque, table: Value, name_ptr: u64, name_len: usize, value: Value) callconv(.c) bool {
+pub export fn revo_table_set_name(vm_ptr: *anyopaque, table: Value, name: ?[*]const u8, name_len: usize, value: Value) callconv(.c) bool {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
     const tid = table.asTable() orelse return false;
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
-    v.putField(tid, ptr[0..name_len], value) catch return false;
+    const name_slice = if (name_len == 0) "" else (name orelse return false)[0..name_len];
+    v.putField(tid, name_slice, value) catch return false;
     return true;
 }
 
 /// name-keyed raw read; true and `out` set when present
-pub export fn revo_table_get_name(vm_ptr: *anyopaque, table: Value, name_ptr: u64, name_len: usize, out: *Value) callconv(.c) bool {
+pub export fn revo_table_get_name(vm_ptr: *anyopaque, table: Value, name: ?[*]const u8, name_len: usize, out: *Value) callconv(.c) bool {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
-    const ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
-    out.* = v.getField(table, ptr[0..name_len]) orelse return false;
+    const name_slice = if (name_len == 0) "" else (name orelse return false)[0..name_len];
+    out.* = v.getField(table, name_slice) orelse return false;
     return true;
 }
 
@@ -208,19 +206,21 @@ pub export fn revo_call(
 }
 
 /// the name is borrowed, keep it static
-/// empty name when len is 0
+/// empty name when len is 0 (name may be null then)
 /// nil on null fn or allocation failure
-pub export fn revo_cfunc_new(vm_ptr: *anyopaque, fn_ptr: ?*anyopaque, name_ptr: u64, name_len: usize) callconv(.c) Value {
+pub export fn revo_cfunc_new(vm_ptr: *anyopaque, fn_ptr: ?*anyopaque, name: ?[*]const u8, name_len: usize) callconv(.c) Value {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
     const fp = fn_ptr orelse return nil_val;
 
-    const name: []const u8 = if (name_len == 0) "" else blk: {
-        const ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(name_ptr)));
-        break :blk ptr[0..name_len];
+    const cname: []const u8 = if (name_len == 0) "" else cname_blk: {
+        // null name with nonzero len is a caller bug
+        // fail as allocation failure
+        const p = name orelse return nil_val;
+        break :cname_blk p[0..name_len];
     };
 
     const id = v.callable.create(.{ .c_function = .{
-        .name = name,
+        .name = cname,
         .fn_ptr = @ptrCast(@alignCast(fp)),
     } }) catch return nil_val;
 

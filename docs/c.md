@@ -61,11 +61,18 @@ zig build lib
 you get a static library and an auto-generated header:
 
 ~ `zig-out/lib/liberevo.a`
-~ `zig-out/include/revo.h`
+~ `zig-out/include/revo/revo.h` (`#include "revo.h"` with `-Izig-out/include/revo`,
+  or `#include <revo/revo.h>` with `-Izig-out/include`)
+
+all generated decls are prefixed `REVO_API` (dllexport/dllimport on
+windows, default visibility on gcc/clang, empty for `REVO_STATIC` builds)
+and the header carries `#define REVO_VERSION "x.y.z"`. every `revo_*` /
+`erevo_*` decl in it comes straight from an exported `callconv(.c)` zig fn,
+so the header is always in sync with what the library actually exports.
 
 {{< ref "src/capi/embed.zig" >}}
 
-the `extern struct`s in `erevo.zig` dictate are the ones you get in your C code
+the opaque handles in `src/capi/embed.zig` are the ones you get in your C code
 
 ### vm lifecycle
 
@@ -146,14 +153,17 @@ typedef enum {
 **constructors**
 
 ```c
-RevoValue v = revo_nil();              // :nil
-RevoValue v = revo_bool(1);            // :true / :false
-RevoValue v = revo_string(string_id);  // from interned id
-RevoValue v = revo_num(3.14);          // number
-RevoValue v = revo_atom_val(atom_id);  // atom by raw id
-RevoValue v = revo_table(table_id);    // from table id
-RevoValue v = revo_function(func_id);  // from function id
+RevoValue v = revo_nil();                  // :nil
+RevoValue v = revo_bool(1);                // :true / :false
+RevoValue v = revo_string_val(string_id);  // from interned id
+RevoValue v = revo_num(3.14);              // number
+RevoValue v = revo_atom_val(atom_id);      // atom by raw id
+RevoValue v = revo_table_val(table_id);    // from table id
+RevoValue v = revo_function_val(func_id);  // from function id
 ```
+
+(`revo_string(id)` / `revo_table(id)` / `revo_function(id)` still work as
+compat aliases for the `_val` forms.)
 
 **extractors**
 
@@ -303,8 +313,8 @@ reachable til it fires
 strings are interned! every unique string has a stable `uint64_t` id
 
 ```c
-uint64_t sid = revo_intern(vm, (uint64_t)(uintptr_t)"hello", 5);
-RevoValue val = revo_string(sid);
+uint64_t sid = revo_intern(vm, "hello", 5);
+RevoValue val = revo_string_val(sid);
 ```
 
 the pointer must stay valid for the duration of the call
@@ -338,8 +348,8 @@ returns 0 if the value wasn't callable or the call threw. max 16 args.
 ### globals
 
 ```c
-revo_setglobal(vm, (uint64_t)(uintptr_t)"name", 4, revo_num(42.0));
-RevoValue v = revo_getglobal(vm, (uint64_t)(uintptr_t)"name", 4);
+revo_setglobal(vm, "name", 4, revo_num(42.0));
+RevoValue v = revo_getglobal(vm, "name", 4);
 
 // or via c-string wrappers (call strlen internally)
 revo_setglobal_cstr(vm, "name", revo_num(42.0));
@@ -359,9 +369,9 @@ through the return value so missing keys are distinct from nil values:
 RevoValue t = revo_table_create(vm);
 
 // named fields
-revo_table_set_name(vm, t, (uint64_t)"x", 1, revo_num(42.0));
+revo_table_set_name(vm, t, "x", 1, revo_num(42.0));
 RevoValue v;
-bool found = revo_table_get_name(vm, t, (uint64_t)"x", 1, &v);  // true
+bool found = revo_table_get_name(vm, t, "x", 1, &v);  // true
 
 // generic keys (metatable-aware, like t[k])
 RevoValue key = revo_atom_val(revo_intern_atom(vm, ...));
@@ -387,7 +397,7 @@ host functions answer with `{:ok, v}` / `{:err, e}` tables:
 ```c
 if (bad) {
     *out_result = revo_err(vm, revo_atom_val(
-        revo_intern_atom(vm, (uint64_t)"BadInput", 8)));
+        revo_intern_atom(vm, "BadInput", 8)));
     return;
 }
 // ... later, on the receiving side:
@@ -492,8 +502,8 @@ strings must be interned before returning:
 
 ```c
 const char *msg = "hello";
-uint64_t id = revo_intern(vm, (uint64_t)(uintptr_t)msg, 5);
-*out = revo_string(id);
+uint64_t id = revo_intern(vm, msg, 5);
+*out = revo_string_val(id);
 ```
 
 **loading from revo**

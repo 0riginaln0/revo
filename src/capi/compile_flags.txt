@@ -1,2 +1,3 @@
 -I../../zig-out/include
 -lm
+-std=c99

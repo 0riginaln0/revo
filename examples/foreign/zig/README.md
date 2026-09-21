@@ -90,7 +90,7 @@ fn echo(args: []const Value, vm: *VM) anyerror!HostResult {
     const id = args[0].asString() orelse return HostResult.errType(0, "string", "other");
     const bytes = vm.stringValue(id);
     // intern a new string
-    const new_id = revo.ffi.revo_intern(@ptrCast(vm), @intFromPtr(bytes.ptr), bytes.len);
+    const new_id = revo.ffi.revo_intern(@ptrCast(vm), bytes.ptr, bytes.len);
     return HostResult.data(Value.new.str(new_id));
 }
 ```

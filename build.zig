@@ -315,17 +315,24 @@ pub fn build(b: *Build) !void {
     }
 
     const header_wf = b.addWriteFiles();
-    const header_data = bindings.data(b.allocator) catch |err| {
+    const header_data = bindings.data(b.allocator, VERSION) catch |err| {
         std.debug.print("failed to autogen header\n", .{});
         return err;
     };
-    _ = header_wf.add("revo.h", header_data.items);
+    _ = header_wf.add("revo.h", header_data);
 
     const vm_test = b.addTest(.{ .root_module = vm_mod, .filters = test_filters });
     const revo_test = b.addTest(.{ .root_module = revo_mod, .filters = test_filters });
     const exe_test = b.addTest(.{ .root_module = exe_mod, .filters = test_filters });
     const c_test = b.addTest(.{ .root_module = c_mod, .filters = test_filters });
     const revolt_test = b.addTest(.{ .root_module = revolt_mod, .filters = test_filters });
+    // header_gen unit tests (type mapping, REVO_API emission, dup/export checks)
+    const header_gen_mod = b.createModule(.{
+        .root_source_file = b.path("src/capi/header_gen.zig"),
+        .target = target,
+        .optimize = effective_optimize,
+    });
+    const header_test = b.addTest(.{ .root_module = header_gen_mod, .filters = test_filters });
 
     if (is_freestanding) {
         const wasm_lib = b.addExecutable(.{ .name = "revo", .root_module = exe_mod });
@@ -393,6 +400,7 @@ pub fn build(b: *Build) !void {
         check_step.dependOn(&exe_test.step);
         check_step.dependOn(&c_test.step);
         check_step.dependOn(&revolt_test.step);
+        check_step.dependOn(&header_test.step);
 
         //
         // tests
@@ -412,6 +420,7 @@ pub fn build(b: *Build) !void {
             test_step.dependOn(test_exe_step);
 
             test_step.dependOn(&b.addRunArtifact(c_test).step);
+            test_step.dependOn(&b.addRunArtifact(header_test).step);
         }
 
         //
@@ -462,6 +471,27 @@ pub fn build(b: *Build) !void {
             // argv[1]: test .so path, absent when built standalone
             c_test_run.addFileArg(test_ext_lib.getEmittedBin());
             test_c_step.dependOn(&c_test_run.step);
+
+            // c++ compat (must compile as c++ and link)
+            const cpp_test_exe = b.addExecutable(.{
+                .name = "revo-cpp-test",
+                .root_module = b.createModule(.{
+                    .target = target,
+                    .optimize = optimize,
+                    .link_libc = !is_freestanding,
+                }),
+            });
+            cpp_test_exe.rdynamic = true;
+            cpp_test_exe.root_module.addCSourceFile(.{
+                .file = b.path("src/capi/test.cpp"),
+                .flags = &.{
+                    "-Wall", "-Wextra",
+                },
+            });
+            cpp_test_exe.root_module.addIncludePath(header_wf.getDirectory());
+            cpp_test_exe.root_module.linkLibrary(lib);
+            cpp_test_exe.root_module.linkSystemLibrary("m", .{ .needed = true });
+            test_c_step.dependOn(&b.addRunArtifact(cpp_test_exe).step);
         }
     }
 

@@ -1,0 +1,193 @@
+// this file, revo.h is public domain
+// auto-generated, editing is futile
+#ifndef REVO_H
+#define REVO_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#define REVO_VERSION "@@REVO_VERSION@@"
+
+// ~ static builds need nothing,
+// ~ windows need dllexport/dllimport
+// ~ gcc/clang get default visibility
+// define REVO_STATIC when linking liberevo statically
+#if defined(REVO_STATIC)
+#define REVO_API
+#elif defined(_WIN32)
+#if defined(REVO_BUILDING_LIB)
+#define REVO_API __declspec(dllexport)
+#else
+#define REVO_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define REVO_API __attribute__((visibility("default")))
+#else
+#define REVO_API
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#else
+#include <stdbool.h>
+#endif
+
+// a revo value, nanboxed in a single u64
+typedef uint64_t RevoValue;
+
+// tags mirror vm.memory.ValueTag; number never boxed
+typedef enum {
+  revo_number = 0,
+  revo_string = 8,
+  revo_atom = 9,
+  revo_function = 10,
+  revo_table = 11,
+  revo_opaque = 13,
+} RevoType;
+
+// guaranteed to be of these ids
+typedef enum {
+  ra_nil,
+  ra_missing,
+  ra_undef,
+  ra_none,
+  ra_no_result,
+  ra_no,
+  ra_false,
+  // false atoms are all which are above
+  ra_true,
+  ra_parked,
+  ra_range,
+  ra_ok,
+  ra_err,
+  ra_some,
+} RevoAtom;
+
+// nanbox layout: numbers are raw f64 bits, boxed values are
+// (REVO_BOX_TAG | (type << 48) | payload)
+// payload is an intern id, except opaque: low 48 ptr bits
+#define REVO_BOX_TAG 0x7FF8000000000000ULL
+#define REVO_TAG_SHIFT 48
+#define REVO_TAG_MASK 0xFULL
+#define REVO_PAYLOAD_MASK 0x0000FFFFFFFFFFFFULL
+
+// helpers for often-used values
+#define revo_nil() revo_atom_val(ra_nil)
+#define revo_bool(v) revo_atom_val((v) ? ra_true : ra_false)
+
+#define revo_string_val(id)                                                    \
+  ((RevoValue)(REVO_BOX_TAG | ((uint64_t)revo_string << REVO_TAG_SHIFT) | (id)))
+#define revo_table_val(id)                                                     \
+  ((RevoValue)(REVO_BOX_TAG | ((uint64_t)revo_table << REVO_TAG_SHIFT) | (id)))
+#define revo_function_val(id)                                                  \
+  ((RevoValue)(REVO_BOX_TAG | ((uint64_t)revo_function << REVO_TAG_SHIFT) | (id)))
+
+#define revo_string(id) revo_string_val(id)
+#define revo_table(id) revo_table_val(id)
+#define revo_function(id) revo_function_val(id)
+
+static inline int revo_type(RevoValue d) {
+  return (d & 0xFFF8000000000000ULL) == REVO_BOX_TAG
+             ? (int)((d >> REVO_TAG_SHIFT) & REVO_TAG_MASK)
+             : revo_number;
+}
+
+static inline RevoValue revo_num(double n) {
+  uint64_t u;
+  memcpy(&u, &n, sizeof(u));
+  return u;
+}
+
+static inline RevoValue revo_atom_val(uint64_t id) {
+  return (RevoValue)(REVO_BOX_TAG | ((uint64_t)revo_atom << REVO_TAG_SHIFT) |
+                     id);
+}
+
+static inline double revo_num_value(RevoValue d) {
+  double f;
+  memcpy(&f, &d, sizeof(f));
+  return f;
+}
+
+static inline uint64_t revo_string_id(RevoValue d) { return d & REVO_PAYLOAD_MASK; }
+static inline uint64_t revo_atom_id(RevoValue d) { return d & REVO_PAYLOAD_MASK; }
+static inline uint64_t revo_table_id(RevoValue d) { return d & REVO_PAYLOAD_MASK; }
+static inline uint64_t revo_function_id(RevoValue d) { return d & REVO_PAYLOAD_MASK; }
+
+static inline int revo_is_nil(RevoValue d) { return revo_type(d) == revo_atom && (d & REVO_PAYLOAD_MASK) == ra_nil; }
+static inline int revo_is_number(RevoValue d) { return revo_type(d) == revo_number; }
+static inline int revo_is_string(RevoValue d) { return revo_type(d) == revo_string; }
+static inline int revo_is_atom(RevoValue d) { return revo_type(d) == revo_atom; }
+static inline int revo_is_function(RevoValue d) { return revo_type(d) == revo_function; }
+static inline int revo_is_table(RevoValue d) { return revo_type(d) == revo_table; }
+static inline int revo_is_opaque(RevoValue d) { return revo_type(d) == revo_opaque; }
+
+static inline int revo_is_bool(RevoValue d) {
+  return revo_is_atom(d) && ((d & REVO_PAYLOAD_MASK) == ra_true ||
+                             (d & REVO_PAYLOAD_MASK) == ra_false);
+}
+static inline int revo_bool_val(RevoValue d) {
+  return revo_is_bool(d) ? ((d & REVO_PAYLOAD_MASK) == ra_true ? 1 : 0) : 0;
+}
+
+// function ptr type; returns REVO_OK (0), anything else raises
+// (`*out` used on ok only, ignored on err)
+typedef int (*RevoFn)(void *vm, size_t argc, RevoValue *argv,
+                      RevoValue *out_result);
+
+// c errors, returned directly (`return revo_c_err_arity(...)`)
+#define REVO_OK 0
+#define REVO_ERR_ARITY 1
+#define REVO_ERR_TYPE 2
+#define REVO_ERR_OTHER 3
+
+// function binding; the typed interface lives in a sibling
+// `<stem>.d.rv` manifest, not here
+typedef struct {
+  const char *name;
+  RevoFn fn;
+} RevoBinding;
+
+// ffi:
+//   intern a string -> returns stable id
+//   ptr must stay valid for the duration of the call and is not
+//   nul-terminated (get the length from revo_string_length)
+//   revo_string_data / revo_string_length read back interned strings
+
+
+// @@REVO_DECLS@@
+
+// embedding api
+typedef struct ErevoVM ErevoVM;
+typedef struct ErevoProgram ErevoProgram;
+typedef RevoValue ErevoValue;
+typedef RevoType ErevoType;
+
+// @@EREVO_DECLS@@
+
+// cstr convenience wrappers
+static inline RevoValue revo_getglobal_cstr(void *vm, const char *name) {
+  return revo_getglobal(vm, name, strlen(name));
+}
+static inline void revo_setglobal_cstr(void *vm, const char *name, RevoValue value) {
+  revo_setglobal(vm, name, strlen(name), value);
+}
+static inline uint64_t revo_intern_cstr(void *vm, const char *s) {
+  return revo_intern(vm, s, strlen(s));
+}
+static inline uint64_t revo_intern_atom_cstr(void *vm, const char *s) {
+  return revo_intern_atom(vm, s, strlen(s));
+}
+static inline int revo_table_set_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue val) {
+  return revo_table_set_name(vm, tbl, name, strlen(name), val);
+}
+static inline int revo_table_get_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue *out) {
+  return revo_table_get_name(vm, tbl, name, strlen(name), out);
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // REVO_H

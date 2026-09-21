@@ -119,28 +119,28 @@ int main(int argc, char **argv) {
   }
 
   T("set and get global") {
-    revo_setglobal(vm, (uint64_t)(uintptr_t)"pi", 2, revo_num(3.14));
-    val = revo_getglobal(vm, (uint64_t)(uintptr_t)"pi", 2);
+    revo_setglobal(vm, "pi", 2, revo_num(3.14));
+    val = revo_getglobal(vm, "pi", 2);
 
     assert(revo_is_number(val));
     assert(fabs(revo_num_value(val) - 3.14) < 1e-12);
   }
 
   T("get missing global returns nil") {
-    val = revo_getglobal(vm, (uint64_t)(uintptr_t)"nope", 4);
+    val = revo_getglobal(vm, "nope", 4);
 
     assert(revo_is_nil(val));
   }
 
   T("intern and read back string") {
-    sid = revo_intern(vm, (uint64_t)(uintptr_t)"world", 5);
+    sid = revo_intern(vm, "world", 5);
     assert(sid != 0);
     assert(revo_string_length(vm, sid) == 5);
     assert(memcmp(revo_string_data(vm, sid), "world", 5) == 0);
   }
 
   T("intern atom") {
-    uint64_t aid = revo_intern_atom(vm, (uint64_t)(uintptr_t)"hello", 5);
+    uint64_t aid = revo_intern_atom(vm, "hello", 5);
 
     assert(aid != 0);
   }
@@ -153,13 +153,13 @@ int main(int argc, char **argv) {
     check(ok);
     assert(revo_is_table(val));
 
-    assert(revo_table_get_name(vm, val, (uint64_t)(uintptr_t)"x", 1, &tval));
+    assert(revo_table_get_name(vm, val, "x", 1, &tval));
     assert(revo_is_number(tval));
     assert(fabs(revo_num_value(tval) - 42.0) < 1e-12);
   }
 
   T("table_set and table_get round-trip") {
-    uint64_t x_atom = revo_intern_atom(vm, (uint64_t)(uintptr_t)"x", 1);
+    uint64_t x_atom = revo_intern_atom(vm, "x", 1);
 
     assert(revo_table_set(vm, val, revo_atom_val(x_atom), revo_num(99.0)));
     assert(revo_table_get(vm, val, revo_atom_val(x_atom), &tval));
@@ -168,10 +168,10 @@ int main(int argc, char **argv) {
   }
 
   T("table_get missing key returns false") {
-    uint64_t y_atom = revo_intern_atom(vm, (uint64_t)(uintptr_t)"y", 1);
+    uint64_t y_atom = revo_intern_atom(vm, "y", 1);
 
     assert(!revo_table_get(vm, val, revo_atom_val(y_atom), &tval));
-    assert(!revo_table_get_name(vm, val, (uint64_t)(uintptr_t)"y", 1, &tval));
+    assert(!revo_table_get_name(vm, val, "y", 1, &tval));
   }
 
   T("revo_table_create returns empty table") {
@@ -183,10 +183,10 @@ int main(int argc, char **argv) {
   }
 
   T("revo_table_create set and get fields") {
-    uint64_t a_atom = revo_intern_atom(vm, (uint64_t)(uintptr_t)"a", 1);
-    uint64_t b_atom = revo_intern_atom(vm, (uint64_t)(uintptr_t)"b", 1);
+    uint64_t a_atom = revo_intern_atom(vm, "a", 1);
+    uint64_t b_atom = revo_intern_atom(vm, "b", 1);
 
-    assert(revo_table_set_name(vm, t, (uint64_t)(uintptr_t)"a", 1,
+    assert(revo_table_set_name(vm, t, "a", 1,
                                revo_num(10.0)));
     assert(revo_table_set(vm, t, revo_atom_val(b_atom), revo_num(20.0)));
 
@@ -336,7 +336,7 @@ int main(int argc, char **argv) {
 
   T("revo_cfunc_new registers a callable c function") {
     RevoValue cfn =
-        revo_cfunc_new(vm, (void *)test_double_fn, (uint64_t)(uintptr_t)"double", 6);
+        revo_cfunc_new(vm, (void *)test_double_fn, "double", 6);
     assert(revo_is_function(cfn));
 
     RevoValue dargs[1] = {revo_num(21.0)};
@@ -353,8 +353,8 @@ int main(int argc, char **argv) {
     assert(fabs(revo_num_value(val) - 42.0) < 1e-12);
 
     // empty name works, null fn gives nil
-    assert(revo_is_function(revo_cfunc_new(vm, (void *)test_double_fn, 0, 0)));
-    assert(revo_is_nil(revo_cfunc_new(vm, NULL, 0, 0)));
+    assert(revo_is_function(revo_cfunc_new(vm, (void *)test_double_fn, NULL, 0)));
+    assert(revo_is_nil(revo_cfunc_new(vm, NULL, NULL, 0)));
   }
 
   //
@@ -405,8 +405,8 @@ int main(int argc, char **argv) {
   }
 
   T("revo_string macro") {
-    sid = revo_intern(vm, (uint64_t)(uintptr_t)"test-str", 8);
-    val = revo_string(sid);
+    sid = revo_intern(vm, "test-str", 8);
+    val = revo_string_val(sid);
 
     assert(revo_is_string(val));
     assert(revo_string_id(val) == sid);
@@ -416,7 +416,7 @@ int main(int argc, char **argv) {
   // type tag helpers
   //
   T("revo_is_number false on string") {
-    assert(!revo_is_number(revo_string(sid)));
+    assert(!revo_is_number(revo_string_val(sid)));
   }
 
   T("revo_is_string false on number") {
@@ -437,9 +437,9 @@ int main(int argc, char **argv) {
 
   T("revo_type") {
     assert(revo_type(revo_num(1)) == revo_number);
-    assert(revo_type(revo_string(sid)) == revo_string);
+    assert(revo_type(revo_string_val(sid)) == revo_string);
     assert(revo_type(revo_atom_val(ra_ok)) == revo_atom);
-    assert(revo_type(revo_table(t)) == revo_table);
+    assert(revo_type(revo_table_val(t)) == revo_table);
   }
 
   T("revo_bool_val") {
@@ -489,8 +489,8 @@ int main(int argc, char **argv) {
     assert(revo_opaque_ptr(back) == &state);
 
     RevoValue ft = revo_table_create(vm);
-    assert(revo_table_set_name(vm, ft, (uint64_t)(uintptr_t)"ptr", 3, f));
-    assert(revo_table_get_name(vm, ft, (uint64_t)(uintptr_t)"ptr", 3, &tval));
+    assert(revo_table_set_name(vm, ft, "ptr", 3, f));
+    assert(revo_table_get_name(vm, ft, "ptr", 3, &tval));
     assert(revo_is_opaque(tval));
     assert(revo_opaque_ptr(tval) == &state);
 
@@ -505,7 +505,7 @@ int main(int argc, char **argv) {
 
   T("revo_ref pins values across gc") {
     RevoValue rt = revo_table_create(vm);
-    assert(revo_table_set_name(vm, rt, (uint64_t)(uintptr_t)"v", 1,
+    assert(revo_table_set_name(vm, rt, "v", 1,
                                revo_num(7.0)));
     uint64_t r = revo_ref(vm, rt);
     assert(r != 0);
@@ -519,7 +519,7 @@ int main(int argc, char **argv) {
 
     RevoValue pinned = revo_getref(vm, r);
     assert(revo_is_table(pinned));
-    assert(revo_table_get_name(vm, pinned, (uint64_t)(uintptr_t)"v", 1, &tval));
+    assert(revo_table_get_name(vm, pinned, "v", 1, &tval));
     assert(revo_is_number(tval));
     assert(fabs(revo_num_value(tval) - 7.0) < 1e-12);
 
@@ -538,7 +538,7 @@ int main(int argc, char **argv) {
     assert(revo_is_function(val));
 
     RevoValue flag = revo_table_create(vm);
-    assert(revo_table_set_name(vm, flag, (uint64_t)(uintptr_t)"hit", 3,
+    assert(revo_table_set_name(vm, flag, "hit", 3,
                                revo_num(0.0)));
     RevoValue fargs[1] = {flag};
     RevoValue fin_fn;
@@ -564,7 +564,7 @@ int main(int argc, char **argv) {
       check(ok);
     }
 
-    assert(revo_table_get_name(vm, flag, (uint64_t)(uintptr_t)"hit", 3, &tval));
+    assert(revo_table_get_name(vm, flag, "hit", 3, &tval));
     assert(revo_is_number(tval));
     assert(fabs(revo_num_value(tval) - 41.0) < 1e-12);
     revo_unref(vm, fin_ref);

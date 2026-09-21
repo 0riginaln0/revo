@@ -114,15 +114,15 @@ static char *revo_to_cstr(void *vm, RevoValue v) {
 }
 
 // clang-format off
-// TODO: add these two to revo.h
+// (these now also exist as revo_table_set_name_cstr/get_name_cstr in revo.h)
 static inline
 int set_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue val) {
-  return revo_table_set_name(vm, tbl, (uint64_t)(uintptr_t)name, strlen(name), val);
+  return revo_table_set_name_cstr(vm, tbl, name, val);
 }
 
 static inline
 int get_name_cstr(void *vm, RevoValue tbl, const char *name, RevoValue *out) {
-  return revo_table_get_name(vm, tbl, (uint64_t)(uintptr_t)name, strlen(name), out);
+  return revo_table_get_name_cstr(vm, tbl, name, out);
 }
 // clang-format on
 
@@ -259,8 +259,8 @@ static int do_ffi_callv(void *vm, void (*sym)(void), RevoValue *args,
       *out_res = revo_nil();
     } else {
       uint64_t sid =
-          revo_intern(vm, (uint64_t)(uintptr_t)ret_slot.s, strlen(ret_slot.s));
-      *out_res = revo_string(sid);
+          revo_intern(vm, ret_slot.s, strlen(ret_slot.s));
+      *out_res = revo_string_val(sid);
     }
     break;
   }
@@ -306,7 +306,7 @@ static int load_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
   }
 
   RevoValue func_c =
-      revo_cfunc_new(vm, (void *)func_fn, (uint64_t)(uintptr_t)"func", 4);
+      revo_cfunc_new(vm, (void *)func_fn, "func", 4);
   if (!revo_is_function(func_c)) {
     dlclose(lib);
     return revo_c_err_other(vm, "could not create func binding???");
@@ -382,7 +382,7 @@ static int func_fn(void *vm, size_t argc, RevoValue *argv, RevoValue *out_res) {
     return revo_c_err_other(vm, "could not store ret???");
 
   RevoValue call_c =
-      revo_cfunc_new(vm, (void *)__call, (uint64_t)(uintptr_t)"__call", 6);
+      revo_cfunc_new(vm, (void *)__call, "__call", 6);
   if (!revo_is_function(call_c))
     return revo_c_err_other(vm, "could not create __call binding???");
 

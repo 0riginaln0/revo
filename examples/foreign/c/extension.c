@@ -34,8 +34,8 @@ static int greet_fn(void *vm, size_t argc, RevoValue *argv,
   memcpy(buf + 7, name, name_len);
   buf[7 + name_len] = '!';
 
-  uint64_t sid = revo_intern(vm, (uint64_t)(uintptr_t)buf, 7 + name_len + 1);
-  *out_result = revo_string(sid);
+  uint64_t sid = revo_intern(vm, buf, 7 + name_len + 1);
+  *out_result = revo_string_val(sid);
   return REVO_OK;
 }
 
@@ -57,7 +57,7 @@ static int echo_fn(void *vm, size_t argc, RevoValue *argv,
   if (!revo_is_string(argv[0]))
     return revo_c_err_type(vm, 0, "string", argv[0]);
   // string ids pass through as-is, no re-intern needed
-  *out_result = revo_string(revo_string_id(argv[0]));
+  *out_result = revo_string_val(revo_string_id(argv[0]));
   return REVO_OK;
 }
 
@@ -117,10 +117,10 @@ static int concat_fn(void *vm, size_t argc, RevoValue *argv,
   }
   buf[off] = '\0';
 
-  uint64_t sid = revo_intern(vm, (uint64_t)(uintptr_t)buf, off);
+  uint64_t sid = revo_intern(vm, buf, off);
   free(buf);
 
-  *out_result = revo_string(sid);
+  *out_result = revo_string_val(sid);
   return REVO_OK;
 }
 

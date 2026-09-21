@@ -2,7 +2,7 @@
 // embedding revo, in c
 // build: make basic (or just `make`)
 // links against liberevo.a from zig build lib
-// requires zig-out/include/revo.h and zig-out/lib/liberevo.a
+// requires zig-out/include/revo/revo.h and zig-out/lib/liberevo.a
 //
 
 #include "revo.h"
@@ -65,8 +65,8 @@ int main(void) {
 
 	//
   // set a global from C, then read it back
-  revo_setglobal(vm, (uint64_t)(uintptr_t)"answer", 6, revo_num(42.0));
-  val = revo_getglobal(vm, (uint64_t)(uintptr_t)"answer", 6);
+  revo_setglobal(vm, "answer", 6, revo_num(42.0));
+  val = revo_getglobal(vm, "answer", 6);
   printf("global  = ");
   print_value(vm, val);
 
@@ -82,7 +82,7 @@ int main(void) {
 
   // val is the table, read its field by name
   RevoValue tval;
-  if (!revo_table_get_name(vm, val, (uint64_t)(uintptr_t)"x", 1, &tval)) return 1;
+  if (!revo_table_get_name(vm, val, "x", 1, &tval)) return 1;
   printf("table.x = ");
   print_value(vm, tval);
 

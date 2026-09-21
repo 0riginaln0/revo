@@ -50,7 +50,7 @@ fn boxed(tag: RevoType, id: u64) -> RevoValue {
 
 /// interned ids are never 0, so 0 means the call failed
 fn intern_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
-    let id = unsafe { revo_intern(c_void_ptr(vm_ptr), s.as_ptr() as u64, s.len()) };
+    let id = unsafe { revo_intern(c_void_ptr(vm_ptr), s.as_ptr() as *const std::ffi::c_char, s.len()) };
     if id == 0 {
         return Err(format!("failed to intern string {s:?}"));
     }
@@ -58,7 +58,7 @@ fn intern_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
 }
 
 fn intern_atom_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
-    let id = unsafe { revo_intern_atom(c_void_ptr(vm_ptr), s.as_ptr() as u64, s.len()) };
+    let id = unsafe { revo_intern_atom(c_void_ptr(vm_ptr), s.as_ptr() as *const std::ffi::c_char, s.len()) };
     if id == 0 {
         return Err(format!("failed to intern atom {s:?}"));
     }
@@ -179,14 +179,14 @@ impl VM {
 
     /// read back a global; missing names come back as `:nil`
     pub fn get_global(&self, name: &str) -> Result<Value, String> {
-        let raw = unsafe { revo_getglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len()) };
+        let raw = unsafe { revo_getglobal(c_void_ptr(self.ptr), name.as_ptr() as *const std::ffi::c_char, name.len()) };
         Value::from_raw(self.ptr, raw).map_err(|e| e.to_string())
     }
 
     /// bind a name to a value on the vm
     pub fn set_global(&mut self, name: &str, val: &Value) -> Result<(), String> {
         let raw = val.to_raw(self)?;
-        unsafe { revo_setglobal(c_void_ptr(self.ptr), name.as_ptr() as u64, name.len(), raw) };
+        unsafe { revo_setglobal(c_void_ptr(self.ptr), name.as_ptr() as *const std::ffi::c_char, name.len(), raw) };
         Ok(())
     }
 
@@ -480,7 +480,7 @@ impl<'vm> Table<'vm> {
             revo_table_get_name(
                 self.c_ptr(),
                 self.raw,
-                name.as_ptr() as u64,
+                name.as_ptr() as *const std::ffi::c_char,
                 name.len(),
                 &mut out,
             )
@@ -499,7 +499,7 @@ impl<'vm> Table<'vm> {
             revo_table_set_name(
                 self.c_ptr(),
                 self.raw,
-                name.as_ptr() as u64,
+                name.as_ptr() as *const std::ffi::c_char,
                 name.len(),
                 val_raw,
             )
