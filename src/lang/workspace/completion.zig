@@ -152,7 +152,7 @@ fn completionTargetType(
     _ = semantic.analyze(arena, root, snap.name, truncated, known_globals, &type_map, null, null, .{
         .ptr = @ptrCast(&anchor),
         .resolveFn = nullResolve,
-    }, &dropped_warn) catch return null;
+    }, null, &dropped_warn) catch return null;
 
     return type_map.get(target);
 }

@@ -6,6 +6,7 @@ const diagnostic = @import("diagnostic.zig");
 const import_types = @import("import_types.zig");
 const Parser = @import("Parser.zig");
 const revo = @import("revo");
+const scope_graph = @import("scope_graph.zig");
 const type_syntax = @import("type_syntax.zig");
 const types_mod = @import("compiler/types.zig");
 
@@ -38,13 +39,14 @@ pub fn analyze(
     annotations: ?types_mod.Annotations,
     docs: ?*std.StringHashMap([]const u8),
     module_resolver: ModuleResolver,
+    graph: ?*scope_graph.ScopeGraph,
     warnings: *?diagnostic.Report,
 ) !?Failure {
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, annotations, docs, module_resolver);
+    var checker = try SemanticChecker.init(arena_alloc, source_name, source, known_globals, type_map, annotations, docs, module_resolver, graph);
     defer checker.deinit();
 
     try checker.collectPredeclared(root);
@@ -210,6 +212,9 @@ const SemanticChecker = struct {
     resolver: ModuleResolver,
     /// module name -> pub type aliases, for `a.T` annotations
     import_aliases: std.StringHashMap(std.StringHashMap(types_mod.TypeInfo)),
+    /// mirror scope, null means off
+    graph: ?*scope_graph.ScopeGraph = null,
+    graph_scope: scope_graph.ScopeId = 0,
 
     fn init(
         alloc: std.mem.Allocator,
@@ -220,6 +225,7 @@ const SemanticChecker = struct {
         annotations: ?types_mod.Annotations,
         docs: ?*std.StringHashMap([]const u8),
         resolver: ModuleResolver,
+        graph: ?*scope_graph.ScopeGraph,
     ) !SemanticChecker {
         var checker: SemanticChecker = .{
             .alloc = alloc,
@@ -241,9 +247,15 @@ const SemanticChecker = struct {
             .shadowed_globals = .init(alloc),
             .resolver = resolver,
             .import_aliases = .init(alloc),
+            .graph = graph,
+            .graph_scope = 0,
         };
 
-        try checker.pushScope();
+        // legacy scope plus the graph root underneath, builtins land in both
+        try checker.scopes.append(checker.alloc, Scope.init(checker.alloc));
+        if (graph) |g| {
+            checker.graph_scope = try g.fileRoot(source_name, ast.Span{ .start = 0, .end = 0, .line = 0, .column = 0 });
+        }
         // builtins never export to type_map/docs - real declarations must
         // win, and repl runtime globals re-enter here untyped
         for (known_globals) |name|
@@ -263,6 +275,7 @@ const SemanticChecker = struct {
             } orelse continue;
             if (try checker.makeStdlibSig(spec)) |sig| {
                 try checker.scopes.items[checker.scopes.items.len - 1].values.put(name, .{ .info = .{ .tag = .{ .function = sig } } });
+                checker.mirrorDeclare(name, .function, if (spec.doc.len > 0) spec.doc else null);
             }
         }
 
@@ -358,26 +371,44 @@ const SemanticChecker = struct {
         };
     }
 
-    fn pushScope(self: *SemanticChecker) !void {
+    fn pushScope(self: *SemanticChecker, kind: scope_graph.ScopeKind) !void {
         try self.scopes.append(self.alloc, Scope.init(self.alloc));
+        if (self.graph) |g| {
+            // spans stay zero til the ide needs em
+            const no_span = ast.Span{ .start = 0, .end = 0, .line = 0, .column = 0 };
+            self.graph_scope = try g.childScope(self.graph_scope, kind, no_span);
+        }
     }
 
     fn popScope(self: *SemanticChecker) void {
         _ = self.scopes.pop();
+        if (self.graph) |g| {
+            self.graph_scope = g.scopes.items[self.graph_scope].parent orelse self.graph_scope;
+        }
     }
 
-    fn declare(self: *SemanticChecker, name: []const u8, t: types_mod.TypeInfo, doc: ?[]const u8) !void {
-        return self.declareInner(name, t, doc, true);
+    fn declare(self: *SemanticChecker, name: []const u8, t: types_mod.TypeInfo, doc: ?[]const u8, kind: scope_graph.DefKind) !void {
+        return self.declareInner(name, t, doc, true, kind);
     }
 
     /// scope-only registration; never exports to type_map/docs
     fn declareBuiltin(self: *SemanticChecker, name: []const u8) !void {
-        return self.declareInner(name, .{ .tag = .any }, null, false);
+        return self.declareInner(name, .{ .tag = .any }, null, false, .binding);
     }
 
-    fn declareInner(self: *SemanticChecker, name: []const u8, t: types_mod.TypeInfo, doc: ?[]const u8, export_type: bool) !void {
-        if (self.scopes.items.len == 0) try self.pushScope();
+    /// record into the graph too
+    /// , spans stay zero til the ide needs em, kinds are exact
+    fn mirrorDeclare(self: *SemanticChecker, name: []const u8, kind: scope_graph.DefKind, doc: ?[]const u8) void {
+        if (self.graph) |g| {
+            const no_span = ast.Span{ .start = 0, .end = 0, .line = 0, .column = 0 };
+            _ = g.declare(self.graph_scope, name, kind, no_span, doc) catch {};
+        }
+    }
+
+    fn declareInner(self: *SemanticChecker, name: []const u8, t: types_mod.TypeInfo, doc: ?[]const u8, export_type: bool, kind: scope_graph.DefKind) !void {
+        if (self.scopes.items.len == 0) try self.pushScope(.block);
         try self.scopes.items[self.scopes.items.len - 1].values.put(name, .{ .info = t, .doc = doc });
+        self.mirrorDeclare(name, kind, doc);
         if (self.known_globals.contains(name)) {
             try self.shadowed_globals.put(name, {});
         }
@@ -651,10 +682,10 @@ const SemanticChecker = struct {
         self.fn_nesting += 1;
         defer self.fn_nesting -= 1;
 
-        try self.pushScope();
+        try self.pushScope(.func);
         defer self.popScope();
         for (fn_expr.params, sig.params) |param, param_type| {
-            try self.declare(param.name, param_type, null);
+            try self.declare(param.name, param_type, null, .param);
         }
         // defaults can reference sibling params, so they analyze here where
         // params are declared; also annotates them for the compiler's default checks
@@ -778,7 +809,7 @@ const SemanticChecker = struct {
             },
             .for_loop => |v| blk: {
                 const iter_type = try self.analyzeNode(v.iter);
-                try self.pushScope();
+                try self.pushScope(.block);
                 const param_type: types_mod.TypeInfo = if (v.iter.expr == .range_literal)
                     .{ .tag = .number }
                 else if (iter_type.tag == .string)
@@ -786,7 +817,7 @@ const SemanticChecker = struct {
                 else
                     .{ .tag = .any };
                 for (v.params) |param| {
-                    try self.declare(param.name, param_type, null);
+                    try self.declare(param.name, param_type, null, .param);
                 }
                 const body_type = try self.analyzeNode(v.body);
                 self.popScope();
@@ -803,7 +834,7 @@ const SemanticChecker = struct {
                 defer prior.deinit(self.alloc);
 
                 for (v.arms) |arm| {
-                    try self.pushScope();
+                    try self.pushScope(.block);
                     for (arm.matchers) |matcher| {
                         if (matcher == .expr) {
                             _ = try self.declarePatternNames(matcher.expr);
@@ -985,7 +1016,7 @@ const SemanticChecker = struct {
                 break :blk unified;
             },
             .loop_expr => |v| blk: {
-                try self.pushScope();
+                try self.pushScope(.block);
                 _ = try self.analyzeNode(v.body);
                 self.popScope();
                 break :blk types_mod.inferExprType(self.check(), node);
@@ -999,7 +1030,7 @@ const SemanticChecker = struct {
                         "expected bool",
                     );
                 }
-                try self.pushScope();
+                try self.pushScope(.block);
                 _ = try self.analyzeNode(v.body);
                 self.popScope();
                 break :blk types_mod.inferExprType(self.check(), node);
@@ -1020,12 +1051,12 @@ const SemanticChecker = struct {
                         try self.import_aliases.put(stmt.name, aliases);
 
                         if (iface.record) |record| {
-                            try self.declare(stmt.name, record, null);
+                            try self.declare(stmt.name, record, null, .import);
                             break :blk record;
                         }
                     } else |_| {}
                 }
-                try self.declare(stmt.name, .{ .tag = .any }, null);
+                try self.declare(stmt.name, .{ .tag = .any }, null, .import);
                 break :blk .{ .tag = .any };
             },
             .number, .string, .multiline_string, .atom, .nil, .table, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),
@@ -1116,7 +1147,7 @@ const SemanticChecker = struct {
 
     fn analyzeBlock(self: *SemanticChecker, exprs: []const *ast.Node, span: ast.Span) !types_mod.TypeInfo {
         _ = span;
-        try self.pushScope();
+        try self.pushScope(.block);
         defer self.popScope();
         var last: types_mod.TypeInfo = .{ .tag = .any };
         for (exprs) |expr| {
@@ -1149,7 +1180,7 @@ const SemanticChecker = struct {
             return .{ .tag = .any };
         }
         const t = self.evalCheckedTypeExpr(alias.type_expr) catch types_mod.TypeInfo{ .tag = .any };
-        try self.declare(alias.name, t, doc orelse alias.doc);
+        try self.declare(alias.name, t, doc orelse alias.doc, .type_alias);
         // also usable in type positions: `const x: MAX_ITEMS = 5`
         try self.type_aliases.put(alias.name, .{ .info = t, .doc = doc orelse alias.doc });
         return .{ .tag = .any };
@@ -1220,9 +1251,9 @@ const SemanticChecker = struct {
                         fn_type,
                     );
                 }
-                try self.declare(name, expected, doc);
+                try self.declare(name, expected, doc, .binding);
             } else {
-                try self.declare(name, fn_type, doc);
+                try self.declare(name, fn_type, doc, .binding);
             }
             _ = try self.analyzeFnBody(binding.value.expr.fn_expr, sig);
             if (self.type_map) |tm| {
@@ -1275,10 +1306,10 @@ const SemanticChecker = struct {
                         table_type,
                     );
                 }
-                try self.declare(name, expected, doc);
+                try self.declare(name, expected, doc, .binding);
                 return expected;
             }
-            try self.declare(name, table_type, doc);
+            try self.declare(name, table_type, doc, .binding);
             return table_type;
         }
         // propagate table fields through variable references
@@ -1301,11 +1332,11 @@ const SemanticChecker = struct {
                     value_type,
                 );
             }
-            try self.declare(name, expected, doc);
+            try self.declare(name, expected, doc, .binding);
             return expected;
         }
 
-        try self.declare(name, value_type, doc);
+        try self.declare(name, value_type, doc, .binding);
         return value_type;
     }
 
@@ -1313,7 +1344,7 @@ const SemanticChecker = struct {
         switch (pattern.expr) {
             .ident => |name| {
                 if (!ast.isDiscardName(name)) {
-                    try self.declare(name, .{ .tag = .any }, null);
+                    try self.declare(name, .{ .tag = .any }, null, .binding);
                 }
             },
             .table_pattern => |items| {
@@ -1325,7 +1356,7 @@ const SemanticChecker = struct {
                 const inner_ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
 
                 if (a.expr.expr == .ident and !ast.isDiscardName(a.expr.expr.ident)) {
-                    try self.declare(a.expr.expr.ident, inner_ti, null);
+                    try self.declare(a.expr.expr.ident, inner_ti, null, .binding);
                 } else {
                     _ = try self.declarePatternNames(a.expr);
                 }
@@ -1394,7 +1425,7 @@ const SemanticChecker = struct {
             const inner_ti = types_mod.evalTypeExpr(self.check(), a.type_name) catch types_mod.TypeInfo{ .tag = .any };
 
             if (a.expr.expr == .ident and !ast.isDiscardName(a.expr.expr.ident)) {
-                try self.declare(a.expr.expr.ident, inner_ti, null);
+                try self.declare(a.expr.expr.ident, inner_ti, null, .binding);
 
                 return;
             }
@@ -1423,7 +1454,7 @@ const SemanticChecker = struct {
             for (items[1..], 0..) |item, i| {
                 if (item.expr == .ident and !ast.isDiscardName(item.expr.ident)) {
                     const narrowed = if (i < payload.items.len) payload.items[i] else types_mod.TypeInfo{ .tag = .any };
-                    try self.declare(item.expr.ident, narrowed, null);
+                    try self.declare(item.expr.ident, narrowed, null, .binding);
                 }
             }
             return;
@@ -1534,7 +1565,7 @@ const SemanticChecker = struct {
                 }
                 // reassignment keeps the binding's doc
                 const prev_doc: ?[]const u8 = if (self.lookupEntry(name)) |e| e.doc else null;
-                try self.declare(name, value_type, prev_doc);
+                try self.declare(name, value_type, prev_doc, .binding);
             },
             .field => |field| {
                 const object_type = types_mod.inferExprType(self.check(), field.object);
@@ -1579,7 +1610,7 @@ const SemanticChecker = struct {
                         var generic = actual_type;
                         generic.tag.table.fields = null;
                         const prev_doc = if (self.lookupEntry(idx.object.expr.ident)) |e| e.doc else null;
-                        try self.declare(idx.object.expr.ident, generic, prev_doc);
+                        try self.declare(idx.object.expr.ident, generic, prev_doc, .binding);
                     }
                 }
                 if (!types_mod.canCoerce(types_mod.TABLE_GENERIC, actual_type)) {
@@ -1968,3 +1999,59 @@ const SemanticChecker = struct {
         try diagnostic.appendWarnPair(&self.warn_parts, self.alloc, message, span, try self.alloc.dupe(u8, label));
     }
 };
+
+fn nullResolve(_: *anyopaque, _: []const u8, _: std.mem.Allocator) ?[]const u8 {
+    return null;
+}
+
+// graph agrees with the checker on who lives where
+// , inner scopes never leak up, kinds tell shadowing apart
+test "graph mirrors the checker" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const src = "const x = 1\nfn f(x) do x end";
+    const parsed = try Parser.parseSource(alloc, src);
+    // wrapped like mergeWithPreludes does in production
+    // , so top decls live one scope down from the root
+    const items: []const *ast.Node = switch (parsed.expr) {
+        .block => |exprs| exprs,
+        else => &[_]*ast.Node{@constCast(parsed)},
+    };
+    const wrapped = try alloc.create(ast.Node);
+    wrapped.* = .{ .span = parsed.span, .expr = .{ .block = @constCast(items) } };
+    var graph = scope_graph.ScopeGraph.init(alloc);
+    defer graph.deinit();
+
+    var anchor: u8 = 0;
+    var checker = try SemanticChecker.init(alloc, "<test>", src, &.{}, null, null, null, .{
+        .ptr = &anchor,
+        .resolveFn = nullResolve,
+    }, &graph);
+    defer checker.deinit();
+    _ = try checker.analyzeNode(wrapped);
+
+    const file = try graph.fileRoot("<test>", ast.Span{ .start = 0, .end = 0, .line = 0, .column = 0 });
+    var kids = std.ArrayList(scope_graph.ScopeId).empty;
+    defer kids.deinit(alloc);
+    try graph.children(file, &kids);
+    try std.testing.expectEqual(@as(usize, 1), kids.items.len);
+    const body = kids.items[0];
+
+    const outer = graph.resolve(body, "x").?;
+    try std.testing.expect(graph.defs.items[outer].kind == .binding);
+    const fndef = graph.resolve(body, "f").?;
+    try std.testing.expect(graph.defs.items[fndef].kind == .binding);
+
+    var fnkids = std.ArrayList(scope_graph.ScopeId).empty;
+    defer fnkids.deinit(alloc);
+    try graph.children(body, &fnkids);
+    var found_param = false;
+    for (fnkids.items) |kid| {
+        if (graph.resolve(kid, "x")) |def| {
+            if (graph.defs.items[def].kind == .param) found_param = true;
+        }
+    }
+    try std.testing.expect(found_param);
+}

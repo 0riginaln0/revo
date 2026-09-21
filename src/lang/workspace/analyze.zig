@@ -8,6 +8,7 @@ const ast = @import("../ast.zig");
 const common = @import("common.zig");
 const diagnostic = @import("../diagnostic.zig");
 const pipeline = @import("../pipeline.zig");
+const scope_graph_mod = @import("../scope_graph.zig");
 const semantic = @import("../semantic.zig");
 const types = @import("../compiler/types.zig");
 
@@ -354,6 +355,8 @@ pub fn ensureInspect(
     defer type_annotations.deinit();
     var type_table = types.TypeTable.init(arena.allocator());
     defer type_table.deinit();
+    var scope_graph = scope_graph_mod.ScopeGraph.init(arena.allocator());
+    defer scope_graph.deinit();
 
     const WorkspaceResolver = struct {
         ws: *Workspace,
@@ -399,6 +402,7 @@ pub fn ensureInspect(
         .{ .map = &type_annotations, .table = &type_table },
         &docs,
         .{ .ptr = &ws_resolver, .resolveFn = WorkspaceResolver.resolve },
+        &scope_graph,
         &dropped_warn,
     );
 

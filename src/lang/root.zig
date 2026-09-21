@@ -94,6 +94,6 @@ test {
     _ = @import("compiler/bindings.zig");
     _ = @import("ir/root.zig");
     _ = @import("ir/opt.zig");
-    _ = @import("ir/opt.zig");
     _ = @import("ir/tests.zig");
+    _ = @import("scope_graph.zig");
 }

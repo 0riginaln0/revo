@@ -101,6 +101,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
     var type_annotations = std.AutoHashMap(*const Node, compiler.types.TypeId).init(vm.runtime.alloc);
     defer type_annotations.deinit();
     var type_table = compiler.types.TypeTable.init(arena.allocator());
+    var scope_graph = scope_graph_mod.ScopeGraph.init(arena.allocator());
 
     const known_globals = try knownGlobalsFromVm(vm, vm.runtime.alloc);
     defer vm.runtime.alloc.free(known_globals);
@@ -142,6 +143,7 @@ pub fn buildWithWarnings(vm: *VM, source: Source, opts: BuildOptions, warnings: 
         .{ .map = &type_annotations, .table = &type_table },
         null,
         .{ .ptr = &pipeline_resolver, .resolveFn = PipelineResolver.resolve },
+        &scope_graph,
         warnings,
     )) |failure| {
         // the original report is arena-owned inside semantic.analyze; copy it
@@ -525,6 +527,7 @@ const diagnostic = @import("diagnostic.zig");
 const import_scan = @import("pipeline/import_scan.zig");
 const macro_proc = @import("macro_proc.zig");
 const Parser = @import("Parser.zig");
+const scope_graph_mod = @import("scope_graph.zig");
 const scope_wiring = @import("pipeline/scope_wiring.zig");
 const semantic = @import("semantic.zig");
 pub const Bytecode = compiler.Bytecode;
