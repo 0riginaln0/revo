@@ -175,8 +175,8 @@ static int regex_fn(void *vm, size_t argc, RevoValue *argv,
   return REVO_OK;
 }
 
-// opaque demo ::: an opaque native counter
-// . revo holds the malloc'd struct as a opaque value and
+// resource demo ::: an opaque native counter
+// . revo holds the malloc'd struct in a gc cell and
 // hands it back on each call; free it explicitly
 typedef struct {
   double total;
@@ -191,7 +191,7 @@ static int total_new_fn(void *vm, size_t argc, RevoValue *argv,
     return revo_c_err_other(vm, "out of memory");
   }
   t->total = 0;
-  *out_result = revo_opaque_new(t);
+  *out_result = revo_resource_new(vm, t);
   return REVO_OK;
 }
 
@@ -199,11 +199,11 @@ static int total_add_fn(void *vm, size_t argc, RevoValue *argv,
                         RevoValue *out_result) {
   if (argc < 2)
     return revo_c_err_arity(vm, argc, 2);
-  if (!revo_is_opaque(argv[0]))
-    return revo_c_err_type(vm, 0, "opaque", argv[0]);
+  if (!revo_is_resource(argv[0]))
+    return revo_c_err_type(vm, 0, "resource", argv[0]);
   if (!revo_is_number(argv[1]))
     return revo_c_err_type(vm, 1, "number", argv[1]);
-  total_t *t = (total_t *)revo_opaque_ptr(argv[0]);
+  total_t *t = (total_t *)revo_resource_ptr(vm, argv[0]);
   if (!t) {
     return revo_c_err_other(vm, "null handle");
   }
@@ -214,9 +214,8 @@ static int total_add_fn(void *vm, size_t argc, RevoValue *argv,
 
 static int total_free_fn(void *vm, size_t argc, RevoValue *argv,
                          RevoValue *out_result) {
-  (void)vm;
-  if (argc >= 1 && revo_is_opaque(argv[0])) {
-    free(revo_opaque_ptr(argv[0]));
+  if (argc >= 1 && revo_is_resource(argv[0])) {
+    free(revo_resource_ptr(vm, argv[0]));
   }
   *out_result = revo_nil();
   return REVO_OK;

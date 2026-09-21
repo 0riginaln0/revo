@@ -274,6 +274,9 @@ pub struct FunctionId(u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OpaqueId(u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResourceId(u64);
+
 /// the actual revodata is f64 unless boxed
 /// this one has a fat size=32 cost slapped onto it
 /// and lives past vm lifetime, real data are owned by gc
@@ -285,6 +288,7 @@ pub enum Value {
     Table(TableId),
     Function(FunctionId),
     Opaque(OpaqueId),
+    Resource(ResourceId),
 }
 
 impl Display for Value {
@@ -296,6 +300,7 @@ impl Display for Value {
             Value::Table(id) => write!(f, "table#{}", id.0),
             Value::Function(id) => write!(f, "function#{}", id.0),
             Value::Opaque(id) => write!(f, "opaque#{}", id.0),
+            Value::Resource(id) => write!(f, "resource#{}", id.0),
         }
     }
 }
@@ -328,6 +333,7 @@ impl Value {
             Value::Table(id) => Ok(boxed(RevoType_revo_table, id.0)),
             Value::Function(id) => Ok(boxed(RevoType_revo_function, id.0)),
             Value::Opaque(id) => Ok(boxed(RevoType_revo_opaque, id.0)),
+            Value::Resource(id) => Ok(boxed(RevoType_revo_resource, id.0)),
         }
     }
 
@@ -348,6 +354,9 @@ impl Value {
             }
             t if t == RevoType_revo_opaque as u64 => {
                 Ok(Value::Opaque(OpaqueId(val & REVO_PAYLOAD_MASK)))
+            }
+            t if t == RevoType_revo_resource as u64 => {
+                Ok(Value::Resource(ResourceId(val & REVO_PAYLOAD_MASK)))
             }
             _ => Err("can't deduce the type"),
         }

@@ -33,6 +33,7 @@ title: 'docs'
   - [table methods](#table-methods)
   - [? suffix convention](#suffix-convention)
   - [opaque](#opaque)
+  - [resource](#resource)
 - [operators](#operators)
 - [control flow](#control-flow)
   - [if/else](#ifelse)
@@ -541,7 +542,7 @@ else
     x
 ```
 
-supported predicates: `number?`, `string?`, `table?`, `atom?`, `function?`, `opaque?`
+supported predicates: `number?`, `string?`, `table?`, `atom?`, `function?`, `opaque?`, `resource?`
 
 ### runtime type predicates
 
@@ -627,6 +628,16 @@ opaque?(42)         # check at runtime
 ```
 
 opaque values compare by pointer identity and have no destructor; the caller manages the pointer's lifetime
+
+### resource
+
+owned handles from c! same hiding as opaque, plus a per-handle
+metatable & a `__gc` hook. light never finalizes; resource does, once
+
+```revo
+typeof(handle)    # => :resource
+resource?(handle) # check at runtime
+```
 
 ## operators
 

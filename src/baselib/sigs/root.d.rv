@@ -16,7 +16,7 @@ pub declare get_meta = fn(value: any) -> table | :undef
 #* sets metatable of value *#
 pub declare set_meta = fn(value: any, meta: table|:undef) -> any
 
-#* returns type of value as atom: nil, num, string, atom, function, table, opaque *#
+#* returns type of value as atom: nil, num, string, atom, function, table, opaque, resource *#
 pub declare typeof = fn(value: any) -> atom
 
 #* used in tests, returns value or {:err, :ExpectFailed} tuple *#

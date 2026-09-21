@@ -269,6 +269,47 @@ opaque?(ptr) # :true
 
 ptr identity, opaque render (`<opaque *>`)
 
+### resource
+
+owned handles!
+
+while light `opaque` is a bare immediate; resource is what you want
+for handles with methods & cleanup
+
+a caller-owned ptr in a gc cell + a per-handle metatable:
+revo code can neither see nor overwrite the address.
+the cell frees at sweep, the pointee never
+
+```c
+RevoValue h = revo_resource_new(vm, ptr);  // nil on failure
+void *p = revo_resource_ptr(vm, h);        // null unless resource
+int is_e = revo_is_resource(h);            // check
+```
+
+{{< ref "pub fn revo_resource_new(" >}}
+{{< ref "pub fn revo_resource_ptr(" >}}
+
+null-ptr cells unwrap null just like opaque, so `revo_is_resource`
+first when it matters
+
+**metatables.** one table per resource kind & every handle points at it:
+
+```c
+revo_resource_setmetatable(vm, h, mt);  // false unless resource + table
+revo_resource_getmetatable(vm, h, &out);
+```
+
+methods come through `__index` like tables. same table back from
+`getmetatable` means same kind: that is your type check. nil clears
+
+**`__gc`.** metatable `__gc` runs once with the handle when swept
+(leftovers run at destroy). one-shot: the field clears when queued,
+set a fresh metatable inside `__gc` to re-arm. no timing promises.
+and light `opaque` never finalizes: no cell, no metatable, no `__gc`
+
+{{< ref "pub fn revo_resource_setmetatable(" >}}
+{{< ref "pub fn revo_resource_getmetatable(" >}}
+
 ### rooting
 
 a `RevoValue` in a c local roots nothing. values reachable only from c
@@ -493,6 +534,7 @@ fn()           - revo_is_function - revo_function_id
 {} (table)     - revo_is_table    - revo_table_id
 {1, 2} (table) - revo_is_table    - revo_table_id
 opaque ptr    - revo_is_opaque      - revo_opaque_ptr
+resource ptr   - revo_is_resource     - revo_resource_ptr
 ```
 
 a value can be moved through any of the constructors in its row

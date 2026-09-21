@@ -13,9 +13,9 @@ print(extension.regex("^h", "hello"))
 print(extension.concat({"a", "b", "c"}, "-"))
 print(extension.concat({"revo", "rules"}, ", "))
 
-# opaque demo ::: the counter lives in malloc'd c memory, revo holds the handle
+# resource demo ::: the counter lives in malloc'd c memory, revo holds the handle
 let t = extension.total_new()
-print(typeof(t))  # :opaque
+print(typeof(t))  # :resource
 print(extension.total_add(t, 5))
 print(extension.total_add(t, 7))
 extension.total_free(t)
