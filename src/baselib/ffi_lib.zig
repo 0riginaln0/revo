@@ -97,11 +97,48 @@ fn prepCif(box: *Box) !void {
     if (status != c.FFI_OK) return error.FfiPrepFailed;
 }
 
-/// shared `__call`: args[0] is the handle, the rest marshal by decl
+/// shared `__call`:
+///
+///   args[0] is the handle, the rest marshal by decl
+///
+/// surplus varargs infer from values
+/// (same as luajit: numbers go as doubles, box explicitly to pass anything else)
 fn ffiCallFn(args: []const Value, vm: *VM) !HostResult {
     const box = boxOf(vm, args[0], .func) orelse
         return .errType(0, "ffi func handle", root.typeof(args[0], vm));
     if (args.len - 1 != box.nargs) return .errArity(args.len - 1, box.nargs);
+
+    var vtypes: [max_args]fdesc.FfiType = box.types;
+    var varg_t: [max_args]*c.ffi_type = undefined;
+    var use_cif = &box.cif;
+    var stack_cif: c.ffi_cif = undefined;
+    if (box.nargs > box.fixed) {
+        for (box.fixed..box.nargs) |i| {
+            const a = args[i + 1];
+            vtypes[i] = if (a.isNumber())
+                .f64
+            else if (a.asAtom()) |id| blk: {
+                if (id == revo.CoreAtoms.atomId(.true) or
+                    id == revo.CoreAtoms.atomId(.false)) break :blk .boolean;
+                if (id == revo.CoreAtoms.atomId(.nil)) break :blk .ptr;
+                return .errType(i + 1, "vararg value", root.typeof(a, vm));
+            } else if (a.isString() or a.isOpaque() or a.isResource())
+                .ptr
+            else
+                return .errType(i + 1, "vararg value", root.typeof(a, vm));
+        }
+        for (vtypes[0..box.nargs], 0..) |t, i| varg_t[i] = toFfiType(t);
+        const status = c.ffi_prep_cif_var(
+            &stack_cif,
+            c.FFI_DEFAULT_ABI,
+            @intCast(box.fixed),
+            @intCast(box.nargs),
+            toFfiType(box.ret),
+            @ptrCast(&varg_t),
+        );
+        if (status != c.FFI_OK) return .other("ffi_prep_cif failed");
+        use_cif = &stack_cif;
+    }
 
     var slots: [max_args]u64 = .{0} ** max_args;
     var ptrs: [max_args]?*anyopaque = .{null} ** max_args;
@@ -109,9 +146,12 @@ fn ffiCallFn(args: []const Value, vm: *VM) !HostResult {
     var nstr: usize = 0;
     defer for (strbufs[0..nstr]) |s| vm.runtime.alloc.free(s);
 
-    for (box.types[0..box.nargs], 0..) |t, i| {
+    for (vtypes[0..box.nargs], 0..) |t, i| {
         const a = args[i + 1];
-        switch (t) {
+
+        // surplus strings go as copied NUL, like luajit varargs
+        const tt = if (i >= box.fixed and t == .ptr and a.isString()) .string else t;
+        switch (tt) {
             .i32 => slots[i] = @as(u64, @bitCast(@as(
                 i64,
                 fdesc.valueToInt(i32, a) orelse return .errType(i + 1, "i32", root.typeof(a, vm)),
@@ -166,9 +206,9 @@ fn ffiCallFn(args: []const Value, vm: *VM) !HostResult {
         ptrs[i] = @ptrCast(&slots[i]);
     }
 
-    // gc stays suppressed under host_call_depth; borrowed slots die here
+    // gc stays suppressed under host_call_depth; borrowed slots get died here
     var retbuf: u64 = 0;
-    c.ffi_call(&box.cif, @ptrCast(@alignCast(box.sym.?)), &retbuf, &ptrs);
+    c.ffi_call(use_cif, @ptrCast(@alignCast(box.sym.?)), &retbuf, &ptrs);
     vm.ffi_errno = switch (builtin.target.os.tag) {
         .macos, .freebsd, .openbsd => __error().*,
         else => ffi_errno_location().*,
@@ -264,24 +304,59 @@ fn installMt(vm: *VM, id: revo.memory.ResourceID, call: bool) !Value {
     return Value.new.table(mt);
 }
 
+/// DlDynLib backend check, mocks std's InnerType selection
+const self_dlopen_ok = switch (builtin.os.tag) {
+    .linux => builtin.link_libc and !(builtin.abi == .musl and builtin.link_mode == .static),
+    .driverkit,
+    .ios,
+    .maccatalyst,
+    .macos,
+    .tvos,
+    .visionos,
+    .watchos,
+    .freebsd,
+    .netbsd,
+    .openbsd,
+    .dragonfly,
+    .illumos,
+    => true,
+    else => false,
+};
+
+fn finishLoad(vm: *VM, lib: std.DynLib) !HostResult {
+    var owned = lib;
+    errdefer owned.close();
+
+    const box = try vm.runtime.alloc.create(Box);
+    var live = false;
+    errdefer if (!live) vm.runtime.alloc.destroy(box);
+    box.* = .{ .kind = .lib, .lib_index = vm.loaded_extensions.items.len };
+    const id = try vm.resources.create(box);
+    live = true;
+    try vm.loaded_extensions.append(vm.runtime.alloc, owned);
+
+    _ = try installMt(vm, id, false);
+    return .data(Value.new.resource(id));
+}
+
 pub const Impl = struct {
     pub fn load(vm: *VM, path: Args.string) !HostResult {
         const bytes = vm.stringValue(@intFromEnum(path));
+
+        // empty path opens the process itself
+        //   (libc is here on every posix target, no paths to guess)
+        if (bytes.len == 0) {
+            if (!self_dlopen_ok) return .errImportFailed("self unsupported here");
+            const handle = std.c.dlopen(null, .{ .NOW = true }) orelse
+                return .errImportFailed("dlopen self");
+            return finishLoad(vm, .{ .inner = .{ .handle = handle } });
+        }
+
         const zpath = try vm.runtime.alloc.dupeSentinel(u8, bytes, 0);
         defer vm.runtime.alloc.free(zpath);
         var lib = std.DynLib.open(zpath) catch |err| return .errImportFailed(@errorName(err));
         errdefer lib.close();
-
-        const box = try vm.runtime.alloc.create(Box);
-        var live = false;
-        errdefer if (!live) vm.runtime.alloc.destroy(box);
-        box.* = .{ .kind = .lib, .lib_index = vm.loaded_extensions.items.len };
-        const id = try vm.resources.create(box);
-        live = true;
-        try vm.loaded_extensions.append(vm.runtime.alloc, lib);
-
-        _ = try installMt(vm, id, false);
-        return .data(Value.new.resource(id));
+        return finishLoad(vm, lib);
     }
 
     pub fn func(
@@ -359,7 +434,10 @@ fn declare(
         const a = vm.arrayGet(arg_tid, i) orelse return .errType(3, "type atoms", "short table");
         box.types[i] = parseType(vm, a) orelse return .errType(3, type_names, root.typeof(a, vm));
     }
-    prepCif(box) catch return .other("ffi_prep_cif failed");
+
+    // variadic surplus infers from values per call
+    // ; fixed decls prep now
+    if (box.fixed == box.nargs) prepCif(box) catch return .other("ffi_prep_cif failed");
     const id = try vm.resources.create(box);
     live = true;
 

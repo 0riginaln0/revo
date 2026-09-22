@@ -48,6 +48,28 @@ tuples and structs are gone now, most breaking change yet
 
     - now carry severity of either err, warning, note, or help
 
+- ffi!
+  dynamically call any & all c functions right from revo
+  ```ruby
+  # empty path opens the process itself, libc is there everywhere
+  let libc = ffi.load("")
+
+  # strlen takes a string, returns a u64
+  let strlen = ffi.func(libc, "strlen", :u64, {:string})
+  print(strlen("hello")) # 5
+
+  #* 
+   * variadic call
+   * : fixed prefix types + total count
+   *
+   * printf writes past revo straight to stdout (on pipes it flushes at exit)
+  *#
+  let printf = ffi.varfunc(libc, "printf", :i32, {:string}, 2)
+  let n = printf("hello %s\n", "world")
+  print(n) # 12
+  ```
+  declarations will later be done with a c parser
+
 - just match
   sugar for `match :true`
 

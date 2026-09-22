@@ -355,6 +355,34 @@ reachable til it fires
 {{< ref "pub fn revo_table_set_finalizer(" >}}
 {{< ref "pub fn revo_table_remove_finalizer(" >}}
 
+### ffi (posix only)
+
+dynamic c calls!
+
+declare by api then call the handle
+
+```revo
+let lib = ffi.load("libc.so.6")
+let strlen = ffi.func(lib, "strlen", :u64, {:string})
+strlen("hello")  # 5
+ffi.errno()      # last errno on this vm
+```
+
+types are atoms: `i32|u32|i64|u64|f32|f64|bool|ptr|void|string`.
+returns surface as numbers (`u64` past f64 range errors)
+, strings copy, pointers come back the way mother nature made them
+
+`ffi.varfunc` adds a total count for `...` functions
+
+decl problems fail at declare time;
+bad args fail at call time; both carry messages
+
+handles are `resource` values with `__call` + `__gc` already attached
+
+strings copy in, never borrow. `nil` is null, on both sides
+
+if you misdeclare a signature and you crash like c does
+
 ### strings
 
 strings are interned! every unique string has a stable `uint64_t` id
