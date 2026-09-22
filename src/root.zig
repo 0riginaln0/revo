@@ -382,6 +382,9 @@ pub fn stderr() std.Io.File {
 test {
     _ = @import("./lang/lang_tests.zig");
     _ = @import("./extension.zig");
+    _ = @import("./baselib/ffi.zig");
+    _ = @import("./baselib/host.zig");
+    _ = @import("./baselib/specs.zig");
 }
 
 const builtin = @import("builtin");

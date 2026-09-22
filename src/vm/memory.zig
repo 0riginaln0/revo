@@ -251,6 +251,12 @@ pub fn numToInt(comptime T: type, n: f64) ?T {
     const min: f64 = @floatFromInt(std.math.minInt(T));
     const max: f64 = @floatFromInt(std.math.maxInt(T));
     if (n < min or n > max) return null;
+    // maxInt rounds up past itself for 64-bit ints, so n there passes
+    // the range check but traps below; powers of two are exact, exclude
+    if (@typeInfo(T).int.bits == 64) {
+        const top: f64 = if (@typeInfo(T).int.signedness == .signed) 9223372036854775808.0 else 18446744073709551616.0;
+        if (n >= top) return null;
+    }
     return @intFromFloat(n);
 }
 
