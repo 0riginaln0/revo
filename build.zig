@@ -45,6 +45,8 @@ const Features = packed struct {
     regex: bool = false,
     /// ~  available everywhere except freestanding
     mimalloc: bool = false,
+    /// ~ dynamic c calls need dlopen; posix only
+    ffi: bool = false,
     zig_backend: bool = false,
     // ~ async: requires posix threads, not available on windows/wasi/freestanding
 };
@@ -151,15 +153,18 @@ pub fn build(b: *Build) !void {
     if (optimize != effective_optimize)
         logger.warn("Debug mode crashes wasm64 builds; forcing ReleaseSmall for all modules", .{});
 
-    const features_str = b.option([]const u8, "features", "available: isocline, lsp, regex, mimalloc, zig_backend") orelse
+    const features_str = b.option([]const u8, "features", "available: isocline, lsp, regex, mimalloc, ffi, zig_backend") orelse
         // isocline needs libc and not wasm; wasi gets lsp but not isocline
         // async is disabled on windows/wasi/freestanding (handled in src/root.zig)
-        if (is_freestanding) "" else if (is_wasm) "lsp,regex" else "isocline,lsp,regex,mimalloc";
+        if (is_freestanding) "" else if (is_wasm) "lsp,regex" else "isocline,lsp,regex,mimalloc,ffi";
 
-    // windows missing features: isocline (no libc), async (no posix threads)
+    // windows missing features: isocline (no libc), ffi (no dlopen), async (no posix threads)
     if (builtin.os.tag == .windows) {
         if (std.mem.find(u8, features_str, "isocline") != null) {
             logger.warn("isocline is not available on windows, disabling", .{});
+        }
+        if (std.mem.find(u8, features_str, "ffi") != null) {
+            logger.warn("ffi is not available on windows, disabling", .{});
         }
     }
 
@@ -175,6 +180,7 @@ pub fn build(b: *Build) !void {
     const features = getFeatures(features_str);
 
     const mimalloc_enabled = !is_freestanding and features.mimalloc;
+    const ffi_enabled = !is_freestanding and !is_wasm and target.result.os.tag != .windows and features.ffi;
 
     var git_exit_code: u8 = 0; // ignored, but it's a required argument
     const git_output = b.runAllowFail(
@@ -189,6 +195,7 @@ pub fn build(b: *Build) !void {
     const debug_options = b.addOptions();
     debug_options.addOption(bool, "is_freestanding", is_freestanding);
     debug_options.addOption(bool, "mimalloc", mimalloc_enabled);
+    debug_options.addOption(bool, "ffi", ffi_enabled);
     debug_options.addOption(bool, "isocline", features.isocline);
     debug_options.addOption(bool, "regex", features.regex);
     debug_options.addOption([]const u8, "version", VERSION);
@@ -203,6 +210,7 @@ pub fn build(b: *Build) !void {
     const release_options = b.addOptions();
     release_options.addOption(bool, "is_freestanding", is_freestanding);
     release_options.addOption(bool, "mimalloc", mimalloc_enabled);
+    release_options.addOption(bool, "ffi", ffi_enabled);
     release_options.addOption(bool, "isocline", features.isocline);
     release_options.addOption(bool, "regex", features.regex);
     release_options.addOption([]const u8, "version", VERSION);
@@ -312,6 +320,18 @@ pub fn build(b: *Build) !void {
     if (mimalloc_lib) |ml| {
         exe_mod.linkLibrary(ml);
         if (erevo_mod) |em| em.linkLibrary(ml);
+    }
+
+    // vendored libffi, posix only; proves fetch+configure+link
+    // , nothing references its symbols yet (that lands with ffi.zig)
+    const ffi_dep = if (ffi_enabled) b.lazyDependency("libffi", .{
+        .target = target,
+        .optimize = effective_optimize,
+    }) else null;
+    if (ffi_dep) |dep| {
+        const ffi_lib = dep.artifact("ffi");
+        exe_mod.linkLibrary(ffi_lib);
+        if (erevo_mod) |em| em.linkLibrary(ffi_lib);
     }
 
     const header_wf = b.addWriteFiles();
@@ -524,6 +544,7 @@ pub fn build(b: *Build) !void {
             const rel_options = b.addOptions();
             rel_options.addOption(bool, "is_freestanding", release_is_fs);
             rel_options.addOption(bool, "mimalloc", !release_is_fs and mimalloc_enabled);
+            rel_options.addOption(bool, "ffi", !release_is_fs and ffi_enabled);
             rel_options.addOption(bool, "isocline", release_isocline_enabled);
             // TODO: regex compiles for freestanding, it isn't the issue here
             rel_options.addOption(

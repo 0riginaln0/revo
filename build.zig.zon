@@ -27,6 +27,11 @@
             .url = "git+https://github.com/kurtwagner/zlinter?ref=0.16.x#8b10b45d33c684be4f869baf95a37c282e9db750",
             .hash = "zlinter-0.0.1-OjQ08doQDADkvkcRq2ONICvDheGl2onZzS5upWDxFNnA",
         },
+        .libffi = .{
+            .url = "git+https://github.com/allyourcodebase/libffi#29f3c29dd59402dd2112db8252beb57c3966df2d",
+            .hash = "libffi-3.5.2-QhHaJ2w4AACSdZtDZIkZWHkCpsK_GLC8DIQS8UnD24I4",
+            .lazy = true,
+        },
     },
     .paths = .{
         "src/",
