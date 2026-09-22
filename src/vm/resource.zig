@@ -52,28 +52,19 @@ pub const ResourcePool = struct {
     }
 
     pub fn create(self: *ResourcePool, ptr: ?*anyopaque) !mem.ResourceID {
-        if (self.dead.pop()) |id| {
-            const r = self.resources.items[id].?;
-            r.ptr = ptr;
-            r.metatable = null;
-            self.marks.unset(id);
-            alloc_pool.relink(&self.first, &self.last, &self.next, id);
-            return id;
-        }
-        const id: mem.ResourceID = @intCast(self.resources.items.len);
-        if (id >= self.marks.capacity()) {
-            try self.marks.resize(id + 1, false);
-        }
-
-        const box = try self.box_pool.create(self.alloc);
-        errdefer self.box_pool.destroy(box);
-        box.* = .{ .ptr = ptr };
-
-        try self.resources.append(self.alloc, box);
-        errdefer _ = self.resources.pop();
-
-        try alloc_pool.link(&self.first, &self.last, &self.next, self.alloc, id);
-        return id;
+        return alloc_pool.create(
+            self.alloc,
+            Resource,
+            mem.ResourceID,
+            &self.box_pool,
+            &self.resources,
+            &self.marks,
+            &self.dead,
+            &self.first,
+            &self.last,
+            &self.next,
+            .{ .ptr = ptr },
+        );
     }
 
     pub fn get(self: *ResourcePool, id: mem.ResourceID) !*Resource {

@@ -236,6 +236,9 @@ c_refs: std.AutoHashMap(u64, Value),
 c_ref_next: u64 = 1,
 /// last failed `revo_call`, freed on the next call + destroy
 c_last_error: ?[:0]u8 = null,
+/// last foreign-call errno, read via `ffi.errno`
+ffi_errno: c_int = 0,
+/// last foreign-call errno, read via `ffi.errno`
 
 const MarkItem = union(enum) {
     data: Value,
@@ -1784,7 +1787,8 @@ pub fn callRegister(
     }
 
     // try __call on non-fn callees: table fields first, then metatables
-    if (callee.asTable()) |_| {
+    // , resources go through the same path (handles calling like tables)
+    if (callee.asTable() != null or callee.asResource() != null) {
         @branchHint(.unlikely);
         if (try self.resolveField(
             callee,
