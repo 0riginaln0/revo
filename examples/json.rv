@@ -1,5 +1,5 @@
 #!/usr/bin/env revo
-  
+
   ```json
   [
     "reads json from stdin, pretty-prints a revo table into stdout",
@@ -17,7 +17,7 @@ fn parse_json(s: string) -> !{num, table}
 
 fn parse(s, i) do # [ ] type inferred as :nil here
 	match s[i]
-		| c when is_numeric(c) => parse_num(s, i)
+		| c when numeric?(c) => parse_num(s, i)
 		| 'n' => parse_null(s, i)
 		| 't' => parse_bool(s, i)
 		| 'f' => parse_bool(s, i)
@@ -27,7 +27,7 @@ fn parse(s, i) do # [ ] type inferred as :nil here
 		| _ => :nil
 end
 
-fn is_numeric(c) c:len() > 0 and "-0123456789.":contains?(c)
+fn numeric?(c) c:len() > 0 and "-0123456789.":contains?(c)
 
 fn parse_string(s, i) do
 	let count = 1
@@ -111,7 +111,7 @@ end
 
 fn parse_num(s, i) do
 	let count = 0
-	while (i + count < s:len() and is_numeric(s[i + count]))
+	while (i + count < s:len() and numeric?(s[i + count]))
 		count += 1
 	let num = number(s:sub(i, count))?
 	{:ok, {count, num}}

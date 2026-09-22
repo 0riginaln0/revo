@@ -651,19 +651,19 @@ test "stats methods" {
     try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.mean() == 2.0");
     try testing.topTrue("{1.5, 2.5, 2.5, 2.75, 3.25, 4.75} |> stats.stdev() == 0.986893273527251");
     try testing.topTrue("{1.5, 2.5, 2.5, 2.75, 3.25, 4.75} |> stats.sample_stdev() == 1.0810874155219827");
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() |> math.is_close?(1.5, 6)");
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_variance() |> math.is_close?(1.714285714285715, 15)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.variance() |> math.close?(1.5, 6)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_variance() |> math.close?(1.714285714285715, 15)");
     // Skewness result in revo current impl: 0.8164965809277258
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() |> math.is_close?(0.8164965809277261, 14)");
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_skewness() |> math.is_close?(1.018350154434631, 15)");
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() |> math.is_close?(-1.0, 1)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.skewness() |> math.close?(0.8164965809277261, 14)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_skewness() |> math.close?(1.018350154434631, 15)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.kurtosis() |> math.close?(-1.0, 1)");
     // Sample kurtosis result in revo current impl: -0.6999999999999984
-    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_kurtosis() |> math.is_close?(-0.7000000000000008, 14)");
-    try testing.topTrue("stats.slope({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(0.9, 1)");
-    try testing.topTrue("stats.intercept({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(1.3, 1)");
-    try testing.topTrue("stats.correlation({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(0.9, 1)");
-    try testing.topTrue("stats.covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(1.8, 1)");
-    try testing.topTrue("stats.sample_covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.is_close?(2.25, 1)");
+    try testing.topTrue("{1.0, 2.0, 1.0, 4.0, 1.0, 4.0, 1.0, 2.0} |> stats.sample_kurtosis() |> math.close?(-0.7000000000000008, 14)");
+    try testing.topTrue("stats.slope({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.close?(0.9, 1)");
+    try testing.topTrue("stats.intercept({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.close?(1.3, 1)");
+    try testing.topTrue("stats.correlation({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.close?(0.9, 1)");
+    try testing.topTrue("stats.covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.close?(1.8, 1)");
+    try testing.topTrue("stats.sample_covariance({1, 2, 3, 4, 5}, {2, 3, 5, 4, 6}) |> math.close?(2.25, 1)");
 }
 
 // harmonic_mean(data, weights=None)

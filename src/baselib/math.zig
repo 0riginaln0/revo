@@ -89,7 +89,7 @@ pub const Impl = struct {
         _ = vm;
         return .data(Value.new.num(std.math.sign(x)));
     }
-    pub fn @"is_close?"(vm: *VM, x: Args.number, y: Args.number, places: Args.number) !HostResult {
+    pub fn @"close?"(vm: *VM, x: Args.number, y: Args.number, places: Args.number) !HostResult {
         _ = vm;
         const tolerance = 1.0 / std.math.pow(f64, 10, places);
         const result = std.math.approxEqAbs(f64, x, y, tolerance);
@@ -131,8 +131,8 @@ test "math library" {
     try testing.topNumber("math.max(1, 2, 3)", 3);
     try testing.topNumber("math.hypot(3, 4)", 5.0);
     try testing.topNumber("math.sign(-0.15)", -1);
-    try testing.topTrue("math.is_close?(1.5, 1.5004, 3)");
-    try testing.topFalse("math.is_close?(1.5, 1.5004, 4)");
+    try testing.topTrue("math.close?(1.5, 1.5004, 3)");
+    try testing.topFalse("math.close?(1.5, 1.5004, 4)");
 }
 
 const std = @import("std");

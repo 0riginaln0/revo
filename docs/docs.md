@@ -612,10 +612,10 @@ functions whose name ends with `?` must return bool:
 
 ```revo
 # error: function ending with ? must return bool
-fn is_ok?() do :ok end
+fn ok?() do :ok end
 
 # ok
-fn is_ok?() -> bool do :true end
+fn ok?() -> bool do :true end
 ```
 
 ### opaque
@@ -959,7 +959,7 @@ they apply to most of the language, since everything will likely return somethin
 
 ```revo
 const res = (2 + 2)
-  |> assert_eq(4) 
+  |> assert_eq(4)
   # assert has nothing useful to return, so it should return the value you passed in
   |> inspect # will print and return back the value
   |> string # string will never error
