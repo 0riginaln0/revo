@@ -482,3 +482,22 @@ test "light opaque never finalizes; bare resource sweeps silent" {
     try testing.expectEqual(@as(usize, 0), res_gc_hits);
     try testing.expect(!vm.resources.isValid(bare));
 }
+
+test "typed resource params reject non-resources" {
+    var vm = try VM.init(vt_runtime());
+    defer vm.deinit();
+
+    const S = struct {
+        fn f(_: *VM, h: revo.baselib.host.ArgTypes.resource) anyerror!revo.baselib.host.HostResult {
+            return .data(Value.new.resource(@intFromEnum(h)));
+        }
+    };
+    const fid = try vm.installHost("res_echo", revo.baselib.host.def(S.f));
+    const callee = Value.new.function(fid);
+
+    try testing.expectError(error.TypeError, vm.callFunctionParts(callee, null, &.{Value.new.num(1)}, null));
+
+    const rid = try vm.resources.create(null);
+    const res = try vm.callFunctionParts(callee, null, &.{Value.new.resource(rid)}, null);
+    try testing.expectEqual(rid, res.asResource().?);
+}

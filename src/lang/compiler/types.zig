@@ -40,6 +40,7 @@ pub const TypeInfo = struct {
         bool, // TODO: remove, make this be atom union of :true | :false
         number,
         string,
+        resource,
         atom: []const u8,
         @"union": []const UnionVariant,
         table: struct {
@@ -58,6 +59,7 @@ pub const TypeInfo = struct {
         return switch (self.tag) {
             .bool => other.tag == .bool,
             .number => other.tag == .number,
+            .resource => other.tag == .resource,
             .string => other.tag == .string,
             .atom => |a| if (other.tag == .atom) std.mem.eql(u8, ast.atomName(a), ast.atomName(other.tag.atom)) else false,
             .@"union" => |us| if (other.tag == .@"union") blk: {
@@ -450,7 +452,7 @@ pub const TABLE_GENERIC: TypeInfo = makeTable(null, &ANY_TI, null);
 /// deep-clone a TypeInfo into a new allocator
 pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
     return switch (ti.tag) {
-        .bool, .number, .string, .any, .never => ti,
+        .bool, .number, .string, .resource, .any, .never => ti,
         .atom => |s| .{ .tag = .{ .atom = try alloc.dupe(u8, s) } },
         .type_var => |s| .{ .tag = .{ .type_var = try alloc.dupe(u8, s) } },
         .@"union" => |variants| {
@@ -520,7 +522,7 @@ pub fn clone(ti: TypeInfo, alloc: std.mem.Allocator) !TypeInfo {
 pub fn deinitType(ti: *TypeInfo, alloc: std.mem.Allocator) void {
     if (ti.doc) |d| alloc.free(d);
     switch (ti.tag) {
-        .bool, .number, .string, .any, .never => {},
+        .bool, .number, .string, .resource, .any, .never => {},
         .atom, .type_var => |s| if (s.len > 0) alloc.free(s),
         .@"union" => |variants| {
             for (variants) |*v| {
@@ -622,7 +624,7 @@ pub fn eqlExact(a: TypeInfo, b: TypeInfo) bool {
     } else return false;
 
     return switch (a.tag) {
-        .bool, .number, .string, .any, .never => true,
+        .bool, .number, .string, .resource, .any, .never => true,
         .atom => |s| std.mem.eql(u8, s, b.tag.atom),
         .type_var => |s| std.mem.eql(u8, s, b.tag.type_var),
         .@"union" => |us| blk: {
@@ -963,6 +965,7 @@ pub const type_name_map: std.StaticStringMap(TypeInfo) = std.StaticStringMap(Typ
     .{ "bool", TypeInfo{ .tag = .bool } },
     .{ "any", TypeInfo{ .tag = .any } },
     .{ "table", TABLE_GENERIC },
+    .{ "resource", TypeInfo{ .tag = .resource } },
     .{ "function", TypeInfo{ .tag = .{ .function = &ANY_FN_SIG } } },
     .{ "atom", TypeInfo{ .tag = .{ .atom = "" } } }, // empty atom payload is the "any atom" sentinel
     .{ "never", TypeInfo{ .tag = .never } },

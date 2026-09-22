@@ -739,6 +739,7 @@ fn compileTypeSatisfies(
         .never => try fail_jumps.append(self.alloc, try self.jump(.jump)),
         .number => try fail_jumps.append(self.alloc, try jumpIfNotType(self, subject, "number")),
         .string => try fail_jumps.append(self.alloc, try jumpIfNotType(self, subject, "string")),
+        .resource => try fail_jumps.append(self.alloc, try jumpIfNotType(self, subject, "resource")),
         .function => try fail_jumps.append(self.alloc, try jumpIfNotType(self, subject, "function")),
         .bool => {
             // bools are :true/:false atoms

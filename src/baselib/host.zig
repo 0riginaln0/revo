@@ -59,6 +59,7 @@ pub fn paramToType(comptime spec: ParamType) type {
         .atom => ArgTypes.atom,
         .function => ArgTypes.function,
         .table => ArgTypes.table,
+        .resource => ArgTypes.resource,
         .bool => bool,
         .any => Value,
     };
@@ -73,6 +74,7 @@ pub fn unwrapArgs(comptime params: []const ParamType, args: []const Value) Args(
             .atom => args[i].asAtom().?,
             .function => args[i].asFunction().?,
             .table => args[i].asTable().?,
+            .resource => args[i].asResource().?,
             .bool => args[i].asAtom().?,
             .any => args[i],
         };
@@ -88,6 +90,7 @@ pub const ParamType = union(enum) {
     atom,
     function,
     table,
+    resource,
     bool,
     any,
 
@@ -100,6 +103,7 @@ pub const ParamType = union(enum) {
             .atom => data.isAtom(),
             .function => data.isFunction(),
             .table => data.isTable(),
+            .resource => data.isResource(),
         };
     }
 
@@ -124,6 +128,7 @@ pub const ParamType = union(enum) {
             .atom => 2,
             .function => 3,
             .table => 4,
+            .resource => 7,
             .bool => 5,
             .any => 6,
         };
@@ -142,6 +147,7 @@ pub const ParamType = union(enum) {
             3 => .function,
             4 => .table,
             5 => .bool,
+            7 => .resource,
             else => .any,
         };
     }
@@ -155,6 +161,7 @@ pub fn paramTypeFromName(name: []const u8) ?ParamType {
         .{ "atom", .atom },
         .{ "function", .function },
         .{ "table", .table },
+        .{ "resource", .resource },
         .{ "bool", .bool },
         .{ "any", .any },
     });
@@ -305,6 +312,7 @@ pub const ArgTypes = struct {
     pub const atom = enum(mem.AtomID) { _ };
     pub const function = enum(mem.FunctionID) { _ };
     pub const table = enum(mem.TableID) { _ };
+    pub const resource = enum(mem.ResourceID) { _ };
     pub const any = Value;
 
     /// optional table parameter
@@ -333,6 +341,7 @@ pub fn typeToParam(comptime P: type) ParamType {
     if (P == ArgTypes.atom) return .atom;
     if (P == ArgTypes.function) return .function;
     if (P == ArgTypes.table) return .table;
+    if (P == ArgTypes.resource) return .resource;
     if (P == bool) return .bool;
     if (P == Value) return .any;
     @compileError("unsupported type in def: " ++ @typeName(P));
@@ -346,6 +355,7 @@ pub fn unwrapArg(comptime spec: ParamType, data: Value) paramToType(spec) {
         .atom => @enumFromInt(data.asAtom().?),
         .function => @enumFromInt(data.asFunction().?),
         .table => @enumFromInt(data.asTable().?),
+        .resource => @enumFromInt(data.asResource().?),
         .bool => data.asAtom().? == revo.CoreAtoms.atomId(.true),
         .any => data,
     };
@@ -465,4 +475,16 @@ pub fn impls(comptime ImplType: type) type {
         };
         pub const val: *const [count]specs.Impl = &impls_list;
     };
+}
+
+test "resource param type" {
+    const t = std.testing;
+    const r: ParamType = .resource;
+    try t.expect(paramTypeFromName("resource").? == .resource);
+    try t.expect(ParamType.fromTag(@as(u8, 7)) == .resource);
+    try t.expect(r.toTag() == 7);
+    const r_param = comptime typeToParam(ArgTypes.resource);
+    try t.expect(r_param == .resource);
+    try t.expect(r.matches(Value.new.resource(0)));
+    try t.expect(!r.matches(Value.new.num(1)));
 }

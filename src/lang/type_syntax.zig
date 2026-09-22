@@ -263,7 +263,7 @@ pub fn printType(ti: TypeInfo, writer: *std.Io.Writer, opts: PrintOptions) !void
             .function => try writer.writeAll("function"),
             // all these are spelled out so a future payload-carrying tag breaks
             // compilation here instead of just printing its tag name
-            .bool, .number, .string, .any, .never, .@"union" => try writer.writeAll(@tagName(ti.tag)),
+            .bool, .number, .string, .resource, .any, .never, .@"union" => try writer.writeAll(@tagName(ti.tag)),
         }
         return;
     }
@@ -345,6 +345,7 @@ pub fn printType(ti: TypeInfo, writer: *std.Io.Writer, opts: PrintOptions) !void
         .bool => try writer.writeAll("bool"),
         .number => try writer.writeAll("number"),
         .string => try writer.writeAll("string"),
+        .resource => try writer.writeAll("resource"),
         .any => try writer.writeAll("any"),
         .never => try writer.writeAll("never"),
     }

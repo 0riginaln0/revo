@@ -235,3 +235,15 @@ test bindings {
     try std.testing.expectEqual(str_spec.toTag(), bound[0].param_types[0]);
     try std.testing.expectEqual(HB.end, bound[0].param_types[1]);
 }
+
+test "resource binding tag" {
+    const S = struct {
+        fn f(_: *VM, h: ArgTypes.resource) !HostResult {
+            return .data(Value.new.resource(@intFromEnum(h)));
+        }
+    };
+    const f = def(S.f);
+    try std.testing.expect(f.param_types[0] == .resource);
+    try std.testing.expect(f.param_types[0].toTag() == 7);
+    try std.testing.expect(ParamType.fromTag(7) == .resource);
+}

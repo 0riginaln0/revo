@@ -962,8 +962,23 @@ test "parseGroup round trip: sig, params, doc, variadic, core key" {
     try testing.expectEqualStrings("table", mbuf.written());
 }
 
-fn renderAlloc(alloc: std.mem.Allocator, spec: FnSpec) ![]const u8 {
-    var buf = std.Io.Writer.Allocating.init(alloc);
+test "parseGroup accepts resource params and method heads" {
+    const src =
+        \\pub declare total_add = fn(handle: resource, amount: num) -> num
+        \\pub declare resource:close = fn(self: resource)
+    ;
+    const specs = try parseGroup(testing.allocator, src);
+    defer {
+        for (specs) |s| s.deinit(testing.allocator);
+        testing.allocator.free(specs);
+    }
+    try testing.expectEqual(@as(usize, 2), specs.len);
+    try testing.expectEqualStrings("handle", specs[0].type.kind.function.params[0].name);
+    try testing.expectEqualStrings("resource", specs[0].type.kind.function.params[0].type_name.?.kind.named);
+    try testing.expectEqualStrings("close", specs[1].name);
+}
+
+fn renderAlloc(alloc: std.mem.Allocator, spec: FnSpec) ![]const u8 {    var buf = std.Io.Writer.Allocating.init(alloc);
     defer buf.deinit();
     try renderSignature(&buf.writer, spec);
     return alloc.dupe(u8, buf.written());
