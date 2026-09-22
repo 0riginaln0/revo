@@ -193,16 +193,34 @@ pub export fn revo_call(
 ) callconv(.c) bool {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));
     const callee = func;
+    if (v.c_last_error) |m| {
+        v.runtime.alloc.free(m);
+        v.c_last_error = null;
+    }
 
     // stack buffer avoids GC-triggering heap alloc, most revo functions have few args
     var buf: [16]Value = undefined;
-    if (argc > 16) return false;
+    if (argc > 16) {
+        v.c_last_error = v.runtime.alloc.dupeSentinel(u8, "max 16 args", 0) catch null;
+        return false;
+    }
     for (0..@as(usize, @intCast(argc))) |i|
         buf[i] = argv[i];
 
-    const result = v.callFunctionParts(callee, null, buf[0..@as(usize, @intCast(argc))], null) catch return false;
+    const result = v.callFunctionParts(callee, null, buf[0..@as(usize, @intCast(argc))], null) catch |err| {
+        const msg = v.runtime_message orelse v.panic_message orelse @errorName(err);
+        v.c_last_error = v.runtime.alloc.dupeSentinel(u8, msg, 0) catch null;
+        return false;
+    };
     out.* = result;
     return true;
+}
+
+/// last failed `revo_call` message; empty when the last call worked
+/// , valid until the next `revo_call` on the same vm
+pub export fn revo_call_last_error(vm_ptr: *anyopaque) callconv(.c) [*:0]const u8 {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    return if (v.c_last_error) |m| m.ptr else "";
 }
 
 /// the name is borrowed, keep it static

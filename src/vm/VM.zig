@@ -234,6 +234,8 @@ gc_in_finalizer: bool = false,
 /// , ids monotonic, never reused, 0 never valid
 c_refs: std.AutoHashMap(u64, Value),
 c_ref_next: u64 = 1,
+/// last failed `revo_call`, freed on the next call + destroy
+c_last_error: ?[:0]u8 = null,
 
 const MarkItem = union(enum) {
     data: Value,
@@ -435,6 +437,7 @@ pub fn deinit(self: *VM) void {
     }
     self.gc_finalizers.deinit();
     self.c_refs.deinit();
+    if (self.c_last_error) |m| self.runtime.alloc.free(m);
     // run pending resource __gc while tables are alive
     {
         var id = self.resources.first;

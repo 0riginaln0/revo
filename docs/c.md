@@ -397,7 +397,10 @@ int ok = revo_call(vm, fn_val, 2, args, &result);
 ```
 
 returns 0 if the value wasn't callable or the call threw. max 16 args.
+why is in `revo_call_last_error` (empty when the last call worked,
+valid til the next call on the same vm)
 {{< ref "pub fn revo_call(" >}}
+{{< ref "pub fn revo_call_last_error(" >}}
 
 to expose a c function without a `.so`, wrap the pointer (name borrowed,
 keep it static):

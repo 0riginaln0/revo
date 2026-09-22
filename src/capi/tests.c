@@ -760,6 +760,23 @@ int main(int argc, char **argv) {
       assert(!ok);
       assert(strlen(erevo_vm_last_error(vm)) > 0);
     }
+
+    T("revo_call errors land in last_error") {
+      RevoValue tmod = revo_getglobal_cstr(vm, "tmod");
+      assert(revo_is_table(tmod));
+      RevoValue add_fn;
+      assert(revo_table_get_name(vm, tmod, "add", 3, &add_fn));
+      assert(revo_is_function(add_fn));
+
+      RevoValue one_arg[1] = {revo_num(1.0)};
+      assert(!revo_call(vm, add_fn, 1, one_arg, &call_result));
+      assert(strstr(revo_call_last_error(vm), "wants 2 args, got 1") != NULL);
+
+      RevoValue call_ok_args[2] = {revo_num(3.0), revo_num(4.0)};
+      assert(revo_call(vm, add_fn, 2, call_ok_args, &call_result));
+      assert(fabs(revo_num_value(call_result) - 7.0) < 1e-12);
+      assert(strcmp(revo_call_last_error(vm), "") == 0);
+    }
   }
 
   //
