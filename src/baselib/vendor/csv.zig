@@ -84,7 +84,6 @@ pub const Reader = struct {
     /// Creates a new Parser over the provided Reader. The Reader must be buffered,
     /// with a buffer length of at least 3 for all features to work.
     pub inline fn init(io_reader: *std.Io.Reader, dialect: Dialect) Reader {
-        std.debug.assert(io_reader.buffer.len > 0); // csv.Reader requires a buffered std.Io.Reader
         return .{
             .r = io_reader,
             .d = dialect,
@@ -300,7 +299,6 @@ fn getFilledBufferSlow(r: *std.Io.Reader) error{ ReadFailed, EndOfStream }![]con
 
     // Ensure something was read
     const new_data = r.buffered();
-    std.debug.assert(new_data.len > 0); // Reading from std.Io.Reader succeeded, but no data was read
     return new_data;
 }
 
@@ -353,8 +351,6 @@ pub const Writer = struct {
     /// If mixing both functions, a `writeRecord` can't follow a call to `writeField` -
     /// `terminateRecord` must be called first.
     pub fn writeRecord(self: *Writer, record: anytype) !void {
-        std.debug.assert(!self.needs_comma); // writeRecord called without terminating previous row.
-
         switch (@typeInfo(@TypeOf(record))) {
             // Slice of fields
             .pointer => |ptr| {
