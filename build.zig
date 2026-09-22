@@ -328,10 +328,14 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = effective_optimize,
     }) else null;
+    var test_ffi_lib: ?*std.Build.Step.Compile = null;
     if (ffi_dep) |dep| {
         const ffi_lib = dep.artifact("ffi");
         exe_mod.linkLibrary(ffi_lib);
         if (erevo_mod) |em| em.linkLibrary(ffi_lib);
+        // revo_mod carriers: tests link it directly, exes inherit it
+        revo_mod.linkLibrary(ffi_lib);
+        test_ffi_lib = ffi_lib;
     }
 
     const header_wf = b.addWriteFiles();
@@ -468,6 +472,24 @@ pub fn build(b: *Build) !void {
             });
             test_ext_lib.linker_allow_shlib_undefined = true;
 
+            // plain c fixture for ffi e2e (no revo types in signatures)
+            const ffi_fixture_mod = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .link_libc = !is_freestanding,
+            });
+            ffi_fixture_mod.addCSourceFile(.{
+                .file = b.path("src/capi/fixture.c"),
+                .flags = &.{
+                    "-std=c99", "-Wall", "-Wextra", "-fPIC",
+                },
+            });
+            const ffi_fixture_lib = b.addLibrary(.{
+                .name = "revo_ffi_fixture",
+                .root_module = ffi_fixture_mod,
+                .linkage = .dynamic,
+            });
+
             const c_test_exe = b.addExecutable(.{
                 .name = "revo-c-test",
                 .root_module = b.createModule(.{
@@ -486,10 +508,13 @@ pub fn build(b: *Build) !void {
             c_test_exe.root_module.addIncludePath(header_wf.getDirectory());
             c_test_exe.root_module.linkLibrary(lib);
             c_test_exe.root_module.linkSystemLibrary("m", .{ .needed = true });
+            if (test_ffi_lib) |fl| c_test_exe.root_module.linkLibrary(fl);
 
             const c_test_run = b.addRunArtifact(c_test_exe);
             // argv[1]: test .so path, absent when built standalone
             c_test_run.addFileArg(test_ext_lib.getEmittedBin());
+            // argv[2]: ffi fixture .so path, absent when built standalone
+            c_test_run.addFileArg(ffi_fixture_lib.getEmittedBin());
             test_c_step.dependOn(&c_test_run.step);
 
             // c++ compat (must compile as c++ and link)
@@ -511,6 +536,7 @@ pub fn build(b: *Build) !void {
             cpp_test_exe.root_module.addIncludePath(header_wf.getDirectory());
             cpp_test_exe.root_module.linkLibrary(lib);
             cpp_test_exe.root_module.linkSystemLibrary("m", .{ .needed = true });
+            if (test_ffi_lib) |fl| cpp_test_exe.root_module.linkLibrary(fl);
             test_c_step.dependOn(&b.addRunArtifact(cpp_test_exe).step);
         }
     }

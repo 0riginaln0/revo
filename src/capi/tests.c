@@ -780,6 +780,62 @@ int main(int argc, char **argv) {
   }
 
   //
+  // ffi e2e through eval (needs the fixture .so path as argv[2])
+  //
+  if (argc > 2) {
+    T("ffi calls plain c through decls") {
+      char src[4096];
+      snprintf(src, sizeof(src), "ffi.load(\"%s\")", argv[2]);
+      ok = erevo_eval(vm, "test", src, &val);
+      check(ok);
+      revo_setglobal_cstr(vm, "flib", val);
+
+      ok = erevo_eval(vm, "test", "ffi.func(flib, \"ffi_test_add\", :i32, {:i32, :i32})", &val);
+      check(ok);
+      revo_setglobal_cstr(vm, "fadd", val);
+
+      ok = erevo_eval(vm, "test", "fadd(30, 12)", &val);
+      check(ok);
+      assert(revo_is_number(val));
+      assert(fabs(revo_num_value(val) - 42.0) < 1e-12);
+    }
+
+    T("ffi decl errors fail with messages") {
+      ok = erevo_eval(vm, "test", "ffi.func(flib, \"ffi_test_add\", :nope, {:i32})", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+
+      ok = erevo_eval(vm, "test", "ffi.func(flib, \"missing_sym\", :i32, {})", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+    }
+
+    T("ffi call errors fail with messages") {
+      ok = erevo_eval(vm, "test", "fadd(1)", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+
+      ok = erevo_eval(vm, "test", "fadd(\"x\", 1)", &val);
+      assert(!ok);
+      assert(strlen(erevo_vm_last_error(vm)) > 0);
+    }
+
+    T("ffi errno reads back") {
+      ok = erevo_eval(vm, "test", "ffi.func(flib, \"ffi_test_fail\", :i32, {})", &val);
+      check(ok);
+      revo_setglobal_cstr(vm, "ffail", val);
+
+      ok = erevo_eval(vm, "test", "ffail()", &val);
+      check(ok);
+      assert(fabs(revo_num_value(val) + 1.0) < 1e-12);
+
+      ok = erevo_eval(vm, "test", "ffi.errno()", &val);
+      check(ok);
+      assert(fabs(revo_num_value(val) - 22.0) < 1e-12);
+    }
+  }
+
+  //
   // cleanup
   //
   erevo_program_destroy(prog);
