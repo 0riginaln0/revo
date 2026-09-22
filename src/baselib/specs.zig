@@ -32,6 +32,7 @@ const ParamType = root.host.ParamType;
 const HostFunc = root.host.HostFunc;
 
 pub const regex_on = @import("build_options").regex;
+pub const ffi_on = @import("build_options").ffi;
 
 /// the zig side of one spec: registry key + implementation
 pub const Impl = struct {
@@ -55,6 +56,7 @@ pub const groups: []const Group = &.{
     Group.init("root", @embedFile("sigs/root.d.rv"), @import("root.zig").root_impls),
     Group.init("os", @embedFile("sigs/os.d.rv"), @import("root.zig").os_impls),
     Group.init("re", @embedFile("sigs/re.d.rv"), if (regex_on) @import("regex.zig").impls else &.{}),
+    Group.init("ffi", @embedFile("sigs/ffi.d.rv"), if (ffi_on) @import("ffi_lib.zig").impls else &.{}),
     Group.init("number", @embedFile("sigs/number.d.rv"), @import("number.zig").impls),
     Group.init("string", @embedFile("sigs/string.d.rv"), @import("string.zig").impls),
     Group.init("table", @embedFile("sigs/table.d.rv"), @import("table.zig").impls),

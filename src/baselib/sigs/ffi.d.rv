@@ -1,0 +1,13 @@
+#! dynamic c calls, posix only !#
+
+#* open a shared library, returns a handle *#
+pub declare ffi.load = fn(path: string) -> any
+
+#* declare a c function, call the handle: return type + arg types as atoms *#
+pub declare ffi.func = fn(lib: any, name: string, ret: atom, args: table) -> any
+
+#* declare a variadic c function: fixed prefix types + total count *#
+pub declare ffi.varfunc = fn(lib: any, name: string, ret: atom, fixed: table, total: number) -> any
+
+#* errno from the last ffi call on this vm *#
+pub declare ffi.errno = fn() -> number
