@@ -383,6 +383,8 @@ fn sliceRange(args: []const Value, vm: *VM) !HostResult {
         args[2].asNumOpt() orelse return .errType(2, "integer num", typeof(args[2], vm))
     else
         @as(f64, @floatFromInt(alen));
+    if (start_num < 0.0 or end_num < 0.0) return .errAssertionFailed("range cannot be negative");
+    if (start_num > end_num) return .errAssertionFailed("range start cannot be greater than end");
     const start_isize = root.host.numToInt(isize, start_num) orelse return .errType(1, "integer num", typeof(args[1], vm));
     const end_isize = root.host.numToInt(isize, end_num) orelse return .errType(2, "integer num", typeof(args[2], vm));
     const lo: usize = @intCast(@max(start_isize, 0));

@@ -1,18 +1,18 @@
 #!
-global number helpers, calllable as `1337:is_nan?` and `number.is_nan?(1337)`
+global number helpers, calllable as `1337:nan?` and `number.nan?(1337)`
 !#
 
 #* converts value to number: number("12") => 12 *#
 pub declare number.__call = fn(value: string) -> number
 
 #* checks if number is NaN *#
-pub declare number.is_nan? = fn(self: number) -> bool
+pub declare number.nan? = fn(self: number) -> bool
 
 #* checks if number is finite *#
-pub declare number.is_finite? = fn(self: number) -> bool
+pub declare number.finite? = fn(self: number) -> bool
 
 #* checks if number is infinite *#
-pub declare number.is_inf? = fn(self: number) -> bool
+pub declare number.inf? = fn(self: number) -> bool
 
 #* largest integer <= self *#
 pub declare number.floor = fn(self: number) -> number
@@ -25,4 +25,3 @@ pub declare number.round = fn(self: number) -> number
 
 #* absolute value *#
 pub declare number.abs = fn(self: number) -> number
-

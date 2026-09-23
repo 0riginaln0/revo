@@ -198,7 +198,7 @@ pub const Impl = struct {
         return ._bool(std.mem.endsWith(u8, str, sfx));
     }
 
-    pub fn @"is_upper?"(vm: *VM, self: Args.string) !HostResult {
+    pub fn @"upper?"(vm: *VM, self: Args.string) !HostResult {
         const str = vm.stringValue(@intFromEnum(self));
         if (str.len == 0) return ._bool(false);
         for (str) |char| {
@@ -207,11 +207,47 @@ pub const Impl = struct {
         return ._bool(true);
     }
 
-    pub fn @"is_lower?"(vm: *VM, self: Args.string) !HostResult {
+    pub fn @"lower?"(vm: *VM, self: Args.string) !HostResult {
         const str = vm.stringValue(@intFromEnum(self));
         if (str.len == 0) return ._bool(false);
         for (str) |char| {
             if (!std.ascii.isLower(char)) return ._bool(false);
+        }
+        return ._bool(true);
+    }
+
+    pub fn @"alnum?"(vm: *VM, self: Args.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(self));
+        if (str.len == 0) return ._bool(false);
+        for (str) |char| {
+            if (!std.ascii.isAlphanumeric(char)) return ._bool(false);
+        }
+        return ._bool(true);
+    }
+
+    pub fn @"alpha?"(vm: *VM, self: Args.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(self));
+        if (str.len == 0) return ._bool(false);
+        for (str) |char| {
+            if (!std.ascii.isAlphabetic(char)) return ._bool(false);
+        }
+        return ._bool(true);
+    }
+
+    pub fn @"whitespace?"(vm: *VM, self: Args.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(self));
+        if (str.len == 0) return ._bool(false);
+        for (str) |char| {
+            if (!std.ascii.isWhitespace(char)) return ._bool(false);
+        }
+        return ._bool(true);
+    }
+
+    pub fn @"punct?"(vm: *VM, self: Args.string) !HostResult {
+        const str = vm.stringValue(@intFromEnum(self));
+        if (str.len == 0) return ._bool(false);
+        for (str) |char| {
+            if (!std.ascii.isPunctuation(char)) return ._bool(false);
         }
         return ._bool(true);
     }
@@ -233,10 +269,10 @@ test "string metatable" {
 test "string methods" {
     try testing.topTrue("\"hello\":contains?(\"ell\")");
     try testing.topFalse("\"hello\":contains?(\"xyz\")");
-    try testing.topTrue("\"HELLO\":is_upper?()");
-    try testing.topFalse("\"Hello\":is_upper?()");
-    try testing.topTrue("\"hello\":is_lower?()");
-    try testing.topFalse("\"Hello\":is_lower?()");
+    try testing.topTrue("\"HELLO\":upper?()");
+    try testing.topFalse("\"Hello\":upper?()");
+    try testing.topTrue("\"hello\":lower?()");
+    try testing.topFalse("\"Hello\":lower?()");
     try testing.topFalse("\"hello\":contains?(\"xyz\")");
     try testing.topNumber("\"hello\":index_of(\"ll\")", 2);
     try testing.topString("string.of_ascii(97)", "a");
