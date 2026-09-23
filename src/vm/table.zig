@@ -374,8 +374,9 @@ pub const Table = struct {
         }
 
         pub fn removeAndReturn(self: *HashPart, key: Value, vm: *revo.VM) ?Value {
-            const idx = self.remove(key, vm) orelse return null;
-            return self.buckets[idx].value;
+            const val = self.get(key, vm) orelse return null;
+            _ = self.remove(key, vm);
+            return val;
         }
 
         fn clone(self: *const HashPart, alloc: std.mem.Allocator) !HashPart {
