@@ -1304,8 +1304,7 @@ pub const Compiler = struct {
         fn_name: []const u8,
         args: []const *Node,
     ) InternalCompileError![]const *Node {
-        const fn_state = state_mod.currentFunctionState(self) orelse return args;
-        const sig = fn_state.fn_signatures.get(fn_name) orelse return args;
+        const sig = state_mod.findFnSignature(self, fn_name) orelse return args;
         const reordered_args = try tryReorderNamedParams(self, args, sig);
         var had_error = false;
 

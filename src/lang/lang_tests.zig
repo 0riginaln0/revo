@@ -2820,6 +2820,24 @@ test "optional params with typed function" {
     , 10);
 }
 
+test "default args fill through nested calls" {
+    try t.topFalse(
+        \\ const x = fn(a, b = :false) b
+        \\ const y = fn(a) x(a)
+        \\ y(1)
+    );
+    try t.topAtom(
+        \\ const x = fn(a, b = :outer) b
+        \\ const y = fn(a) x(a)
+        \\ y(1)
+    , "outer");
+    try t.topTrue(
+        \\ const x = fn(a, b = :false) b
+        \\ const y = fn(a) x(a, :true)
+        \\ y(1)
+    );
+}
+
 //
 // module system
 //

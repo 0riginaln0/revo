@@ -1,7 +1,7 @@
 #!/usr/bin/env revo
 
 # libc right through ffi
-not yet fully done, but exists
+will later be backed by parsing c declarations
 
 !#
 
