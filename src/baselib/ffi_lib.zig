@@ -21,7 +21,7 @@ const HostResult = root.host.HostResult;
 const Args = root.host.ArgTypes;
 const fdesc = @import("ffi.zig");
 
-extern "c" fn ffi_errno_location() *c_int;
+extern "c" fn __errno_location() *c_int;
 extern "c" fn __error() *c_int;
 
 const max_args = 16;
@@ -211,7 +211,7 @@ fn ffiCallFn(args: []const Value, vm: *VM) !HostResult {
     c.ffi_call(use_cif, @ptrCast(@alignCast(box.sym.?)), &retbuf, &ptrs);
     vm.ffi_errno = switch (builtin.target.os.tag) {
         .macos, .freebsd, .openbsd => __error().*,
-        else => ffi_errno_location().*,
+        else => __errno_location().*,
     };
 
     return switch (box.ret) {
