@@ -50,7 +50,13 @@ fn boxed(tag: RevoType, id: u64) -> RevoValue {
 
 /// interned ids are never 0, so 0 means the call failed
 fn intern_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
-    let id = unsafe { revo_intern(c_void_ptr(vm_ptr), s.as_ptr() as *const std::ffi::c_char, s.len()) };
+    let id = unsafe {
+        revo_intern(
+            c_void_ptr(vm_ptr),
+            s.as_ptr() as *const std::ffi::c_char,
+            s.len(),
+        )
+    };
     if id == 0 {
         return Err(format!("failed to intern string {s:?}"));
     }
@@ -58,7 +64,13 @@ fn intern_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
 }
 
 fn intern_atom_raw(vm_ptr: *mut ErevoVM, s: &str) -> Result<u64, String> {
-    let id = unsafe { revo_intern_atom(c_void_ptr(vm_ptr), s.as_ptr() as *const std::ffi::c_char, s.len()) };
+    let id = unsafe {
+        revo_intern_atom(
+            c_void_ptr(vm_ptr),
+            s.as_ptr() as *const std::ffi::c_char,
+            s.len(),
+        )
+    };
     if id == 0 {
         return Err(format!("failed to intern atom {s:?}"));
     }
@@ -108,7 +120,7 @@ impl<'vm> Program<'vm> {
 
         let ok = unsafe { erevo_run(self.vm_ptr, self.ptr, &mut data) };
 
-        if ok == 0 {
+        if !ok {
             return Err(last_error_ptr(self.vm_ptr));
         }
 
@@ -170,7 +182,7 @@ impl VM {
 
         let ok = unsafe { erevo_eval(self.ptr, name_c.as_ptr(), src_c.as_ptr(), &mut data) };
 
-        if ok == 0 {
+        if !ok {
             return Err(self.last_error());
         }
 
@@ -179,14 +191,27 @@ impl VM {
 
     /// read back a global; missing names come back as `:nil`
     pub fn get_global(&self, name: &str) -> Result<Value, String> {
-        let raw = unsafe { revo_getglobal(c_void_ptr(self.ptr), name.as_ptr() as *const std::ffi::c_char, name.len()) };
+        let raw = unsafe {
+            revo_getglobal(
+                c_void_ptr(self.ptr),
+                name.as_ptr() as *const std::ffi::c_char,
+                name.len(),
+            )
+        };
         Value::from_raw(self.ptr, raw).map_err(|e| e.to_string())
     }
 
     /// bind a name to a value on the vm
     pub fn set_global(&mut self, name: &str, val: &Value) -> Result<(), String> {
         let raw = val.to_raw(self)?;
-        unsafe { revo_setglobal(c_void_ptr(self.ptr), name.as_ptr() as *const std::ffi::c_char, name.len(), raw) };
+        unsafe {
+            revo_setglobal(
+                c_void_ptr(self.ptr),
+                name.as_ptr() as *const std::ffi::c_char,
+                name.len(),
+                raw,
+            )
+        };
         Ok(())
     }
 
@@ -218,7 +243,7 @@ impl VM {
                 &mut out,
             )
         };
-        if ok == 0 {
+        if !ok {
             return Err(err_or_unknown(self.ptr));
         }
         Value::from_raw(self.ptr, out).map_err(|e| e.to_string())
@@ -433,7 +458,7 @@ impl<'vm> Table<'vm> {
         let key_raw = key.to_raw_in(self.vm_ptr)?;
         let mut out: RevoValue = 0;
         let ok = unsafe { revo_table_get(self.c_ptr(), self.raw, key_raw, &mut out) };
-        if ok == 0 {
+        if !ok {
             return Ok(None);
         }
 
@@ -447,7 +472,7 @@ impl<'vm> Table<'vm> {
         let val_raw = val.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_set(self.c_ptr(), self.raw, key_raw, val_raw) };
 
-        if ok == 0 {
+        if !ok {
             return Err(err_or_unknown(self.vm_ptr));
         }
         Ok(())
@@ -458,14 +483,14 @@ impl<'vm> Table<'vm> {
         let key_raw = key.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_remove(self.c_ptr(), self.raw, key_raw) };
 
-        Ok(ok != 0)
+        Ok(ok)
     }
 
     /// array indexing
     pub fn get_idx(&self, idx: u64) -> Result<Option<Value>, String> {
         let mut out: RevoValue = 0;
         let ok = unsafe { revo_table_get_idx(self.c_ptr(), self.raw, idx, &mut out) };
-        if ok == 0 {
+        if !ok {
             return Ok(None);
         }
         Ok(Some(
@@ -476,7 +501,7 @@ impl<'vm> Table<'vm> {
     pub fn push(&mut self, val: &Value) -> Result<(), String> {
         let val_raw = val.to_raw_in(self.vm_ptr)?;
         let ok = unsafe { revo_table_push(self.c_ptr(), self.raw, val_raw) };
-        if ok == 0 {
+        if !ok {
             return Err(err_or_unknown(self.vm_ptr));
         }
         Ok(())
@@ -494,7 +519,7 @@ impl<'vm> Table<'vm> {
                 &mut out,
             )
         };
-        if ok == 0 {
+        if !ok {
             return Ok(None);
         }
         Ok(Some(
@@ -513,7 +538,7 @@ impl<'vm> Table<'vm> {
                 val_raw,
             )
         };
-        if ok == 0 {
+        if !ok {
             return Err(err_or_unknown(self.vm_ptr));
         }
         Ok(())
