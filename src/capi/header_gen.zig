@@ -230,11 +230,3 @@ fn cTypeCtx(zig: []const u8, fn_name: []const u8, param_name: ?[]const u8) ![]co
     }
     return error.UnmappedType;
 }
-
-/// unmapped types are a hard error
-///
-/// passing zig syntax through into a .h is never what you want
-/// add the type to `c_types` instead
-fn cType(zig: []const u8) ![]const u8 {
-    return cTypeCtx(zig, "<unknown>", null);
-}

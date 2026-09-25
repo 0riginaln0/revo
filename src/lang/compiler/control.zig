@@ -1143,13 +1143,54 @@ fn compileShortCircuit(self: *Compiler, left: *const Node, right: *const Node, s
 
     try self.regRelease();
     const left_inst = try self.pop();
+    const left_reg: Register = left_inst.result_reg;
 
     try self.compile(right, true);
+    const right_inst = try self.pop();
+    const right_reg: Register = right_inst.result_reg;
+
+    //
+    // left and right usually share the same register because
+    //   active_registers is restored before compiling right
+    //
+    // but slot pinning (reserveLocalSlots / popRegister clamping to dead local slots)
+    //   can push right above left, leaving the join to test garbage on the short path
+    //
+    // without this (check git blame):
+    //
+    //   load r11, has_id
+    //   jump_if_false r11 -> L91   # short skips right, r13 garbage
+    //   load r13, has_classes
+    //   not r13
+    //   move r11, r13  # missing before fix
+    //   L91: jump_if_false r13 ... # tested garbage
+    //
+    // copy right down so both paths leave the result in left_reg
+    //
+    var result_inst = left_inst;
+    if (right_reg != left_reg) {
+        try self.spans.append(self.alloc, self.active_span);
+        result_inst = try self.record(
+            .move,
+            &.{.{ .inst = right_inst }},
+            true,
+            left_reg,
+            0,
+        );
+        // drop pushed move so end jump patching sees a the stack it needs
+        // its reappended below after active is fixed
+        _ = try self.pop();
+    }
+
     const end = try self.jump(.jump);
 
     self.patchJump(short);
     self.patchJump(end);
-    try self.value_stack.append(self.alloc, left_inst);
+    try self.value_stack.append(self.alloc, result_inst);
+
+    self.active_registers = @as(usize, left_reg) + 1;
+    if (self.max_registers < self.active_registers)
+        self.max_registers = self.active_registers;
 }
 
 pub fn compileAnd(self: *Compiler, left: *const Node, right: *const Node) !void {

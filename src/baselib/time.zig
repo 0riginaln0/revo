@@ -22,7 +22,6 @@ pub const Impl = struct {
     }
 };
 
-const Args = root.host.ArgTypes;
 pub const impls = root.host.impls(Impl).val;
 
 test "time module works probably" {

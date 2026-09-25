@@ -283,6 +283,7 @@ pub fn predeclare(self: *Compiler, exprs: []const *Node) !void {
             else => {},
         }
     }
+    reserveLocalSlots(self);
 }
 
 pub fn resolveLocalVarIn(self: *Compiler, fn_idx: usize, name: []const u8) ?LocalVar {
