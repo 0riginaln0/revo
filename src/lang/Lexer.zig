@@ -182,6 +182,48 @@ pub const InterpOpen = struct {
     idx: usize,
 };
 
+const InterpScan = struct {
+    depth: usize = 0,
+    quote: u8 = 0,
+    escaped: bool = false,
+
+    fn inBody(self: InterpScan) bool {
+        return self.depth > 0;
+    }
+
+    fn isQuote(self: InterpScan) bool {
+        return self.quote != 0;
+    }
+
+    fn open(self: *InterpScan) void {
+        self.depth += 1;
+    }
+
+    fn push(self: *InterpScan, c: u8) void {
+        if (!self.inBody()) return;
+        if (self.inQuote()) {
+            if (self.escaped) {
+                self.escaped = false;
+            } else if (c == '\\') {
+                self.escaped = true;
+            } else if (c == self.quote) {
+                self.quote = 0;
+            }
+        }
+
+        switch (c) {
+            '"', '\'', '`' => self.quote = c,
+            '{' => self.depth += 1,
+            '}' => self.depth -= 1,
+            else => {},
+        }
+    }
+
+    fn pushSlice(self: *InterpScan, bytes: []const u8) void {
+        for (bytes) |c| self.push(c);
+    }
+};
+
 /// absolute src pos please
 pub const Origin = struct {
     offset: usize = 0,
@@ -645,9 +687,8 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
     defer buf.deinit(self.alloc);
     var interp_opens = try std.ArrayList(InterpOpen).initCapacity(self.alloc, 2);
     defer interp_opens.deinit(self.alloc);
-    // decoded `"` (from \" escapes) opens a nested string; braces inside it
-    // are literal, matching interpolationEnd's quote handling
-    var quote: u8 = 0;
+
+    var scan: InterpScan = .{};
     while (!self.atEnd()) {
         const c = self.advance();
         if (c == '\\') {
@@ -659,7 +700,7 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
                     while (self.pos < offset) _ = self.advance();
                     var enc: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(lit, &enc) catch return error.UnterminatedString;
-                    if (lit == '"') quote = if (quote == 0) '"' else 0;
+                    scan.pushSlice(enc[0..n]);
                     try buf.appendSlice(self.alloc, enc[0..n]);
                 },
                 .failure => {
@@ -667,14 +708,17 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
                     if (from + 2 < self.source.len and
                         self.source[from + 1] == '#' and self.source[from + 2] == '{')
                     {
+                        scan.pushSlice("#{");
                         try buf.appendSlice(self.alloc, "#{");
                         _ = self.advance();
                         _ = self.advance();
                         continue;
                     }
                     try buf.append(self.alloc, '\\');
+                    scan.push('\\');
                     _ = self.advance();
                     try buf.append(self.alloc, self.source[self.pos - 1]);
+                    scan.push(self.source[self.pos - 1]);
                 },
             }
             continue;
@@ -693,8 +737,9 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
                 .end = self.pos + self.base_offset,
             };
         }
-        if (quote != 0) {
+        if (scan.inQuote()) {
             try buf.append(self.alloc, c);
+            scap.push(c);
             continue;
         }
         if (c == '#') {
@@ -709,25 +754,22 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
                     .idx = buf.items.len,
                 });
                 try buf.append(self.alloc, '{');
+                scan.open();
                 continue;
             }
             try buf.append(self.alloc, c);
             continue;
         }
-        if (c == '{') {
-            if (!self.atEnd() and self.peek() == '{') {
-                try buf.append(self.alloc, '{');
-                _ = self.advance();
-                continue;
-            }
-        } else if (c == '}') {
-            if (!self.atEnd() and self.peek() == '}') {
-                try buf.append(self.alloc, '}');
-                _ = self.advance();
-                continue;
+        if (!scan.inBody()              and
+            (c == '{' or c == '}')      and
+            (!self.atEnd() and self.peek() == c)) {
+                    try buf.append(self.alloc, c);
+                    _ = self.advance();
+                    continue;
             }
         }
         try buf.append(self.alloc, c);
+        scan.push(c);
     }
     return error.UnterminatedString;
 }
@@ -771,7 +813,7 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
     defer interp_opens.deinit(self.alloc);
     // decoded `"` (from \" escapes) opens a nested string; braces inside it
     // are literal, matching interpolationEnd's quote handling
-    var quote: u8 = 0;
+    var scan: InterpScan = .{};
     while (!self.atEnd()) {
         if (self.peek() == '"' and self.peekN(1) == '"' and self.peekN(2) == '"') {
             _ = self.advance();
@@ -821,6 +863,7 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
                     var enc: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(lit, &enc) catch return error.UnterminatedString;
                     if (lit == '"') quote = if (quote == 0) '"' else 0;
+                    scan.pushSlice(enc[0..n]);
                     try buf.appendSlice(self.alloc, enc[0..n]);
                 },
                 .failure => {
@@ -828,20 +871,24 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
                     if (from + 2 < self.source.len and
                         self.source[from + 1] == '#' and self.source[from + 2] == '{')
                     {
+                        scan.pushSlice("#{");
                         try buf.appendSlice(self.alloc, "#{");
                         _ = self.advance();
                         _ = self.advance();
                         continue;
                     }
                     try buf.append(self.alloc, '\\');
+                    scan.push('\\');
                     _ = self.advance();
                     try buf.append(self.alloc, self.source[self.pos - 1]);
+                    scan.push(self.source[self.pos - 1]);
                 },
             }
             continue;
         }
-        if (quote != 0) {
+        if (scan.inQuote()) {
             try buf.append(self.alloc, c);
+            scan.push(c);
             continue;
         }
         if (c == '#') {
@@ -856,25 +903,19 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
                     .idx = buf.items.len,
                 });
                 try buf.append(self.alloc, '{');
+                scan.open();
                 continue;
             }
             try buf.append(self.alloc, c);
             continue;
         }
-        if (c == '{') {
-            if (!self.atEnd() and self.peek() == '{') {
-                try buf.append(self.alloc, '{');
-                _ = self.advance();
-                continue;
-            }
-        } else if (c == '}') {
-            if (!self.atEnd() and self.peek() == '}') {
-                try buf.append(self.alloc, '}');
-                _ = self.advance();
-                continue;
-            }
+        if ((c == '{' or c == '}') and !scan.inBody() and !self.atEnd() and self.peek() == c) {
+            try buf.append(self.alloc, c);
+            _ = self.advance();
+            continue;
         }
         try buf.append(self.alloc, c);
+        scan.push(c);
     }
     return error.UnterminatedString;
 }
