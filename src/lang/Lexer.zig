@@ -1035,7 +1035,7 @@ pub fn isIdentContinue(c: u8) bool {
 
 pub fn isSymbolAtomStart(c: u8) bool {
     return switch (c) {
-        '-', '+', '*', '/', '=', '<', '>', '.', '@', '$', '~', '^', '?', '!' => true,
+        '-', '+', '*', '/', '=', '<', '>', '.', '@', '$', '~', '^', '?', '!', '#' => true,
         else => false,
     };
 }
