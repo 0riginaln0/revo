@@ -35,6 +35,8 @@ pub fn deinitBytecode(alloc: std.mem.Allocator, bytecode: pipeline.Bytecode) voi
 }
 
 /// merge two error reports into one (dedup span parts by range+message)
+///
+/// parts get copied, callers can free both inputs right after
 pub fn mergeReports(alloc: std.mem.Allocator, a: pipeline.Error, b: pipeline.Error) !diagnostic.Report {
     const a_report = switch (a) {
         .parse => |f| f.report,
@@ -50,7 +52,9 @@ pub fn mergeReports(alloc: std.mem.Allocator, a: pipeline.Error, b: pipeline.Err
     };
     const total = a_report.parts.len + b_report.parts.len;
     var all_parts = try std.ArrayList(diagnostic.Part).initCapacity(alloc, total);
-    for (a_report.parts) |p| all_parts.appendAssumeCapacity(p);
+
+    errdefer for (all_parts.items) |part| part.deinit(alloc);
+    for (a_report.parts) |p| try all_parts.append(alloc, try p.copy(alloc));
     for (b_report.parts) |p| {
         var dup = false;
         if (p == .span) {
@@ -73,7 +77,7 @@ pub fn mergeReports(alloc: std.mem.Allocator, a: pipeline.Error, b: pipeline.Err
                 }
             }
         }
-        if (!dup) all_parts.appendAssumeCapacity(p);
+        if (!dup) try all_parts.append(alloc, try p.copy(alloc));
     }
     const message = if (a_report.message.len > 0)
         try alloc.dupe(u8, a_report.message)

@@ -61,6 +61,73 @@ pub const Part = union(enum) {
     note: []const u8,
     suggestion: Suggestion,
     trace: TraceFrame,
+
+    pub fn copy(part: Part, alloc: std.mem.Allocator) !Part {
+        return switch (part) {
+            .@"error" => |err| .{ .@"error" = try alloc.dupe(u8, err) },
+            .tip => |tip| .{ .tip = try alloc.dupe(u8, tip) },
+            .warn => |warn| .{ .warn = try alloc.dupe(u8, warn) },
+            .note => |note| .{ .note = try alloc.dupe(u8, note) },
+            .suggestion => |sug| blk: {
+                var c = sug;
+                c.message = try alloc.dupe(u8, sug.message);
+                errdefer alloc.free(c.message);
+                c.replacement = try alloc.dupe(u8, sug.replacement);
+                break :blk .{ .suggestion = c };
+            },
+            .span => |span| blk: {
+                var c = span;
+                c.message = try alloc.dupe(u8, span.message);
+                errdefer alloc.free(c.message);
+                if (span.source_name) |sn| {
+                    c.source_name = try alloc.dupe(u8, sn);
+                    errdefer alloc.free(c.source_name.?);
+                }
+                if (span.source) |src| {
+                    c.source = try alloc.dupe(u8, src);
+                    errdefer alloc.free(c.source.?);
+                }
+                break :blk .{ .span = c };
+            },
+            .trace => |frame| blk: {
+                var c = frame;
+                c.function_name = try alloc.dupe(u8, frame.function_name);
+                errdefer alloc.free(c.function_name);
+                if (frame.source_name) |sn| {
+                    c.source_name = try alloc.dupe(u8, sn);
+                    errdefer alloc.free(c.source_name.?);
+                }
+                if (frame.source) |src| {
+                    c.source = try alloc.dupe(u8, src);
+                    errdefer alloc.free(c.source.?);
+                }
+                break :blk .{ .trace = c };
+            },
+        };
+    }
+
+    pub fn deinit(part: Part, alloc: std.mem.Allocator) void {
+        switch (part) {
+            .@"error" => |err| alloc.free(err),
+            .tip => |tip| alloc.free(tip),
+            .warn => |warn| alloc.free(warn),
+            .note => |note| alloc.free(note),
+            .suggestion => |sug| {
+                if (sug.message.len != 0) alloc.free(sug.message);
+                if (sug.replacement.len != 0) alloc.free(sug.replacement);
+            },
+            .span => |span| {
+                if (span.message.len != 0) alloc.free(span.message);
+                if (span.source_name) |sn| alloc.free(sn);
+                if (span.source) |src| alloc.free(src);
+            },
+            .trace => |trace| {
+                if (trace.function_name.len != 0) alloc.free(trace.function_name);
+                if (trace.source_name) |sn| alloc.free(sn);
+                if (trace.source) |src| alloc.free(src);
+            },
+        }
+    }
 };
 
 /// an actionable edit: replacement text for span, empty span inserts
@@ -90,26 +157,7 @@ pub const Report = struct {
         if (self.source_name) |sn| alloc.free(sn);
         if (self.source) |src| alloc.free(src);
 
-        for (self.parts) |part| switch (part) {
-            .@"error" => |err| alloc.free(err),
-            .tip => |tip| alloc.free(tip),
-            .warn => |warn| alloc.free(warn),
-            .note => |note| alloc.free(note),
-            .suggestion => |sug| {
-                if (sug.message.len != 0) alloc.free(sug.message);
-                if (sug.replacement.len != 0) alloc.free(sug.replacement);
-            },
-            .span => |span| {
-                if (span.message.len != 0) alloc.free(span.message);
-                if (span.source_name) |sn| alloc.free(sn);
-                if (span.source) |src| alloc.free(src);
-            },
-            .trace => |trace| {
-                alloc.free(trace.function_name);
-                if (trace.source_name) |sn| alloc.free(sn);
-                if (trace.source) |src| alloc.free(src);
-            },
-        };
+        for (self.parts) |part| part.deinit(alloc);
         alloc.free(self.parts);
     }
 
@@ -118,34 +166,17 @@ pub const Report = struct {
         const message = try alloc.dupe(u8, report.message);
         errdefer alloc.free(message);
         const parts = try alloc.dupe(Part, report.parts);
-        errdefer alloc.free(parts);
+        // unswapped parts still point at the source report, free only ours
+        var done: usize = 0;
+        errdefer {
+            for (parts[0..done]) |part| part.deinit(alloc);
+            alloc.free(parts);
+        }
 
-        for (parts) |*part| switch (part.*) {
-            .@"error" => |err| part.* = .{ .@"error" = try alloc.dupe(u8, err) },
-            .tip => |tip| part.* = .{ .tip = try alloc.dupe(u8, tip) },
-            .warn => |warn| part.* = .{ .warn = try alloc.dupe(u8, warn) },
-            .note => |note| part.* = .{ .note = try alloc.dupe(u8, note) },
-            .suggestion => |sug| {
-                var c = sug;
-                if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
-                if (c.replacement.len != 0) c.replacement = try alloc.dupe(u8, c.replacement);
-                part.* = .{ .suggestion = c };
-            },
-            .span => |span| {
-                var c = span;
-                if (c.message.len != 0) c.message = try alloc.dupe(u8, c.message);
-                if (c.source_name) |sn| c.source_name = try alloc.dupe(u8, sn);
-                if (c.source) |src| c.source = try alloc.dupe(u8, src);
-                part.* = .{ .span = c };
-            },
-            .trace => |frame| {
-                var c = frame;
-                c.function_name = try alloc.dupe(u8, c.function_name);
-                if (c.source_name) |sn| c.source_name = try alloc.dupe(u8, sn);
-                if (c.source) |src| c.source = try alloc.dupe(u8, src);
-                part.* = .{ .trace = c };
-            },
-        };
+        for (parts, 0..) |*part, i| {
+            part.* = try part.copy(alloc);
+            done = i + 1;
+        }
 
         return .{
             .parts = parts,
@@ -916,28 +947,9 @@ test "report copy preserves multiple error parts" {
 
     const copied = try report.copy(alloc);
     defer {
-        alloc.free(copied.message);
-        for (copied.parts) |part| switch (part) {
-            .@"error" => |msg| alloc.free(msg),
-            .span => |span| {
-                if (span.message.len != 0) alloc.free(span.message);
-                if (span.source_name) |sn| alloc.free(sn);
-                if (span.source) |src| alloc.free(src);
-            },
-            .tip => |tip| alloc.free(tip),
-            .warn => |warn| alloc.free(warn),
-            .note => |note| alloc.free(note),
-            .suggestion => |sug| {
-                if (sug.message.len != 0) alloc.free(sug.message);
-                if (sug.replacement.len != 0) alloc.free(sug.replacement);
-            },
-            .trace => |trace| {
-                alloc.free(trace.function_name);
-                if (trace.source_name) |sn| alloc.free(sn);
-                if (trace.source) |src| alloc.free(src);
-            },
-        };
+        for (copied.parts) |part| part.deinit(alloc);
         alloc.free(copied.parts);
+        alloc.free(copied.message);
     }
 
     try std.testing.expectEqualStrings("first problem", copied.message);

@@ -217,7 +217,8 @@ pub fn diagnosticsWithWarnings(
         },
         else => |e| return e,
     };
-    errdefer full.deinit(alloc);
+    // every return below hands off the reports it keeps, so drop the rest
+    defer full.deinit(alloc);
 
     if (full.diagnostics) |full_diag| {
         if (sem_diag) |sem_d| {
@@ -225,6 +226,7 @@ pub fn diagnosticsWithWarnings(
             // errorKind hardly matters for display
             full.diagnostics = null;
             pipeline.deinitError(alloc, sem_d);
+            pipeline.deinitError(alloc, full_diag);
             sem_diag = null;
             const warnings = full.warnings;
             full.warnings = null;
