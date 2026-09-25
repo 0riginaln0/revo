@@ -191,7 +191,7 @@ const InterpScan = struct {
         return self.depth > 0;
     }
 
-    fn isQuote(self: InterpScan) bool {
+    fn inQuote(self: InterpScan) bool {
         return self.quote != 0;
     }
 
@@ -209,6 +209,7 @@ const InterpScan = struct {
             } else if (c == self.quote) {
                 self.quote = 0;
             }
+            return;
         }
 
         switch (c) {
@@ -687,7 +688,8 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
     defer buf.deinit(self.alloc);
     var interp_opens = try std.ArrayList(InterpOpen).initCapacity(self.alloc, 2);
     defer interp_opens.deinit(self.alloc);
-
+    // inside an interpolation body a decoded quote opens a nested string whose
+    // braces are literal, matching interpolationEnd's quote handling
     var scan: InterpScan = .{};
     while (!self.atEnd()) {
         const c = self.advance();
@@ -739,7 +741,7 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
         }
         if (scan.inQuote()) {
             try buf.append(self.alloc, c);
-            scap.push(c);
+            scan.push(c);
             continue;
         }
         if (c == '#') {
@@ -760,13 +762,10 @@ fn lexString(self: *Lexer, start: usize, line: u32, column: u32) !Token {
             try buf.append(self.alloc, c);
             continue;
         }
-        if (!scan.inBody()              and
-            (c == '{' or c == '}')      and
-            (!self.atEnd() and self.peek() == c)) {
-                    try buf.append(self.alloc, c);
-                    _ = self.advance();
-                    continue;
-            }
+        if ((c == '{' or c == '}') and !scan.inBody() and !self.atEnd() and self.peek() == c) {
+            try buf.append(self.alloc, c);
+            _ = self.advance();
+            continue;
         }
         try buf.append(self.alloc, c);
         scan.push(c);
@@ -811,8 +810,8 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
     defer buf.deinit(self.alloc);
     var interp_opens = try std.ArrayList(InterpOpen).initCapacity(self.alloc, 2);
     defer interp_opens.deinit(self.alloc);
-    // decoded `"` (from \" escapes) opens a nested string; braces inside it
-    // are literal, matching interpolationEnd's quote handling
+    // inside an interpolation body a decoded quote opens a nested string whose
+    // braces are literal, matching interpolationEnd's quote handling
     var scan: InterpScan = .{};
     while (!self.atEnd()) {
         if (self.peek() == '"' and self.peekN(1) == '"' and self.peekN(2) == '"') {
@@ -862,7 +861,6 @@ fn lexMultilineString(self: *Lexer, start: usize, line: u32, column: u32) !Token
                     while (self.pos < offset) _ = self.advance();
                     var enc: [4]u8 = undefined;
                     const n = std.unicode.utf8Encode(lit, &enc) catch return error.UnterminatedString;
-                    if (lit == '"') quote = if (quote == 0) '"' else 0;
                     scan.pushSlice(enc[0..n]);
                     try buf.appendSlice(self.alloc, enc[0..n]);
                 },
