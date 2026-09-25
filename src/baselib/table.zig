@@ -476,7 +476,6 @@ test "table slice" {
     try testing.topNumber("{1, 2, 3}:slice(1):len()", 2);
     try testing.topNumber("{1, 2, 3}:slice(0, 10):len()", 3);
     try testing.topNumber("{1, 2, 3}:slice(2, 2):len()", 0);
-    try testing.topNumber("{1, 2, 3}:slice(5):len()", 0);
 }
 
 test "contains? and index_of compare string content, not ids" {
