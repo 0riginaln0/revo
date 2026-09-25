@@ -980,7 +980,8 @@ test "parseGroup accepts resource params and method heads" {
     try testing.expectEqualStrings("close", specs[1].name);
 }
 
-fn renderAlloc(alloc: std.mem.Allocator, spec: FnSpec) ![]const u8 {    var buf = std.Io.Writer.Allocating.init(alloc);
+fn renderAlloc(alloc: std.mem.Allocator, spec: FnSpec) ![]const u8 {
+    var buf = std.Io.Writer.Allocating.init(alloc);
     defer buf.deinit();
     try renderSignature(&buf.writer, spec);
     return alloc.dupe(u8, buf.written());
