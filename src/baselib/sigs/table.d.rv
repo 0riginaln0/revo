@@ -108,6 +108,9 @@ pub declare table.len = fn(self: table) -> num
 #* returns length of table array part only *#
 pub declare table.alen = fn(self: table) -> num
 
+#* returns length of table keyed entries only *#
+pub declare table.klen = fn(self: table) -> num
+
 #* reports whether the table holds no entries at all *#
 pub declare table.empty? = fn(self: table) -> bool
 

@@ -84,6 +84,14 @@ pub export fn revo_table_alen(vm_ptr: *anyopaque, table: Value) callconv(.c) u64
     return @intCast(tbl.array.items.len);
 }
 
+/// keyed entries length, 0 for non-tables
+pub export fn revo_table_klen(vm_ptr: *anyopaque, table: Value) callconv(.c) u64 {
+    const v: *VM = @ptrCast(@alignCast(vm_ptr));
+    const tid = table.asTable() orelse return 0;
+    const tbl = v.tables.get(tid) catch return 0;
+    return @intCast(tbl.hash.count);
+}
+
 /// metatable-aware read; true and `out` set when present
 pub export fn revo_table_get(vm_ptr: *anyopaque, table: Value, key: Value, out: *Value) callconv(.c) bool {
     const v: *VM = @ptrCast(@alignCast(vm_ptr));

@@ -275,6 +275,11 @@ pub const Impl = struct {
         return .data(Value.new.num(table.array.items.len));
     }
 
+    pub fn klen(vm: *VM, self: Args.table) !HostResult {
+        const table = try vm.tables.get(@intFromEnum(self));
+        return .data(Value.new.num(table.hash.count));
+    }
+
     pub fn @"empty?"(vm: *VM, self: Args.table) !HostResult {
         const table = try vm.tables.get(@intFromEnum(self));
         return ._bool(table.count() == 0);
@@ -398,6 +403,7 @@ test "table library" {
     try testing.topNumber("{1, 2, 3}:alen()", 3);
     try testing.topNumber("{1, 2, x = 9}:alen()", 2);
     try testing.topNumber("len({1, 2, x = 9})", 3);
+    try testing.topNumber("{1, 2, x = 9}:klen()", 1);
 }
 
 test "table methods" {
