@@ -239,7 +239,6 @@ c_last_error: ?[:0]u8 = null,
 /// last foreign-call errno, read via `ffi.errno`
 ffi_errno: c_int = 0,
 /// last foreign-call errno, read via `ffi.errno`
-
 const MarkItem = union(enum) {
     data: Value,
     table: mem.TableID,

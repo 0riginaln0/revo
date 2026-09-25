@@ -20,8 +20,8 @@ const Value = mem.Value;
 const VM = revo.VM;
 const testing = revo.lang.test_helpers;
 
-pub const host = @import("host.zig");
 pub const ffi = @import("ffi.zig");
+pub const host = @import("host.zig");
 pub const specs = @import("specs.zig");
 
 pub const Impl = struct {

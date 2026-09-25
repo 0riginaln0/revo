@@ -24,9 +24,9 @@ pub const ProgramCounter = @import("VM.zig").ProgramCounter;
 pub const CoreAtoms = @import("CoreAtoms.zig").CoreAtoms;
 pub const isFalse = @import("memory.zig").isFalse;
 pub const Scheduler = @import("scheduler.zig").Scheduler;
-pub const table = @import("table.zig");
-pub const resource = @import("resource.zig");
 pub const alloc_pool = @import("alloc_pool.zig");
+pub const resource = @import("resource.zig");
+pub const table = @import("table.zig");
 pub const tests = @import("tests.zig");
 pub const VM = @import("VM.zig").VM;
 

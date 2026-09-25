@@ -9,7 +9,6 @@ const common = @import("common.zig");
 const Parser = @import("../Parser.zig");
 const pipeline = @import("../pipeline.zig");
 const txt = @import("text.zig");
-const types = @import("../compiler/types.zig");
 
 const W = @import("../Workspace.zig");
 const Workspace = W.Workspace;
