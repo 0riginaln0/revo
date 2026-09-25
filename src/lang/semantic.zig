@@ -780,6 +780,17 @@ const SemanticChecker = struct {
                 if (static_key) |key| try self.checkKnownField(idx.object, key, node.span);
                 break :blk types_mod.inferExprType(self.check(), node);
             },
+            .table => |entries| blk: {
+                for (entries) |entry| {
+                    if (entry.key) |key| {
+                        if (entry.computed or (key.expr != .ident and key.expr != .atom)) {
+                            _ = try self.analyzeNode(key);
+                        }
+                    }
+                    _ = try self.analyzeNode(entry.value);
+                }
+                break :blk types_mod.inferExprType(self.check(), node);
+            },
             .range_literal => |v| blk: {
                 _ = try self.analyzeNode(v.start);
                 _ = try self.analyzeNode(v.end);
@@ -1059,7 +1070,7 @@ const SemanticChecker = struct {
                 try self.declare(stmt.name, .{ .tag = .any }, null, .import);
                 break :blk .{ .tag = .any };
             },
-            .number, .string, .multiline_string, .atom, .nil, .table, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),
+            .number, .string, .multiline_string, .atom, .nil, .table_pattern, .quasiquote, .test_block, .test_suite, .proc_macro => types_mod.inferExprType(self.check(), node),
             .ascribed => blk: {
                 try self.appendError(
                     "type ascriptions only go in match patterns",
@@ -1280,12 +1291,11 @@ const SemanticChecker = struct {
                     }
                 }
                 if (entry.key) |key| {
-                    if (key.expr == .ident) {
-                        const field_type = try self.analyzeNode(entry.value);
-                        try fields.put(key.expr.ident, field_type);
-                    } else {
-                        _ = try self.analyzeNode(entry.value);
+                    if (entry.computed or (key.expr != .ident and key.expr != .atom)) {
+                        _ = try self.analyzeNode(key);
                     }
+                    const field_type = try self.analyzeNode(entry.value);
+                    if (key.expr == .ident) try fields.put(key.expr.ident, field_type);
                 } else {
                     const ft = try self.analyzeNode(entry.value);
                     const idx_name = try std.fmt.allocPrint(self.alloc, "{d}", .{implicit_idx});
